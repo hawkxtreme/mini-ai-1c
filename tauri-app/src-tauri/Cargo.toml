@@ -1,0 +1,42 @@
+[package]
+name = "mini-ai-1c"
+version = "0.1.0"
+description = "AI-ассистент для разработки на 1С"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "mini_ai_1c_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+dirs = "5.0"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tauri-plugin-global-shortcut = "2"
+chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-dialog = "2"
+
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse"
+] }
+clipboard-win = "5.4"
