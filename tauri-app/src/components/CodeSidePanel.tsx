@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight } from 'lucide-react';
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
+import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight, GripVertical } from 'lucide-react';
 import { DiffEditor, Editor } from '@monaco-editor/react';
 
 interface BslDiagnostic {
@@ -31,21 +31,82 @@ export function CodeSidePanel({
 }: CodeSidePanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
     const [viewMode, setViewMode] = useState<'editor' | 'diff'>('editor');
+    const [width, setWidth] = useState(500);
+    const [isResizing, setIsResizing] = useState(false);
+
+    const panelRef = useRef<HTMLDivElement>(null);
 
     const errorCount = useMemo(() => diagnostics.filter(d => d.severity === 'error').length, [diagnostics]);
     const warningCount = useMemo(() => diagnostics.filter(d => d.severity !== 'error').length, [diagnostics]);
 
+    // Handle resizing
+    const startResizing = useCallback((e: React.MouseEvent) => {
+        setIsResizing(true);
+        e.preventDefault();
+    }, []);
+
+    const stopResizing = useCallback(() => {
+        setIsResizing(false);
+    }, []);
+
+    const resize = useCallback((e: MouseEvent) => {
+        if (isResizing) {
+            const newWidth = window.innerWidth - e.clientX;
+            // Constrain width between 280 and 80% of window
+            if (newWidth > 280 && newWidth < window.innerWidth * 0.8) {
+                setWidth(newWidth);
+                if (newWidth > 400) setIsExpanded(true);
+                else setIsExpanded(false);
+            }
+        }
+    }, [isResizing]);
+
+    useEffect(() => {
+        if (isResizing) {
+            window.addEventListener('mousemove', resize);
+            window.addEventListener('mouseup', stopResizing);
+        } else {
+            window.removeEventListener('mousemove', resize);
+            window.removeEventListener('mouseup', stopResizing);
+        }
+        return () => {
+            window.removeEventListener('mousemove', resize);
+            window.removeEventListener('mouseup', stopResizing);
+        };
+    }, [isResizing, resize, stopResizing]);
+
+    // Default to max (expanded) when opened
+    useEffect(() => {
+        if (isOpen) {
+            setIsExpanded(true);
+            // Default expanded width based on screen size
+            setWidth(window.innerWidth > 1200 ? 600 : 500);
+        }
+    }, [isOpen]);
+
     if (!isOpen) return null;
 
     return (
-        <div className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-xl animate-in slide-in-from-right duration-200 transition-all ${isExpanded ? 'w-full max-w-[65vw]' : 'w-[500px] max-w-[40vw]'}`}>
+        <div
+            ref={panelRef}
+            style={{ width: isExpanded ? `${width}px` : '280px' }}
+            className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out flex-shrink-0 relative ${isResizing ? 'transition-none' : ''}`}
+        >
+            {/* Resize Handle */}
+            <div
+                onMouseDown={startResizing}
+                className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/30 transition-colors z-50 flex items-center justify-center group"
+            >
+                <div className="w-0.5 h-8 bg-zinc-700 group-hover:bg-blue-400 rounded-full opacity-0 group-hover:opacity-100" />
+            </div>
+
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[#27272a] bg-[#18181b]">
                 <div className="flex items-center gap-2">
                     <Terminal className="w-4 h-4 text-blue-400" />
-                    <span className="font-semibold text-zinc-200 text-sm">Code Editor</span>
+                    <span className="font-semibold text-zinc-200 text-sm whitespace-nowrap">Code Editor</span>
 
-                    <div className="flex bg-[#27272a] rounded-lg p-0.5 ml-4">
+                    <div className="flex bg-[#27272a] rounded-lg p-0.5 ml-4 flex-shrink-0">
                         <button
                             onClick={() => setViewMode('editor')}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${viewMode === 'editor' ? 'bg-[#3f3f46] text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
@@ -66,7 +127,7 @@ export function CodeSidePanel({
 
                     {/* Validation Summary */}
                     {(errorCount > 0 || warningCount > 0) && (
-                        <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700">
+                        <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700 flex-shrink-0">
                             {errorCount > 0 && (
                                 <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold">
                                     <AlertCircle className="w-3 h-3" />
@@ -83,7 +144,19 @@ export function CodeSidePanel({
                     )}
                 </div>
                 <div className="flex items-center gap-1">
-                    <button onClick={() => setIsExpanded(!isExpanded)} className="text-zinc-500 hover:text-zinc-300 transition-colors p-1" title={isExpanded ? "Collapse" : "Expand"}>
+                    <button
+                        onClick={() => {
+                            if (isExpanded) {
+                                setWidth(280);
+                                setIsExpanded(false);
+                            } else {
+                                setWidth(500);
+                                setIsExpanded(true);
+                            }
+                        }}
+                        className="text-zinc-500 hover:text-zinc-300 transition-colors p-1"
+                        title={isExpanded ? "Collapse" : "Expand"}
+                    >
                         {isExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
                     </button>
                     <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors p-1">

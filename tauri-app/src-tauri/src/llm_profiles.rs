@@ -13,12 +13,23 @@ pub enum LLMProvider {
     Anthropic,
     OpenRouter,
     Google,
+    DeepSeek,
+    Groq,
+    Mistral,
+    XAI,
+    Perplexity,
     Custom,
 }
 
 impl Default for LLMProvider {
     fn default() -> Self {
         LLMProvider::OpenAI
+    }
+}
+
+impl std::fmt::Display for LLMProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -70,7 +81,12 @@ impl LLMProfile {
                 LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
                 LLMProvider::OpenRouter => "https://openrouter.ai/api/v1".to_string(),
-                LLMProvider::Google => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                LLMProvider::Google => "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                LLMProvider::DeepSeek => "https://api.deepseek.com".to_string(),
+                LLMProvider::Groq => "https://api.groq.com/openai/v1".to_string(),
+                LLMProvider::Mistral => "https://api.mistral.ai/v1".to_string(),
+                LLMProvider::XAI => "https://api.x.ai/v1".to_string(),
+                LLMProvider::Perplexity => "https://api.perplexity.ai".to_string(),
                 LLMProvider::Custom => String::new(),
             }
         })

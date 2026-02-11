@@ -2,26 +2,8 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Plus, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download } from 'lucide-react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-
-
-
-interface LLMProfile {
-    id: string;
-    name: string;
-    provider: string;
-    model: string;
-    api_key_encrypted: string;
-    base_url: string | null;
-    max_tokens: number;
-    temperature: number;
-}
-
-interface ProfileStore {
-    profiles: LLMProfile[];
-    active_profile_id: string;
-}
+import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download } from 'lucide-react';
+import { LLMSettings, ProfileStore } from './settings/LLMSettings';
 
 interface WindowInfo {
     hwnd: number;
@@ -57,20 +39,10 @@ interface SettingsPanelProps {
     onClose: () => void;
 }
 
-const PROVIDERS = [
-    { value: 'OpenAI', label: 'OpenAI', defaultModel: 'gpt-4o-mini' },
-    { value: 'Anthropic', label: 'Anthropic', defaultModel: 'claude-3-5-sonnet-latest' },
-    { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001' },
-    { value: 'Google', label: 'Google AI', defaultModel: 'gemini-1.5-flash' },
-    { value: 'Custom', label: 'Custom', defaultModel: '' },
-];
-
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'ui'>('llm');
     const [profiles, setProfiles] = useState<ProfileStore | null>(null);
     const [settings, setSettings] = useState<AppSettings | null>(null);
-    const [editingProfile, setEditingProfile] = useState<LLMProfile | null>(null);
-    const [newApiKey, setNewApiKey] = useState('');
     const [saving, setSaving] = useState(false);
 
     // Configurator state
@@ -81,10 +53,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     const [bslStatus, setBslStatus] = useState<BslStatus | null>(null);
     const [downloading, setDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState<number>(0);
-
-    // LLM state
-    const [modelList, setModelList] = useState<string[]>([]);
-    const [connectionTestResult, setConnectionTestResult] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -102,36 +70,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         invoke<BslStatus>('check_bsl_status_cmd').then(setBslStatus);
     };
 
-    const handleSaveProfile = async () => {
-        if (!editingProfile) return;
-        setSaving(true);
-        try {
-            await invoke('save_profile', {
-                profile: editingProfile,
-                apiKey: newApiKey || null,
-            });
-            const updated = await invoke<ProfileStore>('get_profiles');
-            setProfiles(updated);
-            setEditingProfile(null);
-            setNewApiKey('');
-        } catch (err) {
-            console.error('Failed to save profile:', err);
-        }
-        setSaving(false);
-    };
-
-    const handleDeleteProfile = async (id: string) => {
-        if (!confirm('Are you sure you want to delete this profile?')) return;
-        try {
-            await invoke('delete_profile', { profileId: id });
-            const updated = await invoke<ProfileStore>('get_profiles');
-            setProfiles(updated);
-            if (editingProfile?.id === id) setEditingProfile(null);
-        } catch (err) {
-            console.error('Failed to delete profile:', err);
-        }
-    };
-
     const handleSaveSettings = async () => {
         if (!settings) return;
         setSaving(true);
@@ -141,61 +79,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             console.error('Failed to save settings:', err);
         }
         setSaving(false);
-    };
-
-    const createNewProfile = () => {
-        const id = `profile_${Date.now()}`;
-        setEditingProfile({
-            id,
-            name: 'New Profile',
-            provider: 'OpenAI',
-            model: 'gpt-4o-mini',
-            api_key_encrypted: '',
-            base_url: null,
-            max_tokens: 4096,
-            temperature: 0.7,
-        });
-        setNewApiKey('');
-    };
-
-    // --- LLM Actions ---
-    const fetchModels = async () => {
-        if (!editingProfile) return;
-        // Temporarily save to ensure we use current credentials (handled by backend ideally, but we pass ID)
-        // Wait, backend fetch_models_cmd takes ID. So we must save first? 
-        // Or we should update profile in memory. 
-        // For now let's just save.
-        await handleSaveProfile();
-        // Re-select editing profile
-        if (profiles) {
-            const p = profiles.profiles.find(p => p.id === editingProfile.id);
-            if (p) setEditingProfile(p);
-        }
-
-        try {
-            const models = await invoke<string[]>('fetch_models_cmd', { profileId: editingProfile.id });
-            setModelList(models);
-            alert(`Found ${models.length} models`);
-        } catch (e) {
-            alert(`Error fetching models: ${e}`);
-        }
-    };
-
-    const testConnection = async () => {
-        if (!editingProfile) return;
-        await handleSaveProfile();
-        try {
-            const result = await invoke<string>('test_llm_connection_cmd', { profileId: editingProfile.id });
-            setConnectionTestResult(result);
-        } catch (e) {
-            setConnectionTestResult(`Error: ${e}`);
-        }
-    };
-
-    const setDefaultProfile = async () => {
-        if (!editingProfile) return;
-        await invoke('set_active_profile', { profileId: editingProfile.id });
-        refreshAll();
     };
 
     // --- Configurator Actions ---
@@ -321,188 +204,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 <div className="flex-1 overflow-hidden flex relative">
                     {/* LLM Tab */}
                     {tab === 'llm' && profiles && (
-                        <div className="flex w-full h-full">
-                            {/* List */}
-                            <div className="w-1/3 border-r border-zinc-800 overflow-y-auto p-4 bg-zinc-900/30">
-                                <div className="space-y-2">
-                                    {profiles.profiles.map((p) => (
-                                        <div
-                                            key={p.id}
-                                            onClick={() => { setEditingProfile(p); setNewApiKey(''); setConnectionTestResult(null); }}
-                                            className={`p-2 rounded-lg border cursor-pointer transition-all ${editingProfile?.id === p.id
-                                                ? 'border-blue-500 bg-blue-500/10'
-                                                : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
-                                                }`}
-                                        >
-                                            <div className="flex items-center justify-between mb-0.5">
-                                                <div className="font-medium text-sm text-zinc-200">{p.name}</div>
-                                                {p.id === profiles.active_profile_id && (
-                                                    <span className="text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded-full">Active</span>
-                                                )}
-                                            </div>
-                                            <div className="text-xs text-zinc-500 truncate">{p.provider} / {p.model}</div>
-                                        </div>
-                                    ))}
-                                    <button
-                                        onClick={createNewProfile}
-                                        className="w-full py-3 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg hover:border-zinc-500 hover:bg-zinc-800 transition text-zinc-400"
-                                    >
-                                        <Plus className="w-4 h-4" /> Add Profile
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Editor */}
-                            <div className="flex-1 overflow-y-auto p-6 bg-zinc-900">
-                                {editingProfile ? (
-                                    <div className="space-y-6 max-w-lg">
-                                        <div className="flex items-center justify-between">
-                                            <h3 className="text-lg font-medium">Edit Profile</h3>
-                                            <div className="flex gap-2">
-                                                {editingProfile.id !== profiles.active_profile_id && (
-                                                    <button onClick={setDefaultProfile} className="text-xs px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded border border-zinc-700">Set Active</button>
-                                                )}
-                                                {editingProfile.id !== 'default' && (
-                                                    <button onClick={() => handleDeleteProfile(editingProfile.id)} className="text-xs px-3 py-1 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded border border-red-500/20">Delete</button>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        <div className="space-y-4">
-                                            <div className="grid grid-cols-2 gap-4">
-                                                <div>
-                                                    <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Name</label>
-                                                    <input
-                                                        type="text"
-                                                        value={editingProfile.name}
-                                                        onChange={(e) => setEditingProfile({ ...editingProfile, name: e.target.value })}
-                                                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Provider</label>
-                                                    <Select
-                                                        value={editingProfile.provider}
-                                                        onValueChange={(val) => {
-                                                            const provider = PROVIDERS.find(p => p.value === val);
-                                                            setEditingProfile({
-                                                                ...editingProfile,
-                                                                provider: val,
-                                                                model: provider?.defaultModel || '',
-                                                            });
-                                                        }}
-                                                    >
-                                                        <SelectTrigger className="w-full">
-                                                            <SelectValue placeholder="Select provider" />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            {PROVIDERS.map((p) => (
-                                                                <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
-                                                </div>
-                                            </div>
-
-                                            <div>
-                                                <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Model</label>
-                                                <div className="flex gap-2">
-                                                    <input
-                                                        type="text"
-                                                        value={editingProfile.model}
-                                                        onChange={(e) => setEditingProfile({ ...editingProfile, model: e.target.value })}
-                                                        className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                                    />
-                                                    <button onClick={fetchModels} className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm">Load</button>
-                                                </div>
-                                                {modelList.length > 0 && (
-                                                    <select
-                                                        className="w-full mt-2 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm"
-                                                        onChange={(e) => setEditingProfile({ ...editingProfile, model: e.target.value })}
-                                                        value={editingProfile.model}
-                                                    >
-                                                        <option value="">Select from loaded...</option>
-                                                        {modelList.map(m => <option key={m} value={m}>{m}</option>)}
-                                                    </select>
-                                                )}
-                                            </div>
-
-                                            <div>
-                                                <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">API Key</label>
-                                                <input
-                                                    type="password"
-                                                    value={newApiKey}
-                                                    onChange={(e) => setNewApiKey(e.target.value)}
-                                                    placeholder={editingProfile.api_key_encrypted ? '•••••••• (Encrypted)' : 'Enter API Key'}
-                                                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none placeholder-zinc-600"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Base URL (Optional)</label>
-                                                <input
-                                                    type="text"
-                                                    value={editingProfile.base_url || ''}
-                                                    onChange={(e) => setEditingProfile({ ...editingProfile, base_url: e.target.value || null })}
-                                                    placeholder="https://api.openai.com/v1"
-                                                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                                />
-                                            </div>
-
-                                            <div className="grid grid-cols-2 gap-4">
-                                                <div>
-                                                    <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Temperature</label>
-                                                    <input
-                                                        type="number"
-                                                        step="0.1"
-                                                        min="0"
-                                                        max="2"
-                                                        value={editingProfile.temperature}
-                                                        onChange={(e) => setEditingProfile({ ...editingProfile, temperature: parseFloat(e.target.value) || 0.7 })}
-                                                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                                    />
-                                                </div>
-                                                <div>
-                                                    <label className="text-xs text-zinc-500 uppercase font-semibold mb-1 block">Max Tokens</label>
-                                                    <input
-                                                        type="number"
-                                                        value={editingProfile.max_tokens}
-                                                        onChange={(e) => setEditingProfile({ ...editingProfile, max_tokens: parseInt(e.target.value) || 4096 })}
-                                                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                                    />
-                                                </div>
-                                            </div>
-
-                                            <div className="pt-4 flex gap-3">
-                                                <button
-                                                    onClick={handleSaveProfile}
-                                                    disabled={saving}
-                                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition disabled:opacity-50"
-                                                >
-                                                    {saving ? 'Saving...' : 'Save Changes'}
-                                                </button>
-                                                <button
-                                                    onClick={testConnection}
-                                                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm font-medium transition"
-                                                >
-                                                    Test Connection
-                                                </button>
-                                            </div>
-
-                                            {connectionTestResult && (
-                                                <div className={`p-3 rounded-lg text-sm border ${connectionTestResult.startsWith('Success') ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
-                                                    {connectionTestResult}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="h-full flex flex-col items-center justify-center text-zinc-500">
-                                        <Cpu className="w-12 h-12 mb-4 opacity-50" />
-                                        <p>Select a profile to edit or create a new one</p>
-                                    </div>
-                                )}
-                            </div>
+                        <div className="w-full h-full">
+                            <LLMSettings profiles={profiles} onUpdate={setProfiles} />
                         </div>
                     )}
 
@@ -558,8 +261,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                         )}
                                     </div>
                                 </section>
-
-
                             </div>
                         </div>
                     )}

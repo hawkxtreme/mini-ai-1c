@@ -76,6 +76,30 @@ pub struct AppSettings {
     pub bsl_server: BSLServerSettings,
     pub ui: UISettings,
     pub active_llm_profile: String,
+    #[serde(default)]
+    pub llm: LLMGlobalSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LLMGlobalSettings {
+    pub active_provider_id: String,
+    pub providers: std::collections::HashMap<String, ProviderSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    pub enabled: bool,
+    pub api_key: Option<String>, // TODO: Encrypt this
+    pub base_url: Option<String>,
+    pub active_model_id: Option<String>,
+    pub models: std::collections::HashMap<String, ModelSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSettings {
+    pub context_window: Option<u32>, // Override
+    pub cost_in: Option<f64>,
+    pub cost_out: Option<f64>,
 }
 
 /// Get the settings directory path

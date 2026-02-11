@@ -13,6 +13,7 @@ mod crypto;
 // Hotkeys removed
 // mod hotkeys;
 mod llm_profiles;
+mod llm;
 mod settings;
 
 use commands::*;
@@ -24,7 +25,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_mcp_bridge::init())
         .manage(tokio::sync::Mutex::new(crate::bsl_client::BSLClient::new()))
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -50,6 +51,8 @@ pub fn run() {
             // Hotkeys removed
             // LLM Utilities
             fetch_models_cmd,
+            fetch_models_from_provider,
+            fetch_models_for_profile,
             test_llm_connection_cmd,
             // BSL Utilities
             check_bsl_status_cmd,

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { Settings, Loader2, Minus, Square, X, ArrowUp, ChevronDown, Trash2, Monitor, RefreshCw, PanelRight, FileText, MousePointerClick } from 'lucide-react';
 import { SettingsPanel } from './components/SettingsPanel';
 import { MarkdownRenderer } from './components/MarkdownRenderer';
@@ -104,6 +104,32 @@ function App() {
     scrollToBottom();
   }, [messages]);
 
+  // Handle automatic window resizing when side panel is opened
+  useEffect(() => {
+    if (showSidePanel) {
+      const ensureWidth = async () => {
+        try {
+          const appWindow = getCurrentWindow();
+          const factor = await appWindow.scaleFactor();
+          const innerSize = await appWindow.innerSize();
+
+          const logicalWidth = innerSize.width / factor;
+          const logicalHeight = innerSize.height / factor;
+
+          // Minimum width to fit Chat (min 400px) + Side Panel (500px) + some buffer
+          const minWidthRequired = 950;
+
+          if (logicalWidth < minWidthRequired) {
+            await appWindow.setSize(new LogicalSize(minWidthRequired, logicalHeight));
+          }
+        } catch (error) {
+          console.error('Failed to resize window:', error);
+        }
+      };
+      ensureWidth();
+    }
+  }, [showSidePanel]);
+
   // Validate Code Effect
   useEffect(() => {
     if (!modifiedCode) {
@@ -141,6 +167,15 @@ function App() {
     }, 5000);
 
     return () => clearInterval(interval);
+  }, []);
+
+  // Disable context menu
+  useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', handleContextMenu);
+    return () => document.removeEventListener('contextmenu', handleContextMenu);
   }, []);
 
   // Listen for chat events
@@ -512,45 +547,46 @@ function App() {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden bg-[#09090b]">
-        {/* Main Content Area */}
-        <div className="flex flex-col flex-1 min-w-0">
-          {/* Header Actions */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-[#27272a] bg-[#09090b]">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-zinc-900/50 border border-zinc-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${!bslStatus ? 'bg-zinc-600 animate-pulse' : bslStatus.connected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.4)]'}`} />
-                <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">BSL LS</span>
-                <span className="text-[10px] text-zinc-600 font-medium">
-                  {!bslStatus ? 'Initializing...' : bslStatus.connected ? 'Connected' : 'Offline'}
-                </span>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowSidePanel(!showSidePanel)}
-                className={`p-2 hover:bg-[#27272a] rounded-lg transition-colors ${showSidePanel ? 'text-blue-400 bg-blue-500/10' : 'text-zinc-400'}`}
-                title="Toggle Code Panel"
-              >
-                <PanelRight className="w-4 h-4" />
-              </button>
-              <div className="w-px h-4 bg-[#27272a] mx-1" />
-              <button
-                onClick={() => setMessages([])}
-                className="p-2 hover:bg-[#27272a] rounded-lg transition-colors group"
-                title="Clear Chat"
-              >
-                <Trash2 className="w-4 h-4 text-zinc-400 group-hover:text-red-400 transition-colors" />
-              </button>
-              <button
-                onClick={() => setShowSettings(true)}
-                className="p-2 hover:bg-[#27272a] rounded-lg transition-colors"
-                title="Settings"
-              >
-                <Settings className="w-4 h-4 text-zinc-400" />
-              </button>
-            </div>
+      {/* Header Actions - MOVED UP */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-[#27272a] bg-[#09090b]">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-zinc-900/50 border border-zinc-800/50">
+            <div className={`w-1.5 h-1.5 rounded-full ${!bslStatus ? 'bg-zinc-600 animate-pulse' : bslStatus.connected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.4)]'}`} />
+            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest hidden md:inline">BSL LS</span>
+            <span className="text-[10px] text-zinc-600 font-medium hidden md:inline">
+              {!bslStatus ? 'Initializing...' : bslStatus.connected ? 'Connected' : 'Offline'}
+            </span>
           </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowSidePanel(!showSidePanel)}
+            className={`p-2 hover:bg-[#27272a] rounded-lg transition-colors ${showSidePanel ? 'text-blue-400 bg-blue-500/10' : 'text-zinc-400'}`}
+            title="Toggle Code Panel"
+          >
+            <PanelRight className="w-4 h-4" />
+          </button>
+          <div className="w-px h-4 bg-[#27272a] mx-1" />
+          <button
+            onClick={() => setMessages([])}
+            className="p-2 hover:bg-[#27272a] rounded-lg transition-colors group"
+            title="Clear Chat"
+          >
+            <Trash2 className="w-4 h-4 text-zinc-400 group-hover:text-red-400 transition-colors" />
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 hover:bg-[#27272a] rounded-lg transition-colors"
+            title="Settings"
+          >
+            <Settings className="w-4 h-4 text-zinc-400" />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
+        {/* Main Content Area (Messages + Input) - ENFORCE MIN WIDTH */}
+        <div className="flex flex-col flex-1 min-w-[400px] transition-all duration-300">
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto bg-[#09090b]">
@@ -619,9 +655,9 @@ function App() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input Area */}
+          {/* Input Area (now inside the left column) */}
           <div className="p-4 bg-[#09090b] border-t border-[#27272a]">
-            <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px]">
+            <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col">
               {commandMenu.isOpen && (
                 <div className="absolute bottom-full left-0 mb-2 w-72 bg-[#18181b] border border-[#27272a] rounded-xl shadow-2xl overflow-hidden z-20">
                   <div className="max-h-60 overflow-y-auto p-1">
@@ -658,14 +694,14 @@ function App() {
                   setShowModelDropdown(false);
                 }}
                 placeholder="Plan, @ for context, / for commands"
-                className="w-full h-full bg-transparent text-zinc-300 px-4 py-3 resize-none focus:outline-none placeholder-zinc-600 text-[13px] font-sans leading-relaxed mb-10"
+                className="w-full h-full bg-transparent text-zinc-300 px-4 py-3 resize-none focus:outline-none placeholder-zinc-600 text-[13px] font-sans leading-relaxed flex-1"
                 style={{ fontFamily: 'Inter, sans-serif' }}
               />
 
-              <div className="absolute bottom-2 left-3 right-3 flex items-end gap-2 pointer-events-auto flex-wrap sm:flex-nowrap">
-                <div className="flex bg-[#27272a]/50 rounded-lg p-1 gap-1 min-w-0 max-w-full flex-wrap">
-                  {profiles && (
-                    <div className="flex items-center gap-1 flex-wrap">
+              <div className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-nowrap w-full overflow-hidden">
+                {profiles && (
+                  <div className="flex items-center gap-1 flex-1 flex-shrink-0">
+                    <div className="flex items-center gap-1 flex-nowrap flex-shrink-0">
                       {showModelDropdown && (
                         <div className="absolute bottom-full left-0 mb-2 w-56 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl overflow-hidden z-30 ring-1 ring-black/20">
                           <div className="p-1">
@@ -705,25 +741,25 @@ function App() {
                             e.stopPropagation();
                             setShowModelDropdown(!showModelDropdown);
                           }}
-                          className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-md transition-all ${showModelDropdown ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                          className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                         >
                           <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
-                          <span className="hidden sm:inline">Agent</span>
+                          <span className="hidden sm:inline whitespace-nowrap">Agent</span>
                         </button>
 
                         {/* CONFIGURATOR SELECTOR */}
-                        <div className="relative">
+                        <div className="relative flex-shrink-0">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
                               if (!showConfigDropdown) refreshConfigurators(settings?.configurator.window_title_pattern);
                               setShowConfigDropdown(!showConfigDropdown);
                             }}
-                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-md transition-all ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'} max-w-[140px]`}
+                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'} max-w-[140px]`}
                             title="Select Configurator Window"
                           >
                             <Monitor className="w-3.5 h-3.5 text-zinc-500" />
-                            <span className="truncate max-w-[80px] hidden sm:inline">{getActiveConfiguratorTitle()}</span>
+                            <span className="truncate max-w-[80px] hidden sm:inline whitespace-nowrap">{getActiveConfiguratorTitle()}</span>
                             <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showConfigDropdown ? 'rotate-180' : ''}`} />
                           </button>
                           {showConfigDropdown && (
@@ -754,20 +790,20 @@ function App() {
                           )}
                         </div>
 
-                        <div className="h-4 w-px bg-zinc-700/50 mx-1" />
+                        <div className="h-4 w-px bg-zinc-700/50 mx-1 hidden sm:block flex-shrink-0" />
 
                         {/* CONTEXT ACTIONS (DROPDOWN) */}
-                        <div className="relative">
+                        <div className="relative flex-shrink-0">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
                               setShowGetCodeDropdown(!showGetCodeDropdown);
                             }}
-                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-md transition-all ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                             title="Get Code Options"
                           >
                             <FileText className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline">Get Code</span>
+                            <span className="hidden sm:inline whitespace-nowrap">Get Code</span>
                             <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showGetCodeDropdown ? 'rotate-180' : ''}`} />
                           </button>
                           {showGetCodeDropdown && (
@@ -791,10 +827,8 @@ function App() {
                         </div>
                       </div>
                     </div>
-                  )}
-                </div>
-
-                <div className="flex-1" />
+                  </div>
+                )}
 
                 <button
                   onClick={sendMessage}
@@ -808,17 +842,19 @@ function App() {
           </div>
         </div>
 
-        {/* Side Panel */}
-        <CodeSidePanel
-          isOpen={showSidePanel}
-          onClose={() => setShowSidePanel(false)}
-          originalCode={originalCode}
-          modifiedCode={modifiedCode}
-          onModifiedCodeChange={setModifiedCode}
-          diagnostics={diagnostics}
-          onApply={handleApplyToConfigurator}
-          isApplying={isApplying}
-        />
+        {/* Side Panel: Full Height Sibling (RIGHT) */}
+        <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>
+          <CodeSidePanel
+            isOpen={showSidePanel}
+            onClose={() => setShowSidePanel(false)}
+            originalCode={originalCode}
+            modifiedCode={modifiedCode}
+            onModifiedCodeChange={setModifiedCode}
+            diagnostics={diagnostics}
+            onApply={handleApplyToConfigurator}
+            isApplying={isApplying}
+          />
+        </div>
       </div>
 
       <SettingsPanel

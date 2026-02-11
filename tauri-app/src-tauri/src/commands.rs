@@ -282,6 +282,75 @@ pub async fn test_llm_connection_cmd(profile_id: String) -> Result<String, Strin
     crate::ai_client::test_connection(profile).await
 }
 
+/// Fetch models from a specific provider using API and Registry
+#[tauri::command]
+pub async fn fetch_models_from_provider(
+    provider_id: String,
+    base_url: String,
+    api_key: String
+) -> Result<Vec<crate::llm::providers::Model>, String> {
+    use crate::llm::providers;
+    
+    // 1. Fetch from API
+    let api_models = providers::fetch_models_from_api(&provider_id, &base_url, &api_key).await?;
+
+    if api_models.is_empty() {
+         return Err("Provider returned empty model list".to_string());
+    }
+
+    // 2. Fetch Registry
+    let registry = providers::fetch_registry().await
+        .unwrap_or_else(|e| {
+             println!("Failed to fetch registry: {}", e);
+             providers::RegistryData { providers: std::collections::HashMap::new() }
+        });
+
+    // 3. Merge
+    let merged = providers::merge_models(api_models, &registry, &provider_id);
+    
+    Ok(merged)
+}
+
+/// Fetch models for an existing profile (using stored key)
+#[tauri::command]
+pub async fn fetch_models_for_profile(profile_id: String) -> Result<Vec<crate::llm::providers::Model>, String> {
+    use crate::llm::providers;
+    
+    let store = llm_profiles::load_profiles();
+    let profile = store.profiles.iter().find(|p| p.id == profile_id)
+        .ok_or("Profile not found")?;
+
+    let api_key = profile.get_api_key();
+    if api_key.is_empty() {
+        return Err("API key not found in profile".to_string());
+    }
+
+    let base_url = profile.get_base_url(); // Logic to get URL or default
+    // Note: profile.get_base_url() might return default if None.
+    // We should use the same defaults as in LLMSettings or rely on `ai_client` defaults?
+    // `profile.get_base_url()` in `llm_profiles.rs` might handles it.
+    // Let's assume it returns a valid base URL string.
+    
+    // 1. Fetch from API
+    let api_models = providers::fetch_models_from_api(&profile.provider.to_string(), &base_url, &api_key).await?;
+
+    if api_models.is_empty() {
+         return Err("Provider returned empty model list".to_string());
+    }
+
+    // 2. Fetch Registry
+    let registry = providers::fetch_registry().await
+        .unwrap_or_else(|e| {
+             println!("Failed to fetch registry: {}", e);
+             providers::RegistryData { providers: std::collections::HashMap::new() }
+        });
+
+    // 3. Merge
+    let merged = providers::merge_models(api_models, &registry, &profile.provider.to_string());
+    
+    Ok(merged)
+}
+
 // ============== BSL Utilities ==============
 
 #[derive(Debug, Serialize)]
