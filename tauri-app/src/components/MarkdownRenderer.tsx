@@ -1,11 +1,15 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { PanelRight, CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { BslDiagnostic } from '../App';
 
 interface MarkdownRendererProps {
     content: string;
+    onApplyCode?: (code: string) => void;
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, onApplyCode }: MarkdownRendererProps) {
+
     return (
         <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -14,6 +18,8 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
                 code({ inline, className, children, ...props }: any) {
                     const match = /language-(\w+)/.exec(className || '');
                     const language = match ? match[1] : '';
+                    const isBsl = language === 'bsl' || language === '1c';
+
 
                     if (inline) {
                         return (
@@ -23,14 +29,26 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
                         );
                     }
 
+                    const codeString = String(children).replace(/\n$/, '');
+
                     return (
-                        <div className="relative my-2">
-                            {language && (
-                                <div className="absolute top-0 right-0 px-2 py-1 text-xs text-zinc-400 bg-zinc-800 rounded-bl">
-                                    {language}
+                        <div className="relative my-2 group">
+                            <div className="flex items-center justify-between px-3 py-1 bg-zinc-800 rounded-t-lg border-x border-t border-[#27272a]">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{language || 'code'}</span>
                                 </div>
-                            )}
-                            <pre className="bg-[#18181b] border border-[#27272a] rounded-lg p-4 overflow-x-auto">
+                                {isBsl && onApplyCode && (
+                                    <button
+                                        onClick={() => onApplyCode(codeString)}
+                                        className="flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                                        title="Load into Side Panel"
+                                    >
+                                        <PanelRight className="w-3 h-3" />
+                                        <span>Apply</span>
+                                    </button>
+                                )}
+                            </div>
+                            <pre className="bg-[#18181b] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0">
                                 <code className={`text-[13px] font-mono leading-relaxed ${className || ''}`} {...props}>
                                     {children}
                                 </code>

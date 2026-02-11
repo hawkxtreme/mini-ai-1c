@@ -30,7 +30,7 @@ export function CodeSidePanel({
     isApplying
 }: CodeSidePanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
-    const [viewMode, setViewMode] = useState<'editor' | 'diff'>('editor');
+    const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
     const [width, setWidth] = useState(500);
     const [isResizing, setIsResizing] = useState(false);
 

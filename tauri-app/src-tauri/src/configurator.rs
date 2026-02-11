@@ -270,6 +270,24 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
     Err("Failed to get clipboard content after retries".to_string())
 }
 
+/// Get active fragment (selection or current line)
+#[cfg(windows)]
+pub fn get_active_fragment(hwnd: isize) -> Result<String, String> {
+    // 1. Try to get selection first
+    if let Ok(selection) = get_selected_code(hwnd, false) {
+        if !selection.trim().is_empty() {
+            return Ok(selection);
+        }
+    }
+
+    // 2. Fallback: Try to select current line if nothing is selected
+    // Note: 1C Configurator doesn't have a simple "select current line" hotkey, 
+    // but we can try Home, Shift+End or similar if needed.
+    // For now, let's just return what we got or empty.
+    
+    Err("No selection or active fragment found".to_string())
+}
+
 /// Paste code into configurator window
 #[cfg(windows)]
 pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), String> {

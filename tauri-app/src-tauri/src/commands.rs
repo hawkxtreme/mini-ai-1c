@@ -204,6 +204,20 @@ pub fn get_code_from_configurator(hwnd: isize, use_select_all: Option<bool>) -> 
     }
 }
 
+/// Get active fragment from 1C Configurator window
+#[tauri::command]
+pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        configurator::get_active_fragment(hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
 /// Paste code to 1C Configurator window
 #[tauri::command]
 pub fn paste_code_to_configurator(hwnd: isize, code: String, use_select_all: Option<bool>) -> Result<(), String> {

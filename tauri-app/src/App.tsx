@@ -11,6 +11,7 @@ import logo from './assets/logo.png';
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  diagnostics?: Record<number, BslDiagnostic[]>;
 }
 
 interface LLMProfile {
@@ -55,8 +56,9 @@ interface BslStatus {
   connected: boolean;
 }
 
-interface BslDiagnostic {
+export interface BslDiagnostic {
   line: number;
+  character: number;
   message: string;
   severity: string;
 }
@@ -84,13 +86,6 @@ function App() {
   const [showGetCodeDropdown, setShowGetCodeDropdown] = useState(false);
   const [detectedWindows, setDetectedWindows] = useState<WindowInfo[]>([]);
 
-  // Command Menu State
-  const [commandMenu, setCommandMenu] = useState<{
-    isOpen: boolean;
-    type: '/' | '@' | null;
-    filter: string;
-    selectedIndex: number;
-  }>({ isOpen: false, type: null, filter: '', selectedIndex: 0 });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -208,25 +203,12 @@ function App() {
 
     const unlistenDone = listen('chat-done', () => {
       setIsLoading(false);
-      // Save assistant message and update editor code
       setMessages(prev => {
-        const last = prev[prev.length - 1];
+        const lastIndex = prev.length - 1;
+        const last = prev[lastIndex];
         if (last && last.role === 'assistant') {
           invoke('save_chat_message', { role: 'assistant', content: last.content });
 
-          // Auto-update removed in favor of "Load Code" button
-          // const codeBlockMatch = [...last.content.matchAll(/```(?:bsl|1c)\s*([\s\S]*?)```/gi)].pop();
-          // if (codeBlockMatch && codeBlockMatch[1]) {
-          //   const newCode = codeBlockMatch[1].trim();
-          //   console.log("Auto-updating modified code from AI response");
-          //   setModifiedCode(newCode);
-          //   // If panel is closed, maybe open it? activeContextMode is already set if we had context
-          //   // But if user just asked a question without context, we might not want to clobber.
-          //   // Only update if we are already in a "session" (i.e. we have originalCode)
-          //   // or if we want to support generating code from scratch.
-          //   // For now, let's update it unconditionally so the user sees the result in "Modified".
-          //   if (!showSidePanel) setShowSidePanel(true);
-          // }
         }
         return prev;
       });
@@ -398,116 +380,12 @@ function App() {
     return null;
   };
 
-  const SLASH_COMMANDS = [
-    { id: 'clear', label: 'Clear Chat', desc: 'Clear current messages', action: () => setMessages([]) },
-    { id: 'new', label: 'New Chat', desc: 'Start a new session', action: () => setMessages([]) },
-    { id: 'settings', label: 'Settings', desc: 'Open settings', action: () => setShowSettings(true) },
-    { id: 'help', label: 'Help', desc: 'List commands', action: () => alert('Available commands: /clear, /new, /settings, /check, /analyze, /format') },
-    {
-      id: 'check', label: 'Check Configurator', desc: 'Find 1C windows', action: async () => {
-        const windows = await invoke<Array<{ hwnd: number; title: string }>>('find_configurator_windows_cmd', { pattern: 'Конфигуратор' });
-        alert(windows.length ? `Found: ${windows.map(w => w.title).join(', ')} ` : 'No windows found');
-      }
-    },
-    {
-      id: 'analyze', label: 'Analyze BSL', desc: 'Analyze last code block', action: async () => {
-        const code = getLastCodeBlock();
-        if (!code) { alert('No BSL code found in chat history'); return; }
-        try {
-          alert("Analysis started (backend impl pending full integration)...");
-        } catch (e) { alert('Analysis failed: ' + e); }
-      }
-    },
-    { id: 'format', label: 'Format BSL', desc: 'Format last code block', action: () => alert('Format command triggered') }
-  ];
-
-  const CONTEXT_COMMANDS = [
-    { id: 'configurator', label: 'Configurator (Module)', desc: 'Capture full module logic (Ctrl+A)', type: 'context' },
-    { id: 'selection', label: 'Configurator (Selection)', desc: 'Capture selected code', type: 'context' },
-  ];
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newVal = e.target.value;
-    setInput(newVal);
-
-    // Simple trigger detection (last word)
-    const lastWord = newVal.split(/\s/).pop() || '';
-
-    if (lastWord.startsWith('/')) {
-      setCommandMenu({
-        isOpen: true,
-        type: '/',
-        filter: lastWord.slice(1).toLowerCase(),
-        selectedIndex: 0,
-      });
-    } else if (lastWord.startsWith('@')) {
-      setCommandMenu({
-        isOpen: true,
-        type: '@',
-        filter: lastWord.slice(1).toLowerCase(),
-        selectedIndex: 0,
-      });
-    } else {
-      setCommandMenu(prev => prev.isOpen ? { ...prev, isOpen: false } : prev);
-    }
-  };
-
-  const executeCommand = (item: any) => {
-    if (commandMenu.type === '/') {
-      item.action();
-      setInput('');
-    } else if (commandMenu.type === '@') {
-      if (item.type === 'context') {
-        const parts = input.split(/\s/);
-        parts.pop(); // remove partial trigger
-        setInput(parts.join(' ') + (parts.length ? ' ' : '') + '@' + item.id + ' ');
-      }
-    }
-    setCommandMenu({ isOpen: false, type: null, filter: '', selectedIndex: 0 });
-    inputRef.current?.focus();
+    setInput(e.target.value);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (commandMenu.isOpen) {
-      let items: any[] = [];
-      if (commandMenu.type === '/') {
-        items = SLASH_COMMANDS.filter(c => c.id.includes(commandMenu.filter) || c.label.toLowerCase().includes(commandMenu.filter));
-      } else if (commandMenu.type === '@') {
-        items = CONTEXT_COMMANDS.filter(c => c.id.includes(commandMenu.filter));
-      }
-
-      if (items.length > 0) {
-        if (e.key === 'ArrowDown') {
-          e.preventDefault();
-          setCommandMenu(prev => ({ ...prev, selectedIndex: (prev.selectedIndex + 1) % items.length }));
-        } else if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          setCommandMenu(prev => ({ ...prev, selectedIndex: (prev.selectedIndex - 1 + items.length) % items.length }));
-        } else if (e.key === 'Enter' || e.key === 'Tab') {
-          e.preventDefault();
-          executeCommand(items[commandMenu.selectedIndex]);
-          return;
-        } else if (e.key === 'Escape') {
-          setCommandMenu({ ...commandMenu, isOpen: false });
-          return;
-        }
-      }
-    } else {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        const trimmed = input.trim();
-        if (trimmed.startsWith('/')) {
-          const cmdName = trimmed.substring(1).toLowerCase();
-          const exactCmd = SLASH_COMMANDS.find(c => c.id === cmdName);
-          if (exactCmd) {
-            e.preventDefault();
-            exactCmd.action();
-            setInput('');
-            return;
-          }
-        }
-      }
-    }
-
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -584,9 +462,14 @@ function App() {
           </button>
           <div className="w-px h-4 bg-[#27272a] mx-1" />
           <button
-            onClick={() => setMessages([])}
+            onClick={() => {
+              setMessages([]);
+              setOriginalCode('');
+              setModifiedCode('');
+              setDiagnostics([]);
+            }}
             className="p-2 hover:bg-[#27272a] rounded-lg transition-colors group"
-            title="Clear Chat"
+            title="Clear Chat & Editor"
           >
             <Trash2 className="w-4 h-4 text-zinc-400 group-hover:text-red-400 transition-colors" />
           </button>
@@ -607,10 +490,35 @@ function App() {
           {/* Messages */}
           <div className="flex-1 overflow-y-auto bg-[#09090b]">
             {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full text-zinc-500 opacity-50">
-                <img src={logo} alt="Logo" className="w-20 h-20 mb-6 grayscale opacity-20" />
-                <p className="text-xl font-medium text-zinc-400">Mini AI 1C</p>
-                <p className="text-sm text-zinc-600 mt-2">Ready to assist with BSL and Configuration</p>
+              <div className="flex flex-col items-center justify-center h-full max-w-lg mx-auto px-10">
+                <div className="mb-8 relative">
+                  <div className="absolute inset-0 bg-blue-500/10 blur-3xl rounded-full"></div>
+                  <img src={logo} alt="Logo" className="w-16 h-16 relative grayscale opacity-30" />
+                </div>
+
+                <h2 className="text-xl font-semibold text-zinc-300 mb-8 tracking-tight">Mini AI 1C Assistant</h2>
+
+                <div className="w-full space-y-6 text-[13px] text-zinc-500 text-left bg-zinc-900/20 p-8 rounded-2xl border border-zinc-800/30">
+                  <div className="flex gap-4">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[11px] font-bold text-zinc-400">1</span>
+                    <p className="leading-relaxed">Подключитесь к конфигуратору, выбрав окно в нижней панели.</p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[11px] font-bold text-zinc-400">2</span>
+                    <p className="leading-relaxed">Используйте кнопку <b className="text-zinc-400">Get Code</b> для получения текста модуля или выделенного фрагмента.</p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[11px] font-bold text-zinc-400">3</span>
+                    <p className="leading-relaxed">Опишите задачу ИИ — предложенный код появится в правой панели.</p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center text-[11px] font-bold text-zinc-400">4</span>
+                    <p className="leading-relaxed">Проверьте изменения в режиме <b className="text-zinc-400">Diff</b> и нажмите <b className="text-blue-400">Apply Changes</b> для вставки кода в 1С.</p>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -623,26 +531,13 @@ function App() {
                     <div className="min-w-0 overflow-hidden">
                       {msg.role === 'assistant' ? (
                         <div className="flex flex-col gap-2">
-                          <MarkdownRenderer content={msg.content} />
-                          {(() => {
-                            const codeBlockMatch = [...msg.content.matchAll(/```(?:bsl|1c)\s*([\s\S]*?)```/gi)].pop();
-                            if (codeBlockMatch && codeBlockMatch[1]) {
-                              return (
-                                <button
-                                  onClick={() => {
-                                    const newCode = codeBlockMatch[1].trim();
-                                    setModifiedCode(newCode);
-                                    setShowSidePanel(true);
-                                  }}
-                                  className="self-start flex items-center gap-2 px-2 py-1 mt-1 text-[10px] font-medium text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded transition-all group"
-                                >
-                                  <PanelRight className="w-3 h-3 group-hover:scale-110 transition-transform" />
-                                  Apply Changes
-                                </button>
-                              );
-                            }
-                            return null;
-                          })()}
+                          <MarkdownRenderer
+                            content={msg.content}
+                            onApplyCode={(code) => {
+                              setModifiedCode(code);
+                              setShowSidePanel(true);
+                            }}
+                          />
                         </div>
                       ) : (
                         <pre className="whitespace-pre-wrap font-sans" style={{ fontFamily: 'Inter, sans-serif' }}>{msg.content}</pre>
@@ -666,32 +561,6 @@ function App() {
           {/* Input Area (now inside the left column) */}
           <div className="p-4 bg-[#09090b] border-t border-[#27272a]">
             <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col">
-              {commandMenu.isOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-72 bg-[#18181b] border border-[#27272a] rounded-xl shadow-2xl overflow-hidden z-20">
-                  <div className="max-h-60 overflow-y-auto p-1">
-                    {(() => {
-                      let items: any[] = [];
-                      if (commandMenu.type === '/') {
-                        items = SLASH_COMMANDS.filter(c => c.id.includes(commandMenu.filter) || c.label.toLowerCase().includes(commandMenu.filter));
-                      } else if (commandMenu.type === '@') {
-                        items = CONTEXT_COMMANDS.filter(c => c.id.includes(commandMenu.filter));
-                      }
-                      return items.map((item, i) => (
-                        <button
-                          key={item.id}
-                          onClick={() => executeCommand(item)}
-                          className={`w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between ${i === commandMenu.selectedIndex ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:bg-[#27272a]'}`}
-                        >
-                          <span className="flex items-center gap-2">
-                            <span className="font-medium">{commandMenu.type}{item.name || item.id}</span>
-                          </span>
-                          <span className="text-xs opacity-50">{item.desc || item.label}</span>
-                        </button>
-                      ));
-                    })()}
-                  </div>
-                </div>
-              )}
 
               <textarea
                 ref={inputRef}
@@ -701,7 +570,7 @@ function App() {
                 onFocus={() => {
                   setShowModelDropdown(false);
                 }}
-                placeholder="Plan, @ for context, / for commands"
+                placeholder="Plan your changes..."
                 className="w-full h-full bg-transparent text-zinc-300 px-4 py-3 resize-none focus:outline-none placeholder-zinc-600 text-[13px] font-sans leading-relaxed flex-1"
                 style={{ fontFamily: 'Inter, sans-serif' }}
               />
@@ -757,7 +626,9 @@ function App() {
                           className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                         >
                           <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
-                          <span className="hidden sm:inline whitespace-nowrap">Agent</span>
+                          <span className="hidden sm:inline whitespace-nowrap">
+                            {profiles?.profiles.find(p => p.id === profiles.active_profile_id)?.name || 'Agent'}
+                          </span>
                         </button>
                       </div>
 

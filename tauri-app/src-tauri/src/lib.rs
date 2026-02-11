@@ -39,6 +39,7 @@ pub fn run() {
             format_bsl,
             find_configurator_windows_cmd,
             get_code_from_configurator,
+            get_active_fragment_cmd,
             paste_code_to_configurator,
             // Chat history
             get_chat_sessions,
