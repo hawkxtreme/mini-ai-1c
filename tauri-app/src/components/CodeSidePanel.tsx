@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
-import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight, GripVertical } from 'lucide-react';
-import { DiffEditor, Editor } from '@monaco-editor/react';
+import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight, GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
+import { DiffEditor, Editor, loader } from '@monaco-editor/react';
+import { registerBSL } from '@/lib/monaco-bsl';
 
 interface BslDiagnostic {
     line: number;
@@ -35,6 +36,7 @@ export function CodeSidePanel({
     const [isResizing, setIsResizing] = useState(false);
 
     const panelRef = useRef<HTMLDivElement>(null);
+    const editorRef = useRef<any>(null);
 
     const errorCount = useMemo(() => diagnostics.filter(d => d.severity === 'error').length, [diagnostics]);
     const warningCount = useMemo(() => diagnostics.filter(d => d.severity !== 'error').length, [diagnostics]);
@@ -74,6 +76,13 @@ export function CodeSidePanel({
             window.removeEventListener('mouseup', stopResizing);
         };
     }, [isResizing, resize, stopResizing]);
+
+    // Register BSL language
+    useEffect(() => {
+        loader.init().then(monaco => {
+            registerBSL(monaco);
+        });
+    }, []);
 
     // Default to max (expanded) when opened
     useEffect(() => {
@@ -145,6 +154,21 @@ export function CodeSidePanel({
                 </div>
                 <div className="flex items-center gap-1">
                     <button
+                        onClick={() => editorRef.current?.trigger('fold-all', 'editor.foldAll')}
+                        className="text-zinc-500 hover:text-zinc-300 transition-colors p-1 flex items-center justify-center"
+                        title="Fold All"
+                    >
+                        <ChevronUp className="w-4 h-4" />
+                    </button>
+                    <button
+                        onClick={() => editorRef.current?.trigger('unfold-all', 'editor.unfoldAll')}
+                        className="text-zinc-500 hover:text-zinc-300 transition-colors p-1 flex items-center justify-center"
+                        title="Unfold All"
+                    >
+                        <ChevronDown className="w-4 h-4" />
+                    </button>
+                    <div className="w-px h-4 bg-zinc-700/50 mx-1" />
+                    <button
                         onClick={() => {
                             if (isExpanded) {
                                 setWidth(280);
@@ -170,9 +194,13 @@ export function CodeSidePanel({
                 {viewMode === 'editor' ? (
                     <Editor
                         height="100%"
-                        language="vb" // Closest to BSL
+                        language="bsl"
                         theme="vs-dark"
                         value={modifiedCode}
+                        onMount={(editor, monaco) => {
+                            registerBSL(monaco);
+                            editorRef.current = editor;
+                        }}
                         onChange={(value) => onModifiedCodeChange(value || '')}
                         options={{
                             minimap: { enabled: false },
@@ -181,17 +209,21 @@ export function CodeSidePanel({
                             lineNumbers: 'on',
                             scrollBeyondLastLine: false,
                             automaticLayout: true,
+                            folding: true,
+                            showFoldingControls: 'always',
                         }}
                     />
                 ) : (
                     <DiffEditor
                         height="100%"
-                        language="vb" // Closest to BSL
+                        language="bsl"
                         theme="vs-dark"
                         original={originalCode}
                         modified={modifiedCode}
-                        onMount={(editor) => {
+                        onMount={(editor, monaco) => {
+                            registerBSL(monaco);
                             const modifiedEditor = editor.getModifiedEditor();
+                            editorRef.current = modifiedEditor;
                             modifiedEditor.onDidChangeModelContent(() => {
                                 onModifiedCodeChange(modifiedEditor.getValue());
                             });
