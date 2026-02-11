@@ -174,8 +174,24 @@ function App() {
     const handleContextMenu = (e: MouseEvent) => {
       e.preventDefault();
     };
+
+    // Auto-close dropdowns on outside click
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.dropdown-container')) {
+        setShowModelDropdown(false);
+        setShowConfigDropdown(false);
+        setShowGetCodeDropdown(false);
+      }
+    };
+
     document.addEventListener('contextmenu', handleContextMenu);
-    return () => document.removeEventListener('contextmenu', handleContextMenu);
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
   }, []);
 
   // Listen for chat events
@@ -598,47 +614,39 @@ function App() {
               </div>
             )}
 
-            <div className="flex flex-col pb-4">
+            <div className={`flex flex-col pb-4 gap-2 px-4`}>
               {messages.map((msg, i) => (
-                <div key={i} className="w-full mb-4 px-4">
-                  <div className={`p-6 rounded-xl border border-[#27272a] ${msg.role === 'user' ? 'bg-[#18181b] mr-12' : 'bg-transparent'}`}>
-                    <div className="flex-1 min-w-0 overflow-hidden">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[13px] font-semibold text-zinc-300">
-                          {msg.role === 'user' ? 'User' : 'Mini AI 1C'}
-                        </span>
-                        <span className="text-[11px] text-zinc-600">
-                          {new Date().toLocaleTimeString()}
-                        </span>
-                      </div>
-                      <div className="text-zinc-300 leading-relaxed text-[13px]">
-                        {msg.role === 'assistant' ? (
-                          <div className="flex flex-col gap-2">
-                            <MarkdownRenderer content={msg.content} />
-                            {(() => {
-                              const codeBlockMatch = [...msg.content.matchAll(/```(?:bsl|1c)\s*([\s\S]*?)```/gi)].pop();
-                              if (codeBlockMatch && codeBlockMatch[1]) {
-                                return (
-                                  <button
-                                    onClick={() => {
-                                      const newCode = codeBlockMatch[1].trim();
-                                      setModifiedCode(newCode);
-                                      setShowSidePanel(true);
-                                    }}
-                                    className="self-start flex items-center gap-2 px-3 py-1.5 mt-2 text-[11px] font-medium text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-md transition-all group"
-                                  >
-                                    <PanelRight className="w-3 h-3 group-hover:scale-110 transition-transform" />
-                                    Review & Apply
-                                  </button>
-                                );
-                              }
-                              return null;
-                            })()}
-                          </div>
-                        ) : (
-                          <pre className="whitespace-pre-wrap font-sans text-[13px] text-zinc-300" style={{ fontFamily: 'Inter, sans-serif' }}>{msg.content}</pre>
-                        )}
-                      </div>
+                <div key={i} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] p-3 rounded-lg border text-[12px] leading-snug ${msg.role === 'user'
+                    ? 'bg-[#1b1b1f] border-zinc-800 text-zinc-300'
+                    : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300'}`}>
+                    <div className="min-w-0 overflow-hidden">
+                      {msg.role === 'assistant' ? (
+                        <div className="flex flex-col gap-2">
+                          <MarkdownRenderer content={msg.content} />
+                          {(() => {
+                            const codeBlockMatch = [...msg.content.matchAll(/```(?:bsl|1c)\s*([\s\S]*?)```/gi)].pop();
+                            if (codeBlockMatch && codeBlockMatch[1]) {
+                              return (
+                                <button
+                                  onClick={() => {
+                                    const newCode = codeBlockMatch[1].trim();
+                                    setModifiedCode(newCode);
+                                    setShowSidePanel(true);
+                                  }}
+                                  className="self-start flex items-center gap-2 px-2 py-1 mt-1 text-[10px] font-medium text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded transition-all group"
+                                >
+                                  <PanelRight className="w-3 h-3 group-hover:scale-110 transition-transform" />
+                                  Apply Changes
+                                </button>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
+                      ) : (
+                        <pre className="whitespace-pre-wrap font-sans" style={{ fontFamily: 'Inter, sans-serif' }}>{msg.content}</pre>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -698,133 +706,148 @@ function App() {
                 style={{ fontFamily: 'Inter, sans-serif' }}
               />
 
-              <div className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-nowrap w-full overflow-hidden">
+              <div className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-nowrap w-full">
                 {profiles && (
                   <div className="flex items-center gap-1 flex-1 flex-shrink-0">
                     <div className="flex items-center gap-1 flex-nowrap flex-shrink-0">
-                      {showModelDropdown && (
-                        <div className="absolute bottom-full left-0 mb-2 w-56 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl overflow-hidden z-30 ring-1 ring-black/20">
-                          <div className="p-1">
-                            <div className="px-3 py-2 text-[11px] font-bold text-zinc-500 uppercase tracking-wider">Select Model</div>
-                            {profiles.profiles.map(p => (
+                      <div className="relative dropdown-container flex-shrink-0">
+                        {showModelDropdown && (
+                          <div className="absolute bottom-full left-0 mb-2 w-56 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20">
+                            <div className="p-1">
+                              <div className="px-3 py-2 text-[11px] font-bold text-zinc-500 uppercase tracking-wider">Select Model</div>
+                              {profiles.profiles.map(p => (
+                                <button
+                                  key={p.id}
+                                  onClick={() => {
+                                    invoke('set_active_profile', { profileId: p.id }).then(() => {
+                                      invoke<ProfileStore>('get_profiles').then(setProfiles);
+                                      setShowModelDropdown(false);
+                                    });
+                                  }}
+                                  className={`w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center justify-between ${p.id === profiles.active_profile_id ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200'}`}
+                                >
+                                  <span>{p.name}</span>
+                                  {p.id === profiles.active_profile_id && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                                </button>
+                              ))}
+                              <div className="h-px bg-[#27272a] my-1" />
                               <button
-                                key={p.id}
                                 onClick={() => {
-                                  invoke('set_active_profile', { profileId: p.id }).then(() => {
-                                    invoke<ProfileStore>('get_profiles').then(setProfiles);
-                                    setShowModelDropdown(false);
-                                  });
+                                  setShowSettings(true);
+                                  setShowModelDropdown(false);
                                 }}
-                                className={`w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center justify-between ${p.id === profiles.active_profile_id ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200'}`}
+                                className="w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center gap-2 text-zinc-500 hover:bg-[#27272a] hover:text-zinc-300"
                               >
-                                <span>{p.name}</span>
-                                {p.id === profiles.active_profile_id && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                                <Settings className="w-3 h-3" />
+                                Manage Profiles...
                               </button>
-                            ))}
-                            <div className="h-px bg-[#27272a] my-1" />
-                            <button
-                              onClick={() => {
-                                setShowSettings(true);
-                                setShowModelDropdown(false);
-                              }}
-                              className="w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center gap-2 text-zinc-500 hover:bg-[#27272a] hover:text-zinc-300"
-                            >
-                              <Settings className="w-3 h-3" />
-                              Manage Profiles...
-                            </button>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                      <div className="flex items-center gap-1 flex-shrink-0">
+                        )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setShowModelDropdown(!showModelDropdown);
+                            const next = !showModelDropdown;
+                            setShowModelDropdown(next);
+                            if (next) {
+                              setShowConfigDropdown(false);
+                              setShowGetCodeDropdown(false);
+                            }
                           }}
                           className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                         >
                           <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
                           <span className="hidden sm:inline whitespace-nowrap">Agent</span>
                         </button>
+                      </div>
 
-                        {/* CONFIGURATOR SELECTOR */}
-                        <div className="relative flex-shrink-0">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (!showConfigDropdown) refreshConfigurators(settings?.configurator.window_title_pattern);
-                              setShowConfigDropdown(!showConfigDropdown);
-                            }}
-                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'} max-w-[140px]`}
-                            title="Select Configurator Window"
-                          >
-                            <Monitor className="w-3.5 h-3.5 text-zinc-500" />
-                            <span className="truncate max-w-[80px] hidden sm:inline whitespace-nowrap">{getActiveConfiguratorTitle()}</span>
-                            <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showConfigDropdown ? 'rotate-180' : ''}`} />
-                          </button>
-                          {showConfigDropdown && (
-                            <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl overflow-hidden z-30 ring-1 ring-black/20">
-                              <div className="p-2 border-b border-[#27272a] flex justify-between items-center text-xs text-zinc-500 font-bold uppercase tracking-wider">
-                                <span>Detect 1C Configurator</span>
-                                <button onClick={() => refreshConfigurators(settings?.configurator.window_title_pattern)} className="hover:text-zinc-300">
-                                  <RefreshCw className="w-3 h-3" />
-                                </button>
-                              </div>
-                              <div className="max-h-48 overflow-y-auto p-1">
-                                {detectedWindows.length === 0 ? (
-                                  <div className="p-3 text-xs text-zinc-600 text-center italic">No 1C Configurator found</div>
-                                ) : (
-                                  detectedWindows.map(win => (
-                                    <button
-                                      key={win.hwnd}
-                                      onClick={() => selectConfigurator(win.hwnd)}
-                                      className={`w-full text-left px-3 py-2 rounded-md text-xs truncate flex items-center justify-between ${settings?.configurator.selected_window_hwnd === win.hwnd ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200'}`}
-                                    >
-                                      <span className="truncate">{win.title}</span>
-                                      {settings?.configurator.selected_window_hwnd === win.hwnd && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
-                                    </button>
-                                  ))
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="h-4 w-px bg-zinc-700/50 mx-1 hidden sm:block flex-shrink-0" />
-
-                        {/* CONTEXT ACTIONS (DROPDOWN) */}
-                        <div className="relative flex-shrink-0">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShowGetCodeDropdown(!showGetCodeDropdown);
-                            }}
-                            className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
-                            title="Get Code Options"
-                          >
-                            <FileText className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline whitespace-nowrap">Get Code</span>
-                            <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showGetCodeDropdown ? 'rotate-180' : ''}`} />
-                          </button>
-                          {showGetCodeDropdown && (
-                            <div className="absolute bottom-full right-0 mb-2 w-40 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl overflow-hidden z-30 ring-1 ring-black/20 flex flex-col p-1">
-                              <button
-                                onClick={() => { fetchCodeForContext(true); setShowGetCodeDropdown(false); }}
-                                className="flex items-center gap-2 px-3 py-2 rounded-md text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left"
-                              >
-                                <FileText className="w-3.5 h-3.5" />
-                                <span>Module (All)</span>
-                              </button>
-                              <button
-                                onClick={() => { fetchCodeForContext(false); setShowGetCodeDropdown(false); }}
-                                className="flex items-center gap-2 px-3 py-2 rounded-md text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left"
-                              >
-                                <MousePointerClick className="w-3.5 h-3.5" />
-                                <span>Selection</span>
+                      {/* CONFIGURATOR SELECTOR */}
+                      <div className="relative dropdown-container flex-shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const next = !showConfigDropdown;
+                            if (next) refreshConfigurators(settings?.configurator.window_title_pattern);
+                            setShowConfigDropdown(next);
+                            if (next) {
+                              setShowModelDropdown(false);
+                              setShowGetCodeDropdown(false);
+                            }
+                          }}
+                          className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'} max-w-[140px]`}
+                          title="Select Configurator Window"
+                        >
+                          <Monitor className="w-3.5 h-3.5 text-zinc-500" />
+                          <span className="truncate max-w-[80px] hidden sm:inline whitespace-nowrap">{getActiveConfiguratorTitle()}</span>
+                          <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showConfigDropdown ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showConfigDropdown && (
+                          <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20">
+                            <div className="p-2 border-b border-[#27272a] flex justify-between items-center text-xs text-zinc-500 font-bold uppercase tracking-wider">
+                              <span>Detect 1C Configurator</span>
+                              <button onClick={() => refreshConfigurators(settings?.configurator.window_title_pattern)} className="hover:text-zinc-300">
+                                <RefreshCw className="w-3 h-3" />
                               </button>
                             </div>
-                          )}
-                        </div>
+                            <div className="max-h-48 overflow-y-auto p-1">
+                              {detectedWindows.length === 0 ? (
+                                <div className="p-3 text-xs text-zinc-600 text-center italic">No 1C Configurator found</div>
+                              ) : (
+                                detectedWindows.map(win => (
+                                  <button
+                                    key={win.hwnd}
+                                    onClick={() => selectConfigurator(win.hwnd)}
+                                    className={`w-full text-left px-3 py-2 rounded-md text-xs truncate flex items-center justify-between ${settings?.configurator.selected_window_hwnd === win.hwnd ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200'}`}
+                                  >
+                                    <span className="truncate">{win.title}</span>
+                                    {settings?.configurator.selected_window_hwnd === win.hwnd && <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="h-4 w-px bg-zinc-700/50 mx-1 hidden sm:block flex-shrink-0" />
+
+                      {/* CONTEXT ACTIONS (DROPDOWN) */}
+                      <div className="relative dropdown-container flex-shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const next = !showGetCodeDropdown;
+                            setShowGetCodeDropdown(next);
+                            if (next) {
+                              setShowModelDropdown(false);
+                              setShowConfigDropdown(false);
+                            }
+                          }}
+                          className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                          title="Get Code Options"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline whitespace-nowrap">Get Code</span>
+                          <ChevronDown className={`w-3 h-3 text-zinc-500 transition-transform ${showGetCodeDropdown ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showGetCodeDropdown && (
+                          <div className="absolute bottom-full right-0 mb-2 w-40 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20 flex flex-col p-1">
+                            <button
+                              onClick={() => { fetchCodeForContext(true); setShowGetCodeDropdown(false); }}
+                              className="flex items-center gap-2 px-3 py-2 rounded-md text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              <span>Module (All)</span>
+                            </button>
+                            <button
+                              onClick={() => { fetchCodeForContext(false); setShowGetCodeDropdown(false); }}
+                              className="flex items-center gap-2 px-3 py-2 rounded-md text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left"
+                            >
+                              <MousePointerClick className="w-3.5 h-3.5" />
+                              <span>Selection</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -865,7 +888,7 @@ function App() {
           invoke<AppSettings>('get_settings').then(setSettings);
         }}
       />
-    </div>
+    </div >
   );
 }
 

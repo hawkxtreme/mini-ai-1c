@@ -67,6 +67,7 @@ pub struct BSLClient {
     ws: Option<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
     server_process: Option<Child>,
     request_id: AtomicI32,
+    capabilities: Option<serde_json::Value>,
 }
 
 impl BSLClient {
@@ -75,13 +76,13 @@ impl BSLClient {
             ws: None,
             server_process: None,
             request_id: AtomicI32::new(1),
+            capabilities: None,
         }
     }
 
     pub fn is_connected(&self) -> bool {
         self.ws.is_some()
     }
-
 
     /// Start the BSL Language Server
     pub fn start_server(&mut self) -> Result<(), String> {
@@ -141,20 +142,54 @@ impl BSLClient {
                     if retries >= max_retries {
                          return Err(format!("Failed to connect to BSL LS after {} attempts: {}", max_retries, e));
                     }
-                    // Print warning but keep trying
                     println!("BSL LS connection attempt {}/{} failed, retrying in 500ms...", retries, max_retries);
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
             }
         }
         
-        // Initialize LSP
-        self.send_request("initialize", serde_json::json!({
+        // Initialize LSP with proper capabilities
+        let client_capabilities = serde_json::json!({
+            "textDocument": {
+                "synchronization": {
+                    "dynamicRegistration": true,
+                    "willSave": true,
+                    "willSaveWaitUntil": false,
+                    "didSave": true
+                },
+                "diagnostic": {
+                    "dynamicRegistration": true
+                },
+                "formatting": {
+                    "dynamicRegistration": true
+                },
+                "publishDiagnostics": {
+                    "relatedInformation": true,
+                    "tagSupport": {
+                        "valueSet": [1, 2]
+                    },
+                    "versionSupport": true
+                }
+            },
+            "workspace": {
+                "configuration": true,
+                "didChangeConfiguration": {
+                    "dynamicRegistration": true
+                }
+            }
+        });
+
+        let initialize_result = self.send_request("initialize", serde_json::json!({
             "processId": std::process::id(),
             "rootUri": null,
-            "capabilities": {}
+            "capabilities": client_capabilities,
+            "trace": "verbose"
         })).await?;
         
+        // Store server capabilities
+        self.capabilities = initialize_result.get("capabilities").cloned();
+        println!("[BSL LS] Initialized. Server capabilities: {:?}", self.capabilities.as_ref().map(|c| c.to_string()));
+
         // Notify initialized
         self.send_notification("initialized", serde_json::json!({})).await?;
         
@@ -233,13 +268,38 @@ impl BSLClient {
                 "text": code
             }
         })).await?;
-        println!("[BSL LS] Sent didOpen for {}", uri);
         
-        // Unlike request/response, diagnostics come as a notification "textDocument/publishDiagnostics"
-        // We need to listen for it. 
-        // NOTE: Since BSLClient is locked by Mutex in the command handler commands.rs, 
-        // we can safely read from the websocket here without race conditions from other commands.
-        
+        // Try Pull-Model Diagnostics (LSP 3.17+)
+        let supports_pull_diagnostics = self.capabilities.as_ref()
+            .and_then(|c| c.get("diagnosticProvider"))
+            .is_some();
+
+        if supports_pull_diagnostics {
+            println!("[BSL LS] Using pull-model diagnostics");
+            let result = self.send_request("textDocument/diagnostic", serde_json::json!({
+                "textDocument": {
+                    "uri": uri
+                }
+            })).await?;
+
+            // Close document
+            self.send_notification("textDocument/didClose", serde_json::json!({
+                "textDocument": {
+                    "uri": uri
+                }
+            })).await?;
+
+            if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
+                let diagnostics: Vec<Diagnostic> = items
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                return Ok(diagnostics);
+            }
+        }
+
+        // Fallback or parallel: Listen for publishDiagnostics
+        println!("[BSL LS] Falling back to publishDiagnostics listener");
         let ws = self.ws.as_ref().ok_or("Not connected")?;
         let mut ws = ws.lock().await;
 
@@ -351,8 +411,18 @@ impl BSLClient {
 
     /// Format code
     pub async fn format_code(&self, code: &str, uri: &str) -> Result<String, String> {
+        // Guard check
+        let can_format = self.capabilities.as_ref()
+            .and_then(|c| c.get("documentFormattingProvider"))
+            .and_then(|v| v.as_bool().or_else(|| v.as_object().map(|_| true)))
+            .unwrap_or(false);
+
+        if !can_format {
+            return Err("BSL LS does not support formatting for this document".to_string());
+        }
+
         // Open document
-        self.send_request("textDocument/didOpen", serde_json::json!({
+        self.send_notification("textDocument/didOpen", serde_json::json!({
             "textDocument": {
                 "uri": uri,
                 "languageId": "bsl",
@@ -369,6 +439,13 @@ impl BSLClient {
             "options": {
                 "tabSize": 4,
                 "insertSpaces": true
+            }
+        })).await?;
+        
+        // Close document
+        self.send_notification("textDocument/didClose", serde_json::json!({
+            "textDocument": {
+                "uri": uri
             }
         })).await?;
         
