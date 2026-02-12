@@ -37,6 +37,8 @@ pub fn run() {
             set_active_profile,
             stream_chat,
             analyze_bsl,
+            analyze_bsl_structure,
+            get_active_scope,
             format_bsl,
             find_configurator_windows_cmd,
             get_code_from_configurator,

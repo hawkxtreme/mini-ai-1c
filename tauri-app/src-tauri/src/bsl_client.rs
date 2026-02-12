@@ -62,6 +62,17 @@ pub struct Position {
     pub character: u32,
 }
 
+/// LSP Symbol Information (for DocumentSymbol)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: i32,
+    pub range: Range,
+    #[serde(rename = "selectionRange")]
+    pub selection_range: Range,
+    pub children: Option<Vec<SymbolInfo>>,
+}
+
 /// BSL Language Server client
 pub struct BSLClient {
     ws: Option<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
@@ -407,6 +418,45 @@ impl BSLClient {
                 }
             }
         }
+    }
+
+    /// Get symbols (functions/procedures) for a piece of code
+    pub async fn get_symbols(&self, code: &str, uri: &str) -> Result<Vec<SymbolInfo>, String> {
+        println!("[BSL LS] Requesting symbols for URI: {}", uri);
+
+        // Send didOpen notification
+        self.send_notification("textDocument/didOpen", serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "bsl",
+                "version": 1,
+                "text": code
+            }
+        })).await?;
+
+        // Request symbols
+        let result = self.send_request("textDocument/documentSymbol", serde_json::json!({
+            "textDocument": {
+                "uri": uri
+            }
+        })).await?;
+
+        // Close document
+        self.send_notification("textDocument/didClose", serde_json::json!({
+            "textDocument": {
+                "uri": uri
+            }
+        })).await?;
+
+        if let Some(items) = result.as_array() {
+            let symbols: Vec<SymbolInfo> = items
+                .iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect();
+            return Ok(symbols);
+        }
+
+        Ok(Vec::new())
     }
 
     /// Format code

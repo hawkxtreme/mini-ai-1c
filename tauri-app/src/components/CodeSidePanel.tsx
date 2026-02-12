@@ -2,6 +2,8 @@ import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight, GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
 import { DiffEditor, Editor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
+import { invoke } from '@tauri-apps/api/core';
+import { SymbolInfo } from '@/App';
 
 interface BslDiagnostic {
     line: number;
@@ -18,6 +20,7 @@ interface CodeSidePanelProps {
     diagnostics: BslDiagnostic[];
     onApply: () => void;
     isApplying: boolean;
+    onScopeChange?: (scope: SymbolInfo | null) => void;
 }
 
 export function CodeSidePanel({
@@ -28,7 +31,8 @@ export function CodeSidePanel({
     onModifiedCodeChange,
     diagnostics,
     onApply,
-    isApplying
+    isApplying,
+    onScopeChange
 }: CodeSidePanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
     const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
@@ -37,6 +41,8 @@ export function CodeSidePanel({
 
     const panelRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<any>(null);
+    const isInternalChange = useRef(false);
+    const [localError, setLocalError] = useState<string | null>(null);
 
     const errorCount = useMemo(() => diagnostics.filter(d => d.severity === 'error').length, [diagnostics]);
     const warningCount = useMemo(() => diagnostics.filter(d => d.severity !== 'error').length, [diagnostics]);
@@ -93,6 +99,12 @@ export function CodeSidePanel({
         }
     }, [isOpen]);
 
+    // Reset internal change flag and error when prop updates
+    useEffect(() => {
+        isInternalChange.current = false;
+        setLocalError(null);
+    }, [modifiedCode]);
+
     if (!isOpen) return null;
 
     return (
@@ -114,6 +126,13 @@ export function CodeSidePanel({
                 <div className="flex items-center gap-2">
                     <Terminal className="w-4 h-4 text-blue-400" />
                     <span className="font-semibold text-zinc-200 text-sm whitespace-nowrap">Code Editor</span>
+
+                    {localError && (
+                        <div className="ml-3 flex items-center gap-1.5 px-2 py-0.5 bg-red-500/10 text-red-400 text-[10px] rounded border border-red-500/20 animate-pulse">
+                            <AlertCircle className="w-3 h-3" />
+                            <span>Editor Error</span>
+                        </div>
+                    )}
 
                     <div className="flex bg-[#27272a] rounded-lg p-0.5 ml-4 flex-shrink-0">
                         <button
@@ -200,6 +219,30 @@ export function CodeSidePanel({
                         onMount={(editor, monaco) => {
                             registerBSL(monaco);
                             editorRef.current = editor;
+                            if (!editor) return;
+
+                            editor.onDidChangeModelContent(() => {
+                                if (!isInternalChange.current) {
+                                    isInternalChange.current = true;
+                                    onModifiedCodeChange(editor.getValue());
+                                }
+                            });
+
+                            editor.onDidChangeCursorPosition(async (e) => {
+                                if (onScopeChange) {
+                                    try {
+                                        const scope = await invoke<SymbolInfo | null>('get_active_scope', {
+                                            code: editor.getValue(),
+                                            line: e.position.lineNumber - 1,
+                                            character: e.position.column - 1
+                                        });
+                                        onScopeChange(scope);
+                                    } catch (err) {
+                                        console.warn("Failed to get scope:", err);
+                                        onScopeChange(null);
+                                    }
+                                }
+                            });
                         }}
                         onChange={(value) => onModifiedCodeChange(value || '')}
                         options={{
@@ -223,9 +266,31 @@ export function CodeSidePanel({
                         onMount={(editor, monaco) => {
                             registerBSL(monaco);
                             const modifiedEditor = editor.getModifiedEditor();
+                            if (!modifiedEditor) return;
+
                             editorRef.current = modifiedEditor;
+
                             modifiedEditor.onDidChangeModelContent(() => {
-                                onModifiedCodeChange(modifiedEditor.getValue());
+                                if (!isInternalChange.current) {
+                                    isInternalChange.current = true;
+                                    onModifiedCodeChange(modifiedEditor.getValue());
+                                }
+                            });
+
+                            modifiedEditor.onDidChangeCursorPosition(async (e) => {
+                                if (onScopeChange) {
+                                    try {
+                                        const scope = await invoke<SymbolInfo | null>('get_active_scope', {
+                                            code: modifiedEditor.getValue(),
+                                            line: e.position.lineNumber - 1,
+                                            character: e.position.column - 1
+                                        });
+                                        onScopeChange(scope);
+                                    } catch (err) {
+                                        console.error("[CodeSidePanel] get_active_scope error:", err);
+                                        onScopeChange(null);
+                                    }
+                                }
                             });
                         }}
                         options={{

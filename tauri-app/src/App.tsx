@@ -50,6 +50,22 @@ interface AppSettings {
   };
 }
 
+interface Pos {
+  line: number;
+  character: number;
+}
+
+interface BslRange {
+  start: Pos;
+  end: Pos;
+}
+
+export interface SymbolInfo {
+  name: string;
+  kind: string;
+  range: BslRange;
+}
+
 interface BslStatus {
   installed: boolean;
   java_info: string;
@@ -77,6 +93,7 @@ function App() {
   const [showSidePanel, setShowSidePanel] = useState(false);
   const [originalCode, setOriginalCode] = useState('');
   const [modifiedCode, setModifiedCode] = useState('');
+  const [activeScope, setActiveScope] = useState<SymbolInfo | null>(null);
   const [diagnostics, setDiagnostics] = useState<BslDiagnostic[]>([]);
   const [isApplying, setIsApplying] = useState(false);
   const [contextMode, setContextMode] = useState<'module' | 'selection'>('selection');
@@ -292,6 +309,7 @@ function App() {
           setOriginalCode(code);
           setModifiedCode(code); // Initially modified is same as original
           setDiagnostics([]);
+          setActiveScope(null); // Clear active scope when new code is fetched
           setShowSidePanel(true);
         }
       } catch (e) {
@@ -303,6 +321,7 @@ function App() {
 
 
   const handleApplyToConfigurator = async () => {
+    console.log("[Apply] Started handleApplyToConfigurator");
     setIsApplying(true);
     let targetHwnd = settings?.configurator.selected_window_hwnd;
     console.log("[Apply] Target HWND from settings:", targetHwnd);
@@ -337,6 +356,7 @@ function App() {
     } else {
       console.warn("[Apply] Missing HWND or Code");
     }
+    console.log("[Apply] Setting isApplying to false");
     setIsApplying(false);
   };
 
@@ -359,13 +379,41 @@ function App() {
 
     // Auto-attach code context if active
     if (modifiedCode?.trim()) {
-      contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n\`\`\`bsl\n${modifiedCode}\n\`\`\`\n`;
+      let codeWithMarkers = modifiedCode;
 
-      // Attach diagnostics if any
-      if (diagnostics.length > 0) {
-        const diagStr = diagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`).join('\n');
-        contextPayload += `\n=== DETECTED ERRORS ===\n${diagStr}\n`;
-        contextPayload += `\nPlease fix these errors in the code.`;
+      // If we have an active scope, we could theoretically try to inject markers into the text,
+      // but it's safer to just specify it clearly in the prompt as we do below.
+
+      contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n${activeScope ? `(Focusing on: ${activeScope.name})\n` : "Focusing on: Конец Модуля (General Module Mode)\n"}\`\`\`bsl\n${codeWithMarkers}\n\`\`\`\n`;
+
+      if (activeScope) {
+        contextPayload += `\nВНИМАНИЕ: Твой фокус - функция/процедура "${activeScope.name}". 
+ТЕБЕ ЗАПРЕЩЕНО:
+- Рефакторить любой другой код в модуле.
+- Изменять существующие вызовы, если это не касается твоей задачи.
+- Возвращать весь модуль. Верни ТОЛЬКО измененную функцию (полностью, от "Функция" до "КонецФункции") с тегом // ACTION: REPLACE ${activeScope.name} на ПЕРВОЙ строке ВНУТРИ блока \`\`\`bsl.
+ВАЖНО: Весь возвращаемый код и тег ACTION должны быть ВНУТРИ одних triple backticks.\n`;
+      } else {
+        contextPayload += `\nВНИМАНИЕ: Ты работаешь в режиме добавления кода (Конец Модуля). 
+ТЕБЕ ЗАПРЕЩЕНО:
+- Рефакторить существующие функции/процедуры.
+- Изменять старый код, если об этом не просили.
+- Вносить любые правки в код, которые не ведут напрямую к выполнению задачи.
+Если ты добавляешь новую функцию, используй тег // ACTION: ADD ПЕРВОЙ строкой ВНУТРИ блока \`\`\`bsl и добавь её в самый конец модуля.\n`;
+      }
+
+      // Filter diagnostics: ONLY those in activeScope or ONLY Errors if no scope
+      const relevantDiagnostics = activeScope
+        ? diagnostics.filter(d => d.line >= activeScope.range.start.line && d.line <= activeScope.range.end.line)
+        : diagnostics.filter(d => d.severity === 'error' || d.severity === 'Error');
+
+      if (relevantDiagnostics.length > 0) {
+        const diagStr = relevantDiagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`).join('\n');
+        contextPayload += `\n=== DETECTED ERRORS IN YOUR FOCUS AREA ===\n${diagStr}\n`;
+        contextPayload += `\nИНСТРУКЦИЯ ПО ОШИБКАМ:
+1. Если твоя задача - ИСПРАВИТЬ ошибки, то исправь их.
+2. Если твоя задача - ДОБАВИТЬ код или изменить логику, НЕ ИСПРАВЛЯЙ существующие ошибки автоматически (оставь их как есть, чтобы не менять поведение старого кода). 
+3. В случае (2) просто УПОМЯНИ в своем текстовом ответе, что ты заметил ошибки в строках X и Y, но не трогал их.`;
       }
     }
 
@@ -376,6 +424,8 @@ function App() {
 
       await invoke('stream_chat', {
         messages: payloadMessages,
+        original_code: originalCode || null,
+        target_scope: activeScope || null,
       });
 
     } catch (err) {
@@ -428,10 +478,30 @@ function App() {
     appWindow.close().catch(e => console.error('Close error:', e));
   };
 
-  const handleApplyCode = useCallback((code: string) => {
-    setModifiedCode(code);
-    setShowSidePanel(true);
-  }, []);
+  const handleApplyCode = useCallback(async (newSnippet: string) => {
+    if (!originalCode || !modifiedCode) {
+      setModifiedCode(newSnippet);
+      setShowSidePanel(true);
+      return;
+    }
+
+    // If the snippet looks like a full module or we are in a simple state, just set it.
+    // But usually, we want to merge it to avoid deleting previous work.
+    try {
+      const merged = await invoke<string>('apply_smart_merge', {
+        original: modifiedCode, // We merge into our current working copy (modifiedCode)
+        aiResponse: newSnippet,
+        targetScope: activeScope || null
+      });
+      setModifiedCode(merged);
+      setShowSidePanel(true);
+    } catch (err) {
+      console.error("Smart Merge failed:", err);
+      // Fallback: at least show it so the user can see what happened
+      setModifiedCode(newSnippet);
+      setShowSidePanel(true);
+    }
+  }, [originalCode, modifiedCode, activeScope]);
 
   return (
     <div className="flex flex-col h-screen bg-transparent">
@@ -487,6 +557,7 @@ function App() {
               setOriginalCode('');
               setModifiedCode('');
               setDiagnostics([]);
+              setActiveScope(null);
             }}
             className="p-2 hover:bg-[#27272a] rounded-lg transition-colors group"
             title="Clear Chat & Editor"
@@ -589,6 +660,13 @@ function App() {
           {/* Input Area (now inside the left column) */}
           <div className="p-4 bg-[#09090b] border-t border-[#27272a]">
             <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col">
+              {activeScope && (
+                <div className="mx-4 mt-2 mb-0 flex items-center gap-2 text-[10px] text-zinc-500 animate-in fade-in slide-in-from-top-1">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></div>
+                  <span>Focus: </span>
+                  <span className="font-mono text-zinc-300 font-semibold">{activeScope.name}</span>
+                </div>
+              )}
 
               <textarea
                 ref={inputRef}
@@ -775,6 +853,7 @@ function App() {
             diagnostics={diagnostics}
             onApply={handleApplyToConfigurator}
             isApplying={isApplying}
+            onScopeChange={(scope) => setActiveScope(scope)}
           />
         </div>
       </div>

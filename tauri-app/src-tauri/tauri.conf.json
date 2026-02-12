@@ -5,7 +5,7 @@
   "identifier": "com.miniai1c.agent",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -17,8 +17,8 @@
         "height": 800,
         "minWidth": 400,
         "minHeight": 600,
-        "decorations": false,
-        "transparent": true
+        "decorations": true,
+        "transparent": false
       }
     ],
     "security": {
