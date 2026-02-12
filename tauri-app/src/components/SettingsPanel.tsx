@@ -170,7 +170,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
     return (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-            <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-4xl h-[85vh] overflow-hidden flex flex-col shadow-2xl">
+            <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-[95vw] max-w-4xl h-[85vh] overflow-hidden flex flex-col shadow-2xl">
                 {/* Header */}
                 <div data-tauri-drag-region className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900 select-none">
                     <h2 className="text-xl font-bold text-zinc-100 pointer-events-none">Settings</h2>
@@ -180,17 +180,16 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 </div>
 
                 {/* Tabs */}
-                <div className="flex border-b border-zinc-800 bg-zinc-900/50">
+                <div className="flex border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto scrollbar-hide no-scrollbar">
                     {[
                         { id: 'llm', label: 'LLM Profiles', icon: Cpu },
                         { id: 'configurator', label: 'Configurator', icon: Monitor },
                         { id: 'bsl', label: 'BSL Server', icon: FileCode },
-                        { id: 'ui', label: 'Interface', icon: CheckCircle },
                     ].map((t) => (
                         <button
                             key={t.id}
                             onClick={() => setTab(t.id as any)}
-                            className={`flex items-center gap-2 px-6 py-4 text-sm font-medium transition-colors border-b-2 ${tab === t.id
+                            className={`flex items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 text-xs sm:text-sm font-medium transition-colors border-b-2 whitespace-nowrap ${tab === t.id
                                 ? 'border-blue-500 text-blue-400 bg-zinc-800/50'
                                 : 'border-transparent text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/30'
                                 }`}
@@ -212,7 +211,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* Configurator Tab */}
                     {tab === 'configurator' && settings && (
-                        <div className="p-8 w-full overflow-y-auto">
+                        <div className="p-8 w-full h-full overflow-y-auto">
                             <div className="max-w-2xl mx-auto space-y-8">
                                 <section>
                                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
@@ -377,43 +376,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                                     {bslStatus?.connected ? 'Connected' : 'Disconnected'}
                                                 </span>
                                             </div>
-                                        </div>
-                                    </div>
-                                </section>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* UI Tab */}
-                    {tab === 'ui' && settings && (
-                        <div className="p-8 w-full overflow-y-auto">
-                            <div className="max-w-xl mx-auto">
-                                <section>
-                                    <h3 className="text-lg font-medium mb-4">Behavior</h3>
-                                    <div className="bg-zinc-800/50 border border-zinc-700 rounded-xl p-5 space-y-4">
-                                        <div className="flex items-center gap-2">
-                                            <input
-                                                type="checkbox"
-                                                checked={settings.ui.minimize_to_tray}
-                                                onChange={(e) => setSettings({
-                                                    ...settings,
-                                                    ui: { ...settings.ui, minimize_to_tray: e.target.checked }
-                                                })}
-                                                className="rounded bg-zinc-700 border-zinc-600 text-blue-500 focus:ring-blue-500"
-                                            />
-                                            <span className="text-sm">Minimize to system tray</span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <input
-                                                type="checkbox"
-                                                checked={settings.ui.start_minimized}
-                                                onChange={(e) => setSettings({
-                                                    ...settings,
-                                                    ui: { ...settings.ui, start_minimized: e.target.checked }
-                                                })}
-                                                className="rounded bg-zinc-700 border-zinc-600 text-blue-500 focus:ring-blue-500"
-                                            />
-                                            <span className="text-sm">Start minimized</span>
                                         </div>
                                     </div>
                                 </section>

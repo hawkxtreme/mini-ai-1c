@@ -160,22 +160,22 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     return (
         <div className="flex h-full w-full">
             {/* Sidebar List */}
-            <div className="w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-3">
-                <div className="space-y-2">
+            <div className="w-40 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
+                <div className="space-y-1.5">
                     {profiles.profiles.map(p => (
                         <div
                             key={p.id}
                             onClick={() => setEditingId(p.id)}
-                            className={`p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
+                            className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
                                 ? 'border-blue-500 bg-blue-500/10'
                                 : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
                                 }`}
                         >
-                            <div className="flex justify-between items-center mb-1">
-                                <span className="font-medium text-zinc-200">{p.name}</span>
-                                {profiles.active_profile_id === p.id && <Check className="w-4 h-4 text-green-500" />}
+                            <div className="flex justify-between items-center mb-0.5">
+                                <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
+                                {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-green-500 flex-shrink-0" />}
                             </div>
-                            <div className="text-xs text-zinc-500 truncate">{p.provider} • {p.model}</div>
+                            <div className="text-[10px] text-zinc-500 truncate">{p.provider} • {p.model}</div>
                         </div>
                     ))}
                     <button
@@ -202,11 +202,11 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         </div>
 
                         {/* Name & Provider */}
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Profile Name</label>
                                 <input
-                                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none"
+                                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none"
                                     value={editForm.name}
                                     onChange={e => setEditForm({ ...editForm, name: e.target.value })}
                                 />
@@ -214,15 +214,20 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div>
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Provider</label>
                                 <Select value={editForm.provider} onValueChange={v => {
-                                    const def = PROVIDERS.find(p => p.value === v);
-                                    setEditForm({
-                                        ...editForm,
-                                        provider: v,
-                                        base_url: def?.defaultUrl || '',
-                                        model: def?.defaultModel || ''
+                                    setEditForm(prev => {
+                                        if (!prev) return null;
+                                        const def = PROVIDERS.find(p => p.value === v);
+                                        return {
+                                            ...prev,
+                                            provider: v,
+                                            base_url: def?.defaultUrl || '',
+                                            model: def?.defaultModel || ''
+                                        };
                                     });
                                 }}>
-                                    <SelectTrigger className="mt-1 bg-zinc-950 border-zinc-800"><SelectValue /></SelectTrigger>
+                                    <SelectTrigger className="w-full mt-1 bg-zinc-950 border border-zinc-800 h-9 px-3 rounded-md focus:ring-1 focus:ring-blue-500 shadow-none transition-all outline-none">
+                                        <SelectValue />
+                                    </SelectTrigger>
                                     <SelectContent>
                                         {PROVIDERS.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
                                     </SelectContent>
@@ -230,11 +235,10 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             </div>
                         </div>
 
-                        {/* Base URL (Swapped here) */}
                         <div>
                             <label className="text-xs text-zinc-500 uppercase font-bold px-1">Base URL</label>
                             <input
-                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none font-mono text-zinc-400"
+                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none font-mono text-zinc-400"
                                 value={editForm.base_url || ''}
                                 onChange={e => setEditForm({ ...editForm, base_url: e.target.value })}
                             />
@@ -245,7 +249,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
                             <input
                                 type="password"
-                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none placeholder-zinc-700"
+                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none placeholder-zinc-700"
                                 placeholder={editForm.api_key_encrypted ? "•••••••••••• (Encrypted)" : "sk-..."}
                                 value={newApiKey}
                                 onChange={e => setNewApiKey(e.target.value)}
@@ -285,7 +289,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             });
                                         }}
                                     >
-                                        <SelectTrigger className="w-full bg-zinc-900 border-zinc-700">
+                                        <SelectTrigger className="w-full bg-zinc-900 border-zinc-700 h-9">
                                             <SelectValue placeholder="Select a model" />
                                         </SelectTrigger>
                                         <SelectContent className="max-h-60 w-[var(--radix-select-trigger-width)]">
@@ -343,12 +347,12 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 );
                             })()}
 
-                            <div className="grid grid-cols-2 gap-4 pt-2">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                                 <div>
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Context Window</label>
                                     <input
                                         type="number"
-                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-sm"
+                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm"
                                         value={editForm.max_tokens}
                                         onChange={e => setEditForm({ ...editForm, max_tokens: parseInt(e.target.value) || 0 })}
                                     />
@@ -357,7 +361,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Temperature</label>
                                     <input
                                         type="number" step="0.1" min="0" max="2"
-                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-sm"
+                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm"
                                         value={editForm.temperature}
                                         onChange={e => setEditForm({ ...editForm, temperature: parseFloat(e.target.value) || 0.7 })}
                                     />

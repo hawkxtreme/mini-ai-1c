@@ -43,38 +43,12 @@ impl Default for BSLServerSettings {
     }
 }
 
-/// UI-related settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UISettings {
-    pub theme: String,
-    pub minimize_to_tray: bool,
-    pub start_minimized: bool,
-    pub window_width: u32,
-    pub window_height: u32,
-    pub window_x: i32,
-    pub window_y: i32,
-}
-
-impl Default for UISettings {
-    fn default() -> Self {
-        Self {
-            theme: "dark".to_string(),
-            minimize_to_tray: true,
-            start_minimized: false,
-            window_width: 700,
-            window_height: 800,
-            window_x: 100,
-            window_y: 100,
-        }
-    }
-}
 
 /// Main application settings container
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub configurator: ConfiguratorSettings,
     pub bsl_server: BSLServerSettings,
-    pub ui: UISettings,
     pub active_llm_profile: String,
     #[serde(default)]
     pub llm: LLMGlobalSettings,
