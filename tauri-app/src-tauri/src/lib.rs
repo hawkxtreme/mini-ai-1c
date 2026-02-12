@@ -28,6 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_mcp_bridge::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(tokio::sync::Mutex::new(crate::bsl_client::BSLClient::new()))
+        .manage(crate::commands::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
@@ -36,6 +37,7 @@ pub fn run() {
             delete_profile,
             set_active_profile,
             stream_chat,
+            stop_chat,
             analyze_bsl,
             format_bsl,
             find_configurator_windows_cmd,
@@ -60,7 +62,7 @@ pub fn run() {
             check_bsl_status_cmd,
             install_bsl_ls_cmd,
             reconnect_bsl_ls_cmd,
-            diagnose_bsl_ls_cmd
+            diagnose_bsl_ls_cmd,
         ])
         .setup(|app| {
             // Setup Tray Icon

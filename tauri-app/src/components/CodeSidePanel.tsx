@@ -2,6 +2,7 @@ import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { X, Check, AlertTriangle, Terminal, AlertCircle, Maximize2, Minimize2, FileCode, ArrowLeftRight, GripVertical, ChevronUp, ChevronDown } from 'lucide-react';
 import { DiffEditor, Editor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
+import { invoke } from '@tauri-apps/api/core';
 
 interface BslDiagnostic {
     line: number;
@@ -18,6 +19,7 @@ interface CodeSidePanelProps {
     diagnostics: BslDiagnostic[];
     onApply: () => void;
     isApplying: boolean;
+    isValidating: boolean;
 }
 
 export function CodeSidePanel({
@@ -28,7 +30,8 @@ export function CodeSidePanel({
     onModifiedCodeChange,
     diagnostics,
     onApply,
-    isApplying
+    isApplying,
+    isValidating
 }: CodeSidePanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
     const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
@@ -41,6 +44,7 @@ export function CodeSidePanel({
     const errorCount = useMemo(() => diagnostics.filter(d => d.severity === 'error').length, [diagnostics]);
     const warningCount = useMemo(() => diagnostics.filter(d => d.severity !== 'error').length, [diagnostics]);
 
+    // ... resizing logic same ...
     // Handle resizing
     const startResizing = useCallback((e: React.MouseEvent) => {
         setIsResizing(true);
@@ -134,8 +138,12 @@ export function CodeSidePanel({
                         </button>
                     </div>
 
-                    {/* Validation Summary */}
-                    {(errorCount > 0 || warningCount > 0) && (
+                    {/* Validation Summary or Loader */}
+                    {isValidating ? (
+                        <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a]/50 text-zinc-500 text-[10px] animate-pulse">
+                            <span>Validating...</span>
+                        </div>
+                    ) : (errorCount > 0 || warningCount > 0) ? (
                         <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700 flex-shrink-0">
                             {errorCount > 0 && (
                                 <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold">
@@ -150,7 +158,7 @@ export function CodeSidePanel({
                                 </div>
                             )}
                         </div>
-                    )}
+                    ) : null}
                 </div>
                 <div className="flex items-center gap-1">
                     <button
@@ -224,6 +232,7 @@ export function CodeSidePanel({
                             registerBSL(monaco);
                             const modifiedEditor = editor.getModifiedEditor();
                             editorRef.current = modifiedEditor;
+
                             modifiedEditor.onDidChangeModelContent(() => {
                                 onModifiedCodeChange(modifiedEditor.getValue());
                             });
@@ -239,6 +248,10 @@ export function CodeSidePanel({
                         }}
                     />
                 )}
+            </div>
+
+            <div className="hidden">
+                {/* Hack: Pre-load context menu logic? No, we do it in onMount */}
             </div>
 
             {/* Problems Panel - VS Code Style */}

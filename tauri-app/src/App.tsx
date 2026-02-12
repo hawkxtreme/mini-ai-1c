@@ -79,6 +79,7 @@ function App() {
   const [modifiedCode, setModifiedCode] = useState('');
   const [diagnostics, setDiagnostics] = useState<BslDiagnostic[]>([]);
   const [isApplying, setIsApplying] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
   const [contextMode, setContextMode] = useState<'module' | 'selection'>('selection');
 
   // Configurator Selection State
@@ -131,14 +132,18 @@ function App() {
   useEffect(() => {
     if (!modifiedCode) {
       setDiagnostics([]);
+      setIsValidating(false);
       return;
     }
     const timer = setTimeout(async () => {
+      setIsValidating(true);
       try {
         const diags = await invoke<BslDiagnostic[]>('analyze_bsl', { code: modifiedCode });
         setDiagnostics(diags);
       } catch (e) {
         console.warn("Analysis check failed", e);
+      } finally {
+        setIsValidating(false);
       }
     }, 800);
     return () => clearTimeout(timer);
@@ -426,6 +431,16 @@ function App() {
   };
   const close = () => {
     appWindow.close().catch(e => console.error('Close error:', e));
+  };
+
+  const handleStop = async () => {
+    try {
+      await invoke('stop_chat');
+      setIsLoading(false);
+      setChatStatus('Stopped');
+    } catch (e) {
+      console.error("Failed to stop chat:", e);
+    }
   };
 
   const handleApplyCode = useCallback((code: string) => {
@@ -753,11 +768,21 @@ function App() {
                 )}
 
                 <button
-                  onClick={sendMessage}
-                  disabled={isLoading || !input.trim()}
-                  className={`p-2 rounded-lg transition-colors flex-shrink-0 ${input.trim() ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20' : 'bg-[#27272a] text-zinc-600'}`}
+                  onClick={isLoading ? handleStop : sendMessage}
+                  disabled={!isLoading && !input.trim()}
+                  className={`p-2 rounded-lg transition-colors flex-shrink-0 ${isLoading
+                    ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 border border-red-500/20'
+                    : input.trim()
+                      ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
+                      : 'bg-[#27272a] text-zinc-600'
+                    }`}
+                  title={isLoading ? "Stop Generation" : "Send Message"}
                 >
-                  <ArrowUp className="w-4 h-4" strokeWidth={2.5} />
+                  {isLoading ? (
+                    <Square className="w-4 h-4 fill-current" />
+                  ) : (
+                    <ArrowUp className="w-4 h-4" strokeWidth={2.5} />
+                  )}
                 </button>
               </div>
             </div>
@@ -775,6 +800,7 @@ function App() {
             diagnostics={diagnostics}
             onApply={handleApplyToConfigurator}
             isApplying={isApplying}
+            isValidating={isValidating}
           />
         </div>
       </div>

@@ -62,6 +62,12 @@ pub struct Position {
     pub character: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Location {
+    pub uri: String,
+    pub range: Range,
+}
+
 /// BSL Language Server client
 pub struct BSLClient {
     ws: Option<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
@@ -290,11 +296,15 @@ impl BSLClient {
             })).await?;
 
             if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
+                println!("[BSL LS] Pull diagnostics raw: {:?}", items);
                 let diagnostics: Vec<Diagnostic> = items
                     .iter()
                     .filter_map(|v| serde_json::from_value(v.clone()).ok())
                     .collect();
+                println!("[BSL LS] Parsed diagnostics count: {}", diagnostics.len());
                 return Ok(diagnostics);
+            } else {
+                println!("[BSL LS] Pull diagnostics 'items' field missing or not array");
             }
         }
 
@@ -460,6 +470,132 @@ impl BSLClient {
         
         // No edits, return original
         Ok(code.to_string())
+    }
+
+    /// Go to Definition
+    pub async fn goto_definition(&self, uri: &str, line: u32, character: u32) -> Result<Option<crate::bsl_client::Location>, String> {
+        // Build params
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri
+            },
+            "position": {
+                "line": line,
+                "character": character
+            }
+        });
+
+        // Send request
+        let result = self.send_request("textDocument/definition", params).await?;
+
+        // Parse result (Location | Location[] | LocationLink[] | null)
+        if result.is_null() {
+            return Ok(None);
+        }
+
+        // Case 1: Single Location
+        if let Ok(location) = serde_json::from_value::<crate::bsl_client::Location>(result.clone()) {
+            return Ok(Some(location));
+        }
+
+        // Case 2: Array of Locations (take first)
+        if let Ok(locations) = serde_json::from_value::<Vec<crate::bsl_client::Location>>(result.clone()) {
+            if let Some(first) = locations.first() {
+                return Ok(Some(first.clone()));
+            }
+        }
+        
+        // Case 3: Array of LocationLinks (take first)
+        // Structure: targetUri, targetRange, targetSelectionRange
+        if let Some(links) = result.as_array() {
+            if let Some(first_link) = links.first() {
+                // Try to extract uri/range manually as it differs from Location
+                if let Some(target_uri) = first_link.get("targetUri").and_then(|v| v.as_str()) {
+                    if let Some(target_range) = first_link.get("targetSelectionRange") { // Use selection range for precision
+                         if let Ok(range) = serde_json::from_value::<crate::bsl_client::Range>(target_range.clone()) {
+                             return Ok(Some(crate::bsl_client::Location {
+                                 uri: target_uri.to_string(),
+                                 range
+                             }));
+                         }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Resolve definition and return source code
+    pub async fn resolve_definition(&self, code: &str, line: u32, character: u32) -> Result<String, String> {
+        let uri = "file:///temp_definition.bsl";
+
+        // 1. Open document
+        self.send_notification("textDocument/didOpen", serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "bsl", // "bsl" (1c)
+                "version": 1,
+                "text": code
+            }
+        })).await?;
+
+        // 2. Request definition
+        let location_opt = self.goto_definition(uri, line, character).await?;
+
+        // 3. Close document
+        self.send_notification("textDocument/didClose", serde_json::json!({
+            "textDocument": {
+                "uri": uri
+            }
+        })).await?;
+
+        // 4. Process result
+        if let Some(location) = location_opt {
+            let target_uri = location.uri;
+            
+            // Clean up URI (file:///...)
+            let path_str = if target_uri.starts_with("file:///") {
+                // Windows: file:///c:/... -> c:/...
+                // Unix: file:///usr/... -> /usr/...
+                if cfg!(windows) {
+                    &target_uri[8..]
+                } else {
+                    &target_uri[7..]
+                }
+            } else if target_uri.starts_with("file://") {
+                 &target_uri[7..]
+            } else {
+                &target_uri
+            };
+
+            let path_decoded = urlencoding::decode(path_str).map_err(|e| e.to_string())?;
+            let path = std::path::Path::new(path_decoded.as_ref());
+
+            if path.exists() {
+                 let content = tokio::fs::read_to_string(path).await
+                     .map_err(|e| format!("Failed to read file: {}", e))?;
+                 
+                 // Extract range? Or return whole method?
+                 // Usually we want the whole method. BSL LS returns range of the Name.
+                 // We can try to heuristic parsing or just return the whole file if it's small, 
+                 // OR better: return a snippet around the definition.
+                 // For BSL, often it points to "Procedure MyProc()".
+                 // Let's return the whole file for now, or maybe 50 lines?
+                 // Ideally we want the Function body. 
+                 
+                 // Simple heuristic: read +- 50 lines? 
+                 // No, let's just return the content and let the UI/AI decide.
+                 // Actually, for "Context" we want the function body.
+                 // Let's return the whole file content and let the frontend slice it? 
+                 // Or just return the whole file content.
+                 return Ok(content);
+            } else {
+                return Err(format!("File not found: {}", path.display()));
+            }
+        }
+        
+        Err("Definition not found".to_string())
     }
 
     /// Stop the server

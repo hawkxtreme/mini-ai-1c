@@ -13,6 +13,7 @@ interface WindowInfo {
 interface BslStatus {
     installed: boolean;
     java_info: string;
+    connected: boolean;
 }
 
 interface AppSettings {
@@ -370,6 +371,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                                     {bslStatus?.installed ? 'Installed' : 'Not Found'}
                                                 </span>
                                             </div>
+                                            <div className="flex justify-between pt-2">
+                                                <span className="text-zinc-400">LSP Connection:</span>
+                                                <span className={bslStatus?.connected ? 'text-green-400' : 'text-red-400'}>
+                                                    {bslStatus?.connected ? 'Connected' : 'Disconnected'}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                 </section>
@@ -428,7 +435,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                         </button>
                     )}
                 </div>
-            </div>
-        </div>
+            </div >
+        </div >
     );
 }

@@ -5,7 +5,7 @@
   "identifier": "com.miniai1c.agent",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1440",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
