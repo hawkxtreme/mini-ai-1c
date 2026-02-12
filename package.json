@@ -7,7 +7,7 @@
     ],
     "scripts": {
         "dev": "npm run app:dev --workspace=tauri-app",
-        "build": "npm run build --workspace=tauri-app",
+        "build": "npm run app:build --workspace=tauri-app",
         "install-all": "npm install && npm install --workspace=tauri-app",
         "test:rust": "cd tauri-app/src-tauri && cargo test"
     },
