@@ -1,0 +1,15 @@
+{
+    "name": "mini-ai-1c-root",
+    "version": "1.0.0",
+    "private": true,
+    "workspaces": [
+        "tauri-app"
+    ],
+    "scripts": {
+        "dev": "npm run app:dev --workspace=tauri-app",
+        "build": "npm run build --workspace=tauri-app",
+        "install-all": "npm install && npm install --workspace=tauri-app",
+        "test:rust": "cd tauri-app/src-tauri && cargo test"
+    },
+    "description": "Mini AI 1C - Root Workspace"
+}
