@@ -106,11 +106,10 @@ pub async fn stop_chat(
 pub async fn stream_chat(
     messages: Vec<ChatMessage>,
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>,
+    _state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>,
     chat_state: tauri::State<'_, ChatState>,
 ) -> Result<(), String> {
     use crate::ai_client::{extract_bsl_code, stream_chat_completion, ApiMessage};
-    use crate::bsl_client::BSLClient;
     use tauri::{Emitter, Manager};
 
     // 1. Initial status
@@ -121,7 +120,10 @@ pub async fn stream_chat(
         .into_iter()
         .map(|m| ApiMessage {
             role: m.role,
-            content: m.content,
+            content: Some(m.content),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         })
         .collect();
 
@@ -132,46 +134,114 @@ pub async fn stream_chat(
         // 1. Initial status
         let _ = task_app_handle.emit("chat-status", "Thinking...");
         
-        // We need to access BSL Client state inside the task
-        // We can get it from app_handle
         let bsl_state = task_app_handle.state::<tokio::sync::Mutex<crate::bsl_client::BSLClient>>();
+        let settings = crate::settings::load_settings();
 
         let mut current_iteration = 0;
-        const MAX_FIX_ATTEMPTS: u32 = 2;
+        const MAX_ITERATIONS: u32 = 25;
 
         loop {
+            if current_iteration >= MAX_ITERATIONS {
+                let _ = task_app_handle.emit("chat-chunk", "\n[System] Conversation iteration limit reached.");
+                break;
+            }
+            current_iteration += 1;
+
             // Stream chat completion
-            let full_response = stream_chat_completion(api_messages.clone(), task_app_handle.clone()).await;
+            let response_msg = stream_chat_completion(api_messages.clone(), task_app_handle.clone()).await;
             
-            // Handle cancellation or error from stream_chat_completion
-            let full_response = match full_response {
-                Ok(r) => r,
+            let assistant_msg = match response_msg {
+                Ok(m) => m,
                 Err(e) => {
                     let _ = task_app_handle.emit("chat-chunk", format!("\nError: {}", e));
                     return Err(e);
                 }
             };
             
-            // Add response to history for potential next round
-            api_messages.push(ApiMessage {
-                role: "assistant".to_string(),
-                content: full_response.clone(),
-            });
+            // Add assistant response to history
+            api_messages.push(assistant_msg.clone());
 
-            // 2. Extract and Validate BSL Code
-            let bsl_blocks = extract_bsl_code(&full_response);
+            // 1. Check for tool calls
+            if let Some(tool_calls) = &assistant_msg.tool_calls {
+                let _ = task_app_handle.emit("chat-status", "Executing tools...");
+                println!("[AI][LOOP] Processing {} tool calls", tool_calls.len());
+
+                for tool_call in tool_calls {
+                    let tool_name = &tool_call.function.name;
+                    // Deserialize arguments safely
+                    let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+                        .unwrap_or(serde_json::json!({}));
+                    
+                    println!("[AI][TOOL] Executing: {} with args: {}", tool_name, arguments);
+
+                    let mut tool_result = "Error: Tool not found".to_string();
+                    let mut found = false;
+
+                    for config in &settings.mcp_servers {
+                        if !config.enabled { continue; }
+                        
+                        println!("[AI][TOOL] Checking server: {}", config.name);
+                        
+                        if let Ok(client) = crate::mcp_client::McpClient::new(config.clone()).await {
+                            if let Ok(tools) = client.list_tools().await {
+                                // Find tool by sanitized name
+                                let target_tool = tools.into_iter().find(|t| {
+                                    let sanitized = t.name.chars()
+                                        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                                        .collect::<String>();
+                                    sanitized == *tool_name
+                                });
+
+                                if let Some(t) = target_tool {
+                                    println!("[AI][TOOL] Found on server '{}'. Calling...", config.name);
+                                    match client.call_tool(&t.name, arguments.clone()).await {
+                                        Ok(res) => {
+                                            tool_result = res.to_string();
+                                            println!("[AI][TOOL] Success. Result len: {}", tool_result.len());
+                                        },
+                                        Err(e) => {
+                                            tool_result = format!("Error calling tool: {}", e);
+                                            println!("[AI][TOOL] Failed: {}", e);
+                                        },
+                                    }
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !found {
+                        println!("[AI][TOOL] Tool '{}' not found in any server.", tool_name);
+                    }
+
+                    api_messages.push(ApiMessage {
+                        role: "tool".to_string(),
+                        content: Some(tool_result),
+                        tool_call_id: Some(tool_call.id.clone()),
+                        tool_calls: None,
+                        name: Some(tool_name.clone()),
+                    });
+                }
+                
+                println!("[AI][LOOP] All tools processed. Sending results back to LLM...");
+                // Assistant might need to respond based on tool results
+                continue;
+            }
+
+            // 2. If no tool calls, check for BSL blocks
+            let full_text = assistant_msg.content.as_deref().unwrap_or("");
+            let bsl_blocks = extract_bsl_code(full_text);
+            
             if bsl_blocks.is_empty() {
-                 // No code to validate, we are done
                  break;
             }
 
             let _ = task_app_handle.emit("chat-status", "Validating BSL code...");
             
-            // 30 second timeout for validation
             let validation_result = tokio::time::timeout(
                 tokio::time::Duration::from_secs(30),
                 async {
-                    // Explicit type annotation to fix inference error and ensure correct locking
                     let mut client: tokio::sync::MutexGuard<crate::bsl_client::BSLClient> = bsl_state.lock().await;
                     if !client.is_connected() {
                         let _ = client.connect().await;
@@ -182,7 +252,6 @@ pub async fn stream_chat(
                         let uri = format!("file:///iteration_{}_{}.bsl", current_iteration, idx);
                         match client.analyze_code(code, &uri).await {
                             Ok(diagnostics) => {
-                                // Explicit type annotation
                                 let errors: Vec<crate::bsl_client::Diagnostic> = diagnostics.into_iter()
                                     .filter(|d| d.severity == Some(1)) // Only Errors
                                     .collect();
@@ -195,9 +264,7 @@ pub async fn stream_chat(
                                     all_errors.push(format!("Block {}:\n{}", idx + 1, error_str));
                                 }
                             }
-                            Err(e) => {
-                                println!("[AutoFix] Check failed for block {}: {}", idx + 1, e);
-                            }
+                            Err(_) => {}
                         }
                     }
                     all_errors
@@ -208,31 +275,28 @@ pub async fn stream_chat(
                 Ok(errors) => errors,
                 Err(_) => {
                     let _ = task_app_handle.emit("chat-status", "Ошибка проверки кода: Таймаут (30с)");
-                    let _ = task_app_handle.emit("chat-chunk", "\n\n> [!WARNING]\n> Проверка кода BSL заняла слишком много времени и была прервана.\n\n".to_string());
-                    break; // Break the auto-fix loop on timeout
+                    break;
                 }
             };
 
-            // 3. Decide whether to fix or end
-            if all_errors.is_empty() || current_iteration >= MAX_FIX_ATTEMPTS {
+            if all_errors.is_empty() {
                 break;
             }
 
-            // We have errors and attempts left
-            current_iteration += 1;
-            let _ = task_app_handle.emit("chat-status", format!("Fixing errors (Attempt {}/{})...", current_iteration, MAX_FIX_ATTEMPTS));
-
+            // 3. Request fix if errors found
             let fix_prompt = format!(
-                "В сгенерированном коде обнаружены ошибки:\n\n{}\n\nПожалуйста, исправь эти ошибки и предоставь корректный код.",
+                "В сгенерированном коде обнаружены ошибки:\n\n{}\n\nПожалуйста, исправь их.",
                 all_errors.join("\n\n")
             );
 
             api_messages.push(ApiMessage {
                 role: "user".to_string(),
-                content: fix_prompt,
+                content: Some(fix_prompt),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             });
 
-            // Let the user know we are re-generating
             let _ = task_app_handle.emit("chat-chunk", "\n\n---\n*Обнаружены ошибки. Исправляю...*\n\n".to_string());
         }
 
@@ -638,3 +702,55 @@ pub async fn diagnose_bsl_ls_cmd() -> String {
 }
 
 // scenario_test_cmd removed
+// ============== Universal MCP Client ==============
+
+use crate::mcp_client::{McpClient, McpTool, McpServerStatus};
+use crate::settings::{load_settings, McpServerConfig};
+
+/// Get available MCP tools from a specific server
+#[tauri::command]
+pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
+    let settings = load_settings();
+    let config = settings.mcp_servers.iter()
+        .find(|s| s.id == server_id)
+        .cloned()
+        .ok_or_else(|| format!("MCP server with ID '{}' not found", server_id))?;
+
+    let client = McpClient::new(config).await?;
+    client.list_tools().await
+}
+
+/// Get status of all MCP servers
+#[tauri::command]
+pub async fn get_mcp_server_statuses() -> Result<Vec<McpServerStatus>, String> {
+    Ok(crate::mcp_client::McpManager::get_statuses().await)
+}
+
+/// Get logs of a specific MCP server
+#[tauri::command]
+pub async fn get_mcp_server_logs(server_id: String) -> Result<Vec<String>, String> {
+    Ok(crate::mcp_client::McpManager::get_logs(&server_id).await)
+}
+
+/// Call an MCP tool on a specific server
+#[tauri::command]
+pub async fn call_mcp_tool(server_id: String, name: String, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+    let settings = load_settings();
+    let config = settings.mcp_servers.iter()
+        .find(|s| s.id == server_id)
+        .cloned()
+        .ok_or_else(|| format!("MCP server with ID '{}' not found", server_id))?;
+
+    let client = McpClient::new(config).await?;
+    client.call_tool(&name, arguments).await
+}
+
+/// Test connection to an MCP server
+#[tauri::command]
+pub async fn test_mcp_connection(config: McpServerConfig) -> Result<String, String> {
+    let client = McpClient::new(config).await?;
+    match client.list_tools().await {
+        Ok(tools) => Ok(format!("Подключено успешно! Доступно инструментов: {}.", tools.len())),
+        Err(e) => Err(format!("Ошибка подключения: {}", e)),
+    }
+}

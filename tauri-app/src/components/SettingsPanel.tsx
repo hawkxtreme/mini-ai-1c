@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download } from 'lucide-react';
+import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database } from 'lucide-react';
 import { LLMSettings, ProfileStore } from './settings/LLMSettings';
+import { MCPSettings } from './settings/MCPSettings';
 
 interface WindowInfo {
     hwnd: number;
@@ -28,11 +29,18 @@ interface AppSettings {
         java_path: string;
         auto_download: boolean;
     };
-    ui: {
-        theme: string;
-        minimize_to_tray: boolean;
-        start_minimized: boolean;
-    };
+    mcp_servers: {
+        id: string;
+        name: string;
+        enabled: boolean;
+        transport: 'http' | 'stdio';
+        url?: string | null;
+        login?: string | null;
+        password?: string | null;
+        command?: string | null;
+        args?: string[] | null;
+    }[];
+    active_llm_profile: string;
 }
 
 interface SettingsPanelProps {
@@ -41,7 +49,7 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
-    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'ui'>('llm');
+    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp'>('llm');
     const [profiles, setProfiles] = useState<ProfileStore | null>(null);
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
@@ -185,6 +193,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                         { id: 'llm', label: 'LLM Profiles', icon: Cpu },
                         { id: 'configurator', label: 'Configurator', icon: Monitor },
                         { id: 'bsl', label: 'BSL Server', icon: FileCode },
+                        { id: 'mcp', label: 'MCP Servers', icon: Database },
                     ].map((t) => (
                         <button
                             key={t.id}
@@ -267,7 +276,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* BSL Tab */}
                     {tab === 'bsl' && settings && (
-                        <div className="p-8 w-full overflow-y-auto">
+                        <div className="p-8 w-full h-full overflow-y-auto">
                             <div className="max-w-2xl mx-auto space-y-8">
                                 <section>
                                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
@@ -379,6 +388,18 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                         </div>
                                     </div>
                                 </section>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MCP Tab */}
+                    {tab === 'mcp' && settings && (
+                        <div className="p-8 w-full h-full overflow-y-auto">
+                            <div className="max-w-2xl mx-auto">
+                                <MCPSettings
+                                    servers={settings.mcp_servers}
+                                    onUpdate={(mcpServers) => setSettings({ ...settings, mcp_servers: mcpServers })}
+                                />
                             </div>
                         </div>
                     )}

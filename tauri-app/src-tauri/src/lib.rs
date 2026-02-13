@@ -14,6 +14,7 @@ mod crypto;
 // mod hotkeys;
 mod llm_profiles;
 mod llm;
+mod mcp_client;
 mod settings;
 
 use commands::*;
@@ -63,6 +64,12 @@ pub fn run() {
             install_bsl_ls_cmd,
             reconnect_bsl_ls_cmd,
             diagnose_bsl_ls_cmd,
+            // MCP
+            get_mcp_tools,
+            call_mcp_tool,
+            test_mcp_connection,
+            get_mcp_server_statuses,
+            get_mcp_server_logs,
         ])
         .setup(|app| {
             // Setup Tray Icon
@@ -77,6 +84,9 @@ pub fn run() {
             // Start BSL Language Server using managed state
             let app_handle = app.handle().clone();
              
+            // Start settings watcher for reactive MCP
+            crate::mcp_client::start_settings_watcher();
+
             tauri::async_runtime::spawn(async move {
                 // Wait a bit for app to fully start
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;

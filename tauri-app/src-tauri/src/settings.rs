@@ -43,12 +43,53 @@ impl Default for BSLServerSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    Http,
+    Stdio,
+}
+
+/// Configuration for an MCP server (HTTP or Stdio)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub transport: McpTransport,
+    // HTTP specific
+    pub url: Option<String>,
+    pub login: Option<String>,
+    pub password: Option<String>,
+    // Stdio specific
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            id: "default".to_string(),
+            name: "New MCP Server".to_string(),
+            enabled: false,
+            transport: McpTransport::Http,
+            url: Some("http://localhost/mcp".to_string()),
+            login: None,
+            password: None,
+            command: None,
+            args: None,
+        }
+    }
+}
+
 
 /// Main application settings container
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub configurator: ConfiguratorSettings,
     pub bsl_server: BSLServerSettings,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
     pub active_llm_profile: String,
     #[serde(default)]
     pub llm: LLMGlobalSettings,
