@@ -32,6 +32,7 @@ interface MCPSettingsProps {
 }
 
 const BUILTIN_1C_SERVER_ID = 'builtin-1c-naparnik';
+const BUILTIN_1C_METADATA_ID = 'builtin-1c-metadata';
 
 export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
@@ -41,33 +42,52 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [logs, setLogs] = useState<string[]>([]);
     const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
-    // Ensure 1C:Naparnik server exists and has correct path
+    // Ensure pre-installed servers exist
     useEffect(() => {
-        const correctArgs = ['tsx', 'src/mcp-servers/1c-naparnik.ts'];
-        const existingIndex = servers.findIndex(s => s.id === BUILTIN_1C_SERVER_ID);
+        const naparnikArgs = ['tsx', 'src/mcp-servers/1c-naparnik.ts'];
+        const metadataArgs = ['tsx', 'src/mcp-servers/1c-metadata.ts'];
 
-        if (existingIndex === -1) {
-            const newServer: McpServerConfig = {
+        let updatedServers = [...servers];
+        let needsUpdate = false;
+
+        // Check Naparnik
+        const naparnikIndex = updatedServers.findIndex(s => s.id === BUILTIN_1C_SERVER_ID);
+        if (naparnikIndex === -1) {
+            updatedServers.push({
                 id: BUILTIN_1C_SERVER_ID,
                 name: '1C:Напарник',
                 enabled: false,
                 transport: 'stdio',
                 command: 'npx',
-                args: correctArgs,
+                args: naparnikArgs,
                 env: { 'ONEC_AI_TOKEN': '' }
-            };
-            onUpdate([...servers, newServer]);
-        } else {
-            const existing = servers[existingIndex];
-            const currentArgs = existing.args || [];
-            // Check if args need update (specifically the path)
-            // We use JSON.stringify for a simple array comparison or just check the second element
-            if (currentArgs.length !== correctArgs.length || currentArgs[1] !== correctArgs[1]) {
-                const updatedServers = [...servers];
-                updatedServers[existingIndex] = { ...existing, args: correctArgs };
-                // Only update if it's actually different to avoid infinite looks, though the check above handles it
-                onUpdate(updatedServers);
-            }
+            });
+            needsUpdate = true;
+        } else if (JSON.stringify(updatedServers[naparnikIndex].args) !== JSON.stringify(naparnikArgs)) {
+            updatedServers[naparnikIndex] = { ...updatedServers[naparnikIndex], args: naparnikArgs };
+            needsUpdate = true;
+        }
+
+        // Check Metadata
+        const metadataIndex = updatedServers.findIndex(s => s.id === BUILTIN_1C_METADATA_ID);
+        if (metadataIndex === -1) {
+            updatedServers.push({
+                id: BUILTIN_1C_METADATA_ID,
+                name: '1C:Метаданные',
+                enabled: false,
+                transport: 'stdio',
+                command: 'npx',
+                args: metadataArgs,
+                env: { 'ONEC_METADATA_URL': '', 'ONEC_METADATA_KEY': '' }
+            });
+            needsUpdate = true;
+        } else if (JSON.stringify(updatedServers[metadataIndex].args) !== JSON.stringify(metadataArgs)) {
+            updatedServers[metadataIndex] = { ...updatedServers[metadataIndex], args: metadataArgs };
+            needsUpdate = true;
+        }
+
+        if (needsUpdate) {
+            onUpdate(updatedServers);
         }
     }, [servers, onUpdate]);
 
@@ -140,8 +160,13 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
     // Sort servers: Built-in first, then others
     const sortedServers = [...servers].sort((a, b) => {
-        if (a.id === BUILTIN_1C_SERVER_ID) return -1;
-        if (b.id === BUILTIN_1C_SERVER_ID) return 1;
+        const builtinIds = [BUILTIN_1C_METADATA_ID, BUILTIN_1C_SERVER_ID];
+        const aIdx = builtinIds.indexOf(a.id);
+        const bIdx = builtinIds.indexOf(b.id);
+
+        if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+        if (aIdx !== -1) return -1;
+        if (bIdx !== -1) return 1;
         return 0;
     });
 
@@ -178,7 +203,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 className={`
                                     rounded-xl overflow-hidden shadow-sm border transition-all duration-300
                                     ${isBuiltin
-                                        ? 'bg-gradient-to-br from-zinc-800/80 to-yellow-900/10 border-yellow-500/30 shadow-[0_0_15px_rgba(234,179,8,0.05)]'
+                                        ? `bg-gradient-to-br from-zinc-800/80 ${server.id === BUILTIN_1C_METADATA_ID ? 'to-blue-900/10 border-blue-500/30' : 'to-yellow-900/10 border-yellow-500/30'} shadow-[0_0_15px_rgba(234,179,8,0.05)]`
                                         : 'bg-zinc-800/50 border-zinc-700'
                                     }
                                 `}
@@ -187,7 +212,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 <div className={`
                                     px-4 py-3 border-b flex items-center justify-between
                                     ${isBuiltin
-                                        ? 'bg-yellow-500/5 border-yellow-500/20'
+                                        ? `${server.id === BUILTIN_1C_METADATA_ID ? 'bg-blue-500/5 border-blue-500/20' : 'bg-yellow-500/5 border-yellow-500/20'}`
                                         : 'bg-zinc-800/80 border-zinc-700'
                                     }
                                 `}>
@@ -196,9 +221,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2">
-                                                <Sparkles className="w-4 h-4 text-yellow-500" />
-                                                <span className="text-zinc-100 font-medium text-sm">1C:Напарник</span>
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20">
+                                                {server.id === BUILTIN_1C_METADATA_ID ? <Database className="w-4 h-4 text-blue-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
+                                                <span className="text-zinc-100 font-medium text-sm">{server.name}</span>
+                                                <span className={`text-[10px] px-1.5 py-0.5 rounded border ${server.id === BUILTIN_1C_METADATA_ID ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'}`}>
                                                     PRE-INSTALLED
                                                 </span>
                                             </div>
@@ -261,20 +286,57 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 {/* Server Settings */}
                                 <div className={`p-4 space-y-4 transition-opacity ${!server.enabled ? 'opacity-60' : ''}`}>
                                     {isBuiltin ? (
-                                        <div className="mt-0">
-                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                <Key className="w-3 h-3" /> 1C.ai Token
-                                            </label>
-                                            <input
-                                                type="password"
-                                                value={server.env?.['ONEC_AI_TOKEN'] || ''}
-                                                onChange={(e) => {
-                                                    const newEnv = { ...(server.env || {}), 'ONEC_AI_TOKEN': e.target.value };
-                                                    handleUpdateServer(server.id, { env: newEnv });
-                                                }}
-                                                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                                                placeholder="Вставьте ваш токен 1C.ai"
-                                            />
+                                        <div className="mt-0 space-y-4">
+                                            {server.id === BUILTIN_1C_SERVER_ID ? (
+                                                <div>
+                                                    <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                        <Key className="w-3 h-3" /> 1C.ai Token
+                                                    </label>
+                                                    <input
+                                                        type="password"
+                                                        value={server.env?.['ONEC_AI_TOKEN'] || ''}
+                                                        onChange={(e) => {
+                                                            const newEnv = { ...(server.env || {}), 'ONEC_AI_TOKEN': e.target.value };
+                                                            handleUpdateServer(server.id, { env: newEnv });
+                                                        }}
+                                                        className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                        placeholder="Вставьте ваш токен 1C.ai"
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <div>
+                                                        <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                            <Link2 className="w-3 h-3" /> 1C Service URL
+                                                        </label>
+                                                        <input
+                                                            type="text"
+                                                            value={server.env?.['ONEC_METADATA_URL'] || ''}
+                                                            onChange={(e) => {
+                                                                const newEnv = { ...(server.env || {}), 'ONEC_METADATA_URL': e.target.value };
+                                                                handleUpdateServer(server.id, { env: newEnv });
+                                                            }}
+                                                            className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                            placeholder="http://server/base/hs/mcp/v1"
+                                                        />
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                            <Key className="w-3 h-3" /> API Key
+                                                        </label>
+                                                        <input
+                                                            type="password"
+                                                            value={server.env?.['ONEC_METADATA_KEY'] || ''}
+                                                            onChange={(e) => {
+                                                                const newEnv = { ...(server.env || {}), 'ONEC_METADATA_KEY': e.target.value };
+                                                                handleUpdateServer(server.id, { env: newEnv });
+                                                            }}
+                                                            className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                            placeholder="Токен доступа к HS"
+                                                        />
+                                                    </div>
+                                                </>
+                                            )}
                                         </div>
                                     ) : (
                                         <>
