@@ -106,8 +106,14 @@ const SYSTEM_PROMPT: &str = r#"Ты - AI-ассистент для разраб�
 - Написание нового кода по описанию
 - Форматирование и улучшение читаемости кода
 
+ВАЖНО: У тебя есть доступ к специализированному MCP серверу "1C:Напарник" (1С.ai), который предоставляет экспертные знания.
+Используй следующие инструменты для ответов на вопросы по 1С:
+1. `ask_1c_ai` - для любых вопросов по платформе 1С, синтаксису, стандартным библиотекам (БСП) и лучшим практикам. Если вопрос касается "как сделать в 1С" или "как работает метод X", используй этот инструмент.
+2. `explain_1c_syntax` - для детального объяснения конкретных конструкций языка или объектов метаданных.
+3. `check_1c_code` - ОБЯЗАТЕЛЬНО используй этот инструмент для проверки любого написанного или анализируемого тобой кода 1С перед выдачей ответа пользователю. Это поможет избежать синтаксических ошибок.
+
 Используй русский язык в ответах. Форматируй код в блоках ```bsl...```.
-У тебя также есть доступ к внешним инструментам (MCP), которые ты можешь вызывать для получения скриншотов, работы с файлами или браузером."#;
+У тебя также есть доступ к другим инструментам (файловая система, браузер), используй их по необходимости."#;
 
 /// Collect all tools from enabled MCP servers to inject into LLM request
 pub async fn get_available_tools() -> Vec<Tool> {
@@ -118,52 +124,71 @@ pub async fn get_available_tools() -> Vec<Tool> {
     println!("[MCP][TOOLS] Collecting tools...");
 
     for config in settings.mcp_servers {
-        if !config.enabled { continue; }
+        if !config.enabled { 
+            println!("[MCP][TOOLS] Skipping disabled server: {}", config.name);
+            continue; 
+        }
         
-        if let Ok(client) = McpClient::new(config).await {
-            if let Ok(tools) = client.list_tools().await {
-                for tool in tools {
-                    // 1. Sanitize Name (only alphanumeric, underscore, hyphen)
-                    let name = tool.name.chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                        .collect::<String>();
-                    
-                    if name.is_empty() { continue; }
+        println!("[MCP][TOOLS] Connecting to server: {} (ID: {})", config.name, config.id);
+        
+        match McpClient::new(config.clone()).await {
+            Ok(client) => {
+                match client.list_tools().await {
+                    Ok(tools) => {
+                        println!("[MCP][TOOLS] Server {} returned {} tools.", config.name, tools.len());
+                        for tool in tools {
+                            // 1. Sanitize Name (only alphanumeric, underscore, hyphen)
+                            let name = tool.name.chars()
+                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                                .collect::<String>();
+                            
+                            if name.is_empty() { 
+                                println!("[MCP][TOOLS][WARN] Tool name became empty after sanitization: {}", tool.name);
+                                continue; 
+                            }
 
-                    // 2. Ensure unique name
-                    if seen_names.contains(&name) {
-                        println!("[MCP][TOOLS][WARN] Duplicate tool name '{}'. Skipping.", name);
-                        continue;
-                    }
-                    seen_names.insert(name.clone());
+                            // 2. Ensure unique name
+                            if seen_names.contains(&name) {
+                                println!("[MCP][TOOLS][WARN] Duplicate tool name '{}'. Skipping.", name);
+                                continue;
+                            }
+                            seen_names.insert(name.clone());
 
-                    // 3. Sanitize Schema (Gemini/OpenAI strictly require root type "object")
-                    let mut parameters = tool.input_schema.clone();
-                    if !parameters.is_object() {
-                        parameters = serde_json::json!({
-                            "type": "object",
-                            "properties": {}
-                        });
-                    } else {
-                        let obj = parameters.as_object_mut().unwrap();
-                        if !obj.contains_key("type") {
-                            obj.insert("type".to_string(), serde_json::json!("object"));
+                            // 3. Sanitize Schema (Gemini/OpenAI strictly require root type "object")
+                            let mut parameters = tool.input_schema.clone();
+                            if !parameters.is_object() {
+                                parameters = serde_json::json!({
+                                    "type": "object",
+                                    "properties": {}
+                                });
+                            } else {
+                                let obj = parameters.as_object_mut().unwrap();
+                                if !obj.contains_key("type") {
+                                    obj.insert("type".to_string(), serde_json::json!("object"));
+                                }
+                                if !obj.contains_key("properties") {
+                                     obj.insert("properties".to_string(), serde_json::json!({}));
+                                }
+                            }
+
+                            println!("[MCP][TOOLS]   + Registered: {}", name);
+                            all_tools.push(Tool {
+                                r#type: "function".to_string(),
+                                function: ToolFunction {
+                                    name,
+                                    description: tool.description,
+                                    parameters,
+                                },
+                            });
                         }
-                        if !obj.contains_key("properties") {
-                             obj.insert("properties".to_string(), serde_json::json!({}));
-                        }
+                    },
+                    Err(e) => {
+                        println!("[MCP][TOOLS][ERROR] Failed to list tools for {}: {}", config.name, e);
                     }
-
-                    println!("[MCP][TOOLS]   + {}", name);
-                    all_tools.push(Tool {
-                        r#type: "function".to_string(),
-                        function: ToolFunction {
-                            name,
-                            description: tool.description,
-                            parameters,
-                        },
-                    });
                 }
+            },
+            Err(e) => {
+                 println!("[MCP][TOOLS][ERROR] Failed to connect to {}: {}", config.name, e);
             }
         }
     }

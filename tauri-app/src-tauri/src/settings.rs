@@ -64,6 +64,7 @@ pub struct McpServerConfig {
     // Stdio specific
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
+    pub env: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for McpServerConfig {
@@ -78,6 +79,7 @@ impl Default for McpServerConfig {
             password: None,
             command: None,
             args: None,
+            env: None,
         }
     }
 }
@@ -91,8 +93,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     pub active_llm_profile: String,
-    #[serde(default)]
     pub llm: LLMGlobalSettings,
+    #[serde(default)]
+    pub debug_mcp: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

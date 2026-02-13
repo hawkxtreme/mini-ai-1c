@@ -84,7 +84,8 @@ impl McpManager {
         }
 
         // Create new session
-        let session = Arc::new(McpSession::new_stdio(config.clone()).await?);
+        let settings = crate::settings::load_settings();
+        let session = Arc::new(McpSession::new_stdio(config.clone(), settings.debug_mcp).await?);
         sessions.insert(config.id.clone(), (config.clone(), session.clone()));
         Ok(session)
     }
@@ -119,7 +120,7 @@ impl McpManager {
                 // Remove old session if exists to ensure cleanup (drop will kill child)
                 sessions.remove(&config.id);
 
-                match McpSession::new_stdio(config.clone()).await {
+                match McpSession::new_stdio(config.clone(), new_settings.debug_mcp).await {
                     Ok(session) => {
                         let session = Arc::new(session);
                         println!("Started MCP server: {}", config.id);
@@ -266,7 +267,7 @@ impl McpSession {
         }
     }
 
-    async fn new_stdio(config: McpServerConfig) -> Result<Self, String> {
+    async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
         let command = config.command.ok_or("Command is missing")?;
         let args = config.args.unwrap_or_default();
 
@@ -277,6 +278,15 @@ impl McpSession {
         } else {
             Command::new(&command)
         };
+
+        if let Some(env) = &config.env {
+            cmd.envs(env);
+        }
+
+        // Pass global debug flag
+        if debug_all {
+            cmd.env("ONEC_AI_DEBUG", "true");
+        }
 
         let mut child = cmd
             .args(args)
@@ -348,6 +358,7 @@ impl McpSession {
                      stderr_res = stderr_reader.next_line() => {
                          // Consume stderr to prevent buffer fill
                          if let Ok(Some(line)) = stderr_res {
+                             println!("[MCP][STDERR] {}", line); // Print to stdout for debugging
                              let mut logs = logs_writer.lock().await;
                              if logs.len() >= 100 {
                                  logs.pop_front();
@@ -435,7 +446,7 @@ impl McpSession {
              let tools = tools_arr.iter().filter_map(|v| {
                 Some(McpTool {
                     name: v.get("name")?.as_str()?.to_string(),
-                    description: v.get("description")?.as_str()?.to_string(),
+                    description: v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string(),
                     input_schema: v.get("inputSchema")?.clone(),
                 })
             }).collect();

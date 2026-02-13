@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database } from 'lucide-react';
+import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database, Bug } from 'lucide-react';
 import { LLMSettings, ProfileStore } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
 
@@ -41,6 +41,7 @@ interface AppSettings {
         args?: string[] | null;
     }[];
     active_llm_profile: string;
+    debug_mcp: boolean;
 }
 
 interface SettingsPanelProps {
@@ -49,7 +50,7 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
-    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp'>('llm');
+    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug'>('llm');
     const [profiles, setProfiles] = useState<ProfileStore | null>(null);
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
@@ -194,6 +195,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                         { id: 'configurator', label: 'Configurator', icon: Monitor },
                         { id: 'bsl', label: 'BSL Server', icon: FileCode },
                         { id: 'mcp', label: 'MCP Servers', icon: Database },
+                        { id: 'debug', label: 'Debug', icon: Bug },
                     ].map((t) => (
                         <button
                             key={t.id}
@@ -400,6 +402,33 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                     servers={settings.mcp_servers}
                                     onUpdate={(mcpServers) => setSettings({ ...settings, mcp_servers: mcpServers })}
                                 />
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Debug Tab */}
+                    {tab === 'debug' && settings && (
+                        <div className="p-8 w-full h-full overflow-y-auto">
+                            <div className="max-w-2xl mx-auto space-y-8">
+                                <section>
+                                    <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
+                                        <Bug className="w-5 h-5 text-red-500" />
+                                        Advanced Debugging
+                                    </h3>
+                                    <div className="bg-zinc-800/50 border border-zinc-700 rounded-xl p-5 space-y-4">
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <div className="font-medium">MCP Verbose Logging</div>
+                                                <div className="text-xs text-zinc-500">Log all SSE events and tool payloads to terminal. Can impact performance.</div>
+                                            </div>
+                                            <div className="relative inline-flex h-6 w-11 items-center rounded-full bg-zinc-700 cursor-pointer transition-colors"
+                                                onClick={() => setSettings({ ...settings, debug_mcp: !settings.debug_mcp })}
+                                            >
+                                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${settings.debug_mcp ? 'translate-x-6 bg-blue-500' : 'translate-x-1'}`} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
                             </div>
                         </div>
                     )}
