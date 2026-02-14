@@ -138,15 +138,30 @@ impl McpManager {
         let sessions = MCP_MANAGER.sessions.lock().await;
         let mut statuses = Vec::new();
 
-        for (id, (config, session)) in sessions.iter() {
-            let is_alive = session.is_alive().await;
-            statuses.push(McpServerStatus {
-                id: id.clone(),
+        // Load settings to get the full list of servers, including those not running
+        let settings = crate::settings::load_settings();
+
+        for config in settings.mcp_servers {
+             let status = if !config.enabled {
+                 "disabled"
+             } else if let Some((_, session)) = sessions.get(&config.id) {
+                 if session.is_alive().await {
+                     "connected"
+                 } else {
+                     "stopped" // Was started but died
+                 }
+             } else {
+                 "stopped" // Enabled but not in sessions (failed to start or never started)
+             };
+
+             statuses.push(McpServerStatus {
+                id: config.id.clone(),
                 name: config.name.clone(),
-                status: if is_alive { "connected".to_string() } else { "disconnected".to_string() },
+                status: status.to_string(),
                 transport: format!("{:?}", config.transport).to_lowercase(),
             });
         }
+        
         statuses
     }
 
@@ -271,14 +286,21 @@ impl McpSession {
         let command = config.command.ok_or("Command is missing")?;
         let args = config.args.unwrap_or_default();
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&command);
-            c
+        let (command, args) = if cfg!(windows) {
+            // On Windows, if command is 'npx' or 'npm', we might need .cmd
+            // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
+            let cmd_lower = command.to_lowercase();
+            if cmd_lower == "npx" || cmd_lower == "npm" {
+                (format!("{}.cmd", command), args)
+            } else {
+                (command, args)
+            }
         } else {
-            Command::new(&command)
+            (command, args)
         };
 
+        let mut cmd = Command::new(&command);
+        
         if let Some(env) = &config.env {
             cmd.envs(env);
         }

@@ -78,7 +78,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                 transport: 'stdio',
                 command: 'npx',
                 args: metadataArgs,
-                env: { 'ONEC_METADATA_URL': '', 'ONEC_METADATA_KEY': '' }
+                env: { 'ONEC_METADATA_URL': 'http://localhost/base/hs/mcp', 'ONEC_USERNAME': '', 'ONEC_PASSWORD': '' }
             });
             needsUpdate = true;
         } else if (JSON.stringify(updatedServers[metadataIndex].args) !== JSON.stringify(metadataArgs)) {
@@ -195,7 +195,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                     {sortedServers.map((server) => {
                         const status = statuses[server.id];
                         const isConnected = status?.status === 'connected';
-                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID;
+                        const isStopped = status?.status === 'stopped';
+                        const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
+                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata;
 
                         return (
                             <div
@@ -203,7 +205,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 className={`
                                     rounded-xl overflow-hidden shadow-sm border transition-all duration-300
                                     ${isBuiltin
-                                        ? `bg-gradient-to-br from-zinc-800/80 ${server.id === BUILTIN_1C_METADATA_ID ? 'to-blue-900/10 border-blue-500/30' : 'to-yellow-900/10 border-yellow-500/30'} shadow-[0_0_15px_rgba(234,179,8,0.05)]`
+                                        ? `bg-gradient-to-br from-zinc-800/80 to-yellow-900/10 border-yellow-500/30 shadow-[0_0_15px_rgba(234,179,8,0.05)]`
                                         : 'bg-zinc-800/50 border-zinc-700'
                                     }
                                 `}
@@ -212,7 +214,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 <div className={`
                                     px-4 py-3 border-b flex items-center justify-between
                                     ${isBuiltin
-                                        ? `${server.id === BUILTIN_1C_METADATA_ID ? 'bg-blue-500/5 border-blue-500/20' : 'bg-yellow-500/5 border-yellow-500/20'}`
+                                        ? 'bg-yellow-500/5 border-yellow-500/20'
                                         : 'bg-zinc-800/80 border-zinc-700'
                                     }
                                 `}>
@@ -221,9 +223,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2">
-                                                {server.id === BUILTIN_1C_METADATA_ID ? <Database className="w-4 h-4 text-blue-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
+                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
                                                 <span className="text-zinc-100 font-medium text-sm">{server.name}</span>
-                                                <span className={`text-[10px] px-1.5 py-0.5 rounded border ${server.id === BUILTIN_1C_METADATA_ID ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'}`}>
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20">
                                                     PRE-INSTALLED
                                                 </span>
                                             </div>
@@ -239,7 +241,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {server.enabled && (
                                             <span className={`text-[10px] px-1.5 py-0.5 rounded border ${isConnected ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
-                                                {isConnected ? 'LIVE' : 'OFFLINE'}
+                                                {isConnected ? 'LIVE' : (isStopped ? 'STOPPED' : 'OFFLINE')}
                                             </span>
                                         )}
                                     </div>
@@ -305,35 +307,101 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                 </div>
                                             ) : (
                                                 <>
-                                                    <div>
-                                                        <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                            <Link2 className="w-3 h-3" /> 1C Service URL
-                                                        </label>
-                                                        <input
-                                                            type="text"
-                                                            value={server.env?.['ONEC_METADATA_URL'] || ''}
-                                                            onChange={(e) => {
-                                                                const newEnv = { ...(server.env || {}), 'ONEC_METADATA_URL': e.target.value };
-                                                                handleUpdateServer(server.id, { env: newEnv });
-                                                            }}
-                                                            className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                                                            placeholder="http://server/base/hs/mcp/v1"
-                                                        />
+                                                    <div className="grid grid-cols-12 gap-2">
+                                                        <div className="col-span-3">
+                                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                                <Globe className="w-3 h-3" /> Protocol
+                                                            </label>
+                                                            <select
+                                                                value={(server.env?.['ONEC_METADATA_URL'] || '').startsWith('https') ? 'https' : 'http'}
+                                                                onChange={(e) => {
+                                                                    const currentUrl = server.env?.['ONEC_METADATA_URL'] || 'http://localhost/base/hs/mcp';
+                                                                    const urlWithoutProto = currentUrl.replace(/^https?:\/\//, '');
+                                                                    const newUrl = `${e.target.value}://${urlWithoutProto}`;
+                                                                    const newEnv = { ...(server.env || {}), 'ONEC_METADATA_URL': newUrl };
+                                                                    handleUpdateServer(server.id, { env: newEnv });
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-700 font-bold rounded-lg px-2 py-1.5 text-[11px] focus:ring-1 focus:ring-yellow-500 focus:outline-none text-yellow-500 bg-yellow-500/5"
+                                                            >
+                                                                <option value="http">HTTP</option>
+                                                                <option value="https">HTTPS</option>
+                                                            </select>
+                                                        </div>
+                                                        <div className="col-span-5">
+                                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                                <Terminal className="w-3 h-3" /> Server (Host)
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                value={(server.env?.['ONEC_METADATA_URL'] || '').replace(/^https?:\/\//, '').split('/')[0] || ''}
+                                                                onChange={(e) => {
+                                                                    const currentUrl = server.env?.['ONEC_METADATA_URL'] || 'http://localhost/base/hs/mcp';
+                                                                    const proto = currentUrl.startsWith('https') ? 'https' : 'http';
+                                                                    const pathParts = currentUrl.replace(/^https?:\/\//, '').split('/');
+                                                                    const base = pathParts[1] || 'base';
+                                                                    const newUrl = `${proto}://${e.target.value}/${base}/hs/mcp`;
+                                                                    const newEnv = { ...(server.env || {}), 'ONEC_METADATA_URL': newUrl };
+                                                                    handleUpdateServer(server.id, { env: newEnv });
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-yellow-500 focus:outline-none"
+                                                                placeholder="localhost"
+                                                            />
+                                                        </div>
+                                                        <div className="col-span-4">
+                                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                                <Database className="w-3 h-3" /> Base Name
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                value={(server.env?.['ONEC_METADATA_URL'] || '').replace(/^https?:\/\//, '').split('/')[1] || ''}
+                                                                onChange={(e) => {
+                                                                    const currentUrl = server.env?.['ONEC_METADATA_URL'] || 'http://localhost/base/hs/mcp';
+                                                                    const proto = currentUrl.startsWith('https') ? 'https' : 'http';
+                                                                    const host = currentUrl.replace(/^https?:\/\//, '').split('/')[0] || 'localhost';
+                                                                    const newUrl = `${proto}://${host}/${e.target.value}/hs/mcp`;
+                                                                    const newEnv = { ...(server.env || {}), 'ONEC_METADATA_URL': newUrl };
+                                                                    handleUpdateServer(server.id, { env: newEnv });
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-yellow-500 focus:outline-none"
+                                                                placeholder="demo"
+                                                            />
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                            <Key className="w-3 h-3" /> API Key
-                                                        </label>
-                                                        <input
-                                                            type="password"
-                                                            value={server.env?.['ONEC_METADATA_KEY'] || ''}
-                                                            onChange={(e) => {
-                                                                const newEnv = { ...(server.env || {}), 'ONEC_METADATA_KEY': e.target.value };
-                                                                handleUpdateServer(server.id, { env: newEnv });
-                                                            }}
-                                                            className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                                                            placeholder="Токен доступа к HS"
-                                                        />
+                                                    <div className="text-[10px] text-zinc-500 mt-1 flex items-center gap-1 italic">
+                                                        <Link2 className="w-2.5 h-2.5" />
+                                                        Будет использован: {server.env?.['ONEC_METADATA_URL']}/...
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div>
+                                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                                <Key className="w-3 h-3" /> Login
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                value={server.env?.['ONEC_USERNAME'] || ''}
+                                                                onChange={(e) => {
+                                                                    const newEnv = { ...(server.env || {}), 'ONEC_USERNAME': e.target.value };
+                                                                    handleUpdateServer(server.id, { env: newEnv });
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                placeholder="Администратор"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
+                                                                <ShieldCheck className="w-3 h-3" /> Password
+                                                            </label>
+                                                            <input
+                                                                type="password"
+                                                                value={server.env?.['ONEC_PASSWORD'] || ''}
+                                                                onChange={(e) => {
+                                                                    const newEnv = { ...(server.env || {}), 'ONEC_PASSWORD': e.target.value };
+                                                                    handleUpdateServer(server.id, { env: newEnv });
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                placeholder="••••••"
+                                                            />
+                                                        </div>
                                                     </div>
                                                 </>
                                             )}
@@ -415,7 +483,6 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                             )}
                                         </>
                                     )}
-
                                     <div className="flex items-center justify-between pt-1">
                                         <div className="flex gap-2">
                                             <button
@@ -458,38 +525,36 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             </div>
 
             {/* Logs Modal */}
-            {
-                viewingLogsId && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-                        <div className="bg-zinc-800 border border-zinc-700 rounded-xl w-full max-w-3xl h-[600px] flex flex-col shadow-2xl">
-                            <div className="px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
-                                <h3 className="font-medium text-zinc-100 flex items-center gap-2">
-                                    <FileText className="w-4 h-4 text-zinc-400" />
-                                    Server Logs: {servers.find(s => s.id === viewingLogsId)?.name}
-                                </h3>
-                                <button
-                                    onClick={() => setViewingLogsId(null)}
-                                    className="p-1 hover:bg-zinc-700 rounded text-zinc-400 hover:text-zinc-200 transition"
-                                >
-                                    <X className="w-5 h-5" />
-                                </button>
-                            </div>
-                            <div className="flex-1 overflow-auto p-4 bg-zinc-950 font-mono text-xs text-zinc-300">
-                                {isLoadingLogs && logs.length === 0 ? (
-                                    <p className="text-zinc-500">Loading...</p>
-                                ) : logs.length === 0 ? (
-                                    <p className="text-zinc-500">No logs available.</p>
-                                ) : (
-                                    logs.map((line, i) => (
-                                        <div key={i} className="whitespace-pre-wrap mb-0.5 border-b border-zinc-900/50 pb-0.5">{line}</div>
-                                    ))
-                                )}
-                                <div className="h-4" /> {/* Spacer */}
-                            </div>
+            {viewingLogsId && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-zinc-800 border border-zinc-700 rounded-xl w-full max-w-3xl h-[600px] flex flex-col shadow-2xl">
+                        <div className="px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
+                            <h3 className="font-medium text-zinc-100 flex items-center gap-2">
+                                <FileText className="w-4 h-4 text-zinc-400" />
+                                Server Logs: {servers.find(s => s.id === viewingLogsId)?.name}
+                            </h3>
+                            <button
+                                onClick={() => setViewingLogsId(null)}
+                                className="p-1 hover:bg-zinc-700 rounded text-zinc-400 hover:text-zinc-200 transition"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-auto p-4 bg-zinc-950 font-mono text-xs text-zinc-300">
+                            {isLoadingLogs && logs.length === 0 ? (
+                                <p className="text-zinc-500">Loading...</p>
+                            ) : logs.length === 0 ? (
+                                <p className="text-zinc-500">No logs available.</p>
+                            ) : (
+                                logs.map((line, i) => (
+                                    <div key={i} className="whitespace-pre-wrap mb-0.5 border-b border-zinc-900/50 pb-0.5">{line}</div>
+                                ))
+                            )}
+                            <div className="h-4" /> {/* Spacer */}
                         </div>
                     </div>
-                )
-            }
-        </div >
-    )
+                </div>
+            )}
+        </div>
+    );
 }

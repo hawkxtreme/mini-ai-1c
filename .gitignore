@@ -40,6 +40,8 @@ settings.json
 llm_profiles.json
 
 backup/
+tests/
+scripts/
 
 # Antigravity Skills
 .agent/

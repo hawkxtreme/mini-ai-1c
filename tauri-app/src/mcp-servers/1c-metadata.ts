@@ -18,8 +18,10 @@ import {
  * It forwards standard MCP requests directly to the 1C extension using JSON-RPC 2.0.
  */
 
-const BASE_URL = process.env.ONEC_METADATA_URL || "http://localhost/base/hs/mcp/v1";
-const API_KEY = process.env.ONEC_METADATA_KEY || "";
+const BASE_URL = process.env.ONEC_METADATA_URL || "http://localhost/base/hs/mcp";
+
+const USERNAME = process.env.ONEC_USERNAME || "";
+const PASSWORD = process.env.ONEC_PASSWORD || "";
 const DEBUG = process.env.ONEC_AI_DEBUG === "true";
 
 const server = new Server(
@@ -47,13 +49,19 @@ async function call1C(method: string, params: any = {}) {
         console.error(`[1C:Native] Sending to 1C: ${method}`, JSON.stringify(params));
     }
 
+    const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+    };
+
+    if (USERNAME) {
+        const auth = Buffer.from(`${USERNAME}:${PASSWORD}`).toString("base64");
+        headers["Authorization"] = `Basic ${auth}`;
+    }
+
     try {
         const response = await fetch(url, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-API-Key": API_KEY,
-            },
+            headers: headers,
             body: JSON.stringify({
                 jsonrpc: "2.0",
                 method: method,
