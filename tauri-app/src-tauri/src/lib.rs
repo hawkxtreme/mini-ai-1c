@@ -7,6 +7,7 @@ mod bsl_client;
 mod bsl_installer;
 mod chat_history;
 mod commands;
+mod history_manager;
 #[cfg(windows)]
 mod configurator;
 mod crypto;
@@ -39,6 +40,9 @@ pub fn run() {
             set_active_profile,
             stream_chat,
             stop_chat,
+            approve_tool,
+            reject_tool,
+            undo_last_change,
             analyze_bsl,
             format_bsl,
             find_configurator_windows_cmd,

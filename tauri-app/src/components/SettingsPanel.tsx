@@ -3,8 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database, Bug } from 'lucide-react';
-import { LLMSettings, ProfileStore } from './settings/LLMSettings';
+import { LLMSettings } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
+import { useProfiles, ProfileStore } from '../contexts/ProfileContext';
 
 interface WindowInfo {
     hwnd: number;
@@ -51,7 +52,7 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug'>('llm');
-    const [profiles, setProfiles] = useState<ProfileStore | null>(null);
+    const { profiles, activeProfileId, loadProfiles } = useProfiles();
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
 
@@ -71,7 +72,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     }, [isOpen]);
 
     const refreshAll = () => {
-        invoke<ProfileStore>('get_profiles').then(setProfiles);
+        // invoke<ProfileStore>('get_profiles').then(setProfiles); // Removed, using context
         invoke<AppSettings>('get_settings').then(setSettings);
         refreshBslStatus();
     };
@@ -214,9 +215,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 {/* Content */}
                 <div className="flex-1 overflow-hidden flex relative">
                     {/* LLM Tab */}
-                    {tab === 'llm' && profiles && (
+                    {tab === 'llm' && (
                         <div className="w-full h-full">
-                            <LLMSettings profiles={profiles} onUpdate={setProfiles} />
+                            <LLMSettings
+                                profiles={{ profiles, active_profile_id: activeProfileId }}
+                                onUpdate={loadProfiles}
+                            />
                         </div>
                     )}
 

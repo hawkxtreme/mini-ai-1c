@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import * as api from '../api';
 import { useSettings } from './SettingsContext';
 
@@ -26,7 +26,7 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
     const selectedHwnd = settings?.configurator.selected_window_hwnd || null;
     const pattern = settings?.configurator.window_title_pattern || 'Конфигуратор';
 
-    const refreshWindows = async () => {
+    const refreshWindows = useCallback(async () => {
         try {
             const windows = await api.findConfiguratorWindows(pattern);
             setDetectedWindows(windows);
@@ -42,7 +42,7 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         } catch (e) {
             console.error("Failed to find windows", e);
         }
-    };
+    }, [pattern, selectedHwnd, settings, updateSettings]);
 
     // Initial refresh when settings are loaded
     useEffect(() => {
@@ -51,22 +51,22 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         }
     }, [settings?.configurator.window_title_pattern]); // Refresh if pattern changes
 
-    const selectWindow = async (hwnd: number) => {
+    const selectWindow = useCallback(async (hwnd: number) => {
         if (!settings) return;
         const newSettings = {
             ...settings,
             configurator: { ...settings.configurator, selected_window_hwnd: hwnd }
         };
         await updateSettings(newSettings);
-    };
+    }, [settings, updateSettings]);
 
-    const getActiveConfiguratorTitle = () => {
+    const getActiveConfiguratorTitle = useCallback(() => {
         if (!selectedHwnd) return "Конфигуратор";
         const win = detectedWindows.find(w => w.hwnd === selectedHwnd);
         return win ? win.title : `ID: ${selectedHwnd} (Не найден)`;
-    };
+    }, [selectedHwnd, detectedWindows]);
 
-    const getCode = async (useSelectAll: boolean): Promise<string> => {
+    const getCode = useCallback(async (useSelectAll: boolean): Promise<string> => {
         let targetHwnd = selectedHwnd;
 
         // Auto-select if not selected but only one found
@@ -78,9 +78,9 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         if (!targetHwnd) throw new Error("No Configurator window selected");
 
         return await api.getCodeFromConfigurator(targetHwnd, useSelectAll);
-    };
+    }, [selectedHwnd, pattern]);
 
-    const pasteCode = async (code: string, useSelectAll: boolean) => {
+    const pasteCode = useCallback(async (code: string, useSelectAll: boolean) => {
         let targetHwnd = selectedHwnd;
 
         if (!targetHwnd) {
@@ -91,18 +91,20 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         if (!targetHwnd) throw new Error("No Configurator window selected");
 
         await api.pasteCodeToConfigurator(targetHwnd, code, useSelectAll);
-    };
+    }, [selectedHwnd, pattern]);
+
+    const contextValue = useMemo(() => ({
+        detectedWindows,
+        selectedHwnd,
+        refreshWindows,
+        selectWindow,
+        getActiveConfiguratorTitle,
+        getCode,
+        pasteCode
+    }), [detectedWindows, selectedHwnd, refreshWindows, selectWindow, getActiveConfiguratorTitle, getCode, pasteCode]);
 
     return (
-        <ConfiguratorContext.Provider value={{
-            detectedWindows,
-            selectedHwnd,
-            refreshWindows,
-            selectWindow,
-            getActiveConfiguratorTitle,
-            getCode,
-            pasteCode
-        }}>
+        <ConfiguratorContext.Provider value={contextValue}>
             {children}
         </ConfiguratorContext.Provider>
     );

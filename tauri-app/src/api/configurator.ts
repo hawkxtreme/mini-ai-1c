@@ -37,3 +37,10 @@ export async function getActiveFragment(hwnd: number): Promise<string> {
 export async function pasteCodeToConfigurator(hwnd: number, code: string, useSelectAll: boolean = false): Promise<void> {
     return await invoke('paste_code_to_configurator', { hwnd, code, useSelectAll });
 }
+
+/**
+ * Undo last code change in specific Configurator window
+ */
+export async function undoLastChange(hwnd: number): Promise<void> {
+    return await invoke('undo_last_change', { hwnd });
+}

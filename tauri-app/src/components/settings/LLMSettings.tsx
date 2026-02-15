@@ -3,26 +3,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { Plus, Save, RefreshCw, Trash2, Check, ExternalLink } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-export interface LLMProfile {
-    id: string;
-    name: string;
-    provider: string;
-    model: string;
-    api_key_encrypted: string;
-    base_url: string | null;
-    max_tokens: number;
-    temperature: number;
-    context_window_override?: number; // New field for manual override
-}
-
-export interface ProfileStore {
-    profiles: LLMProfile[];
-    active_profile_id: string;
-}
+import { LLMProfile, ProfileStore } from '../../contexts/ProfileContext';
 
 interface LLMSettingsProps {
     profiles: ProfileStore;
-    onUpdate: (store: ProfileStore) => void;
+    onUpdate: () => void;
 }
 
 const PROVIDERS = [
@@ -34,6 +19,7 @@ const PROVIDERS = [
     { value: 'Mistral', label: 'Mistral AI', defaultModel: 'mistral-large-latest', defaultUrl: 'https://api.mistral.ai/v1' },
     { value: 'XAI', label: 'xAI (Grok)', defaultModel: 'grok-beta', defaultUrl: 'https://api.x.ai/v1' },
     { value: 'Perplexity', label: 'Perplexity', defaultModel: 'sonar-reasoning', defaultUrl: 'https://api.perplexity.ai' },
+    { value: 'ZAI', label: 'Z.ai (Zhipu)', defaultModel: 'glm-5', defaultUrl: 'https://api.z.ai/api/coding/paas/v4' },
     { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001', defaultUrl: 'https://openrouter.ai/api/v1' },
     { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1' },
     { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '' },
@@ -48,14 +34,29 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const [connectionTest, setConnectionTest] = useState<string | null>(null);
 
     // Select profile to edit
+    // Select profile to edit
     useEffect(() => {
         if (editingId) {
             const p = profiles.profiles.find(p => p.id === editingId);
             if (p) {
-                setEditForm({ ...p });
-                setNewApiKey('');
-                setModelList([]);
-                setConnectionTest(null);
+                // Only update form if we are switching to a different profile
+                // OR if we are forced to re-sync (e.g. initial load)
+                // We check if the current form ID matches the editing ID to avoid overwriting unsaved changes
+                setEditForm(prev => {
+                    if (prev && prev.id === editingId) {
+                        return prev;
+                    }
+                    return { ...p };
+                });
+
+                // Reset other states only when switching profiles
+                setEditForm(prev => {
+                    if (prev && prev.id === editingId) return prev;
+                    setNewApiKey('');
+                    setModelList([]);
+                    setConnectionTest(null);
+                    return { ...p };
+                });
             }
         }
     }, [editingId, profiles]);
@@ -68,8 +69,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 profile: editForm,
                 apiKey: newApiKey || null
             });
-            const updated = await invoke<ProfileStore>('get_profiles');
-            onUpdate(updated);
+            onUpdate();
             alert('Profile saved!');
         } catch (e) {
             alert('Failed to save: ' + e);
@@ -80,8 +80,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         if (!confirm('Delete this profile?')) return;
         try {
             await invoke('delete_profile', { profileId: id });
-            const updated = await invoke<ProfileStore>('get_profiles');
-            onUpdate(updated);
+            await invoke('delete_profile', { profileId: id });
+            onUpdate();
             if (editingId === id) setEditingId(null);
         } catch (e) {
             alert('Error: ' + e);
@@ -107,7 +107,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         // For simplicity, let's just append to local list via parent update or effectively save it.
         // Actually, let's just save it.
         invoke('save_profile', { profile: newProfile, apiKey: null }).then(() => {
-            invoke<ProfileStore>('get_profiles').then(onUpdate).then(() => setEditingId(id));
+            onUpdate();
+            setEditingId(id);
         });
     };
 
@@ -153,8 +154,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
 
     const handleSetActive = async (id: string) => {
         await invoke('set_active_profile', { profileId: id });
-        const updated = await invoke<ProfileStore>('get_profiles');
-        onUpdate(updated);
+        await invoke('set_active_profile', { profileId: id });
+        onUpdate();
     };
 
     return (

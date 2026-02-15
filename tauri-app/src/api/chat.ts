@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export interface ChatMessage {
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'tool';
     content: string;
 }
 
@@ -68,4 +68,18 @@ export async function deleteChat(sessionId: string): Promise<void> {
  */
 export async function saveMessage(role: string, content: string): Promise<void> {
     return await invoke('save_chat_message', { role, content });
+}
+
+/**
+ * Approve the pending tool call
+ */
+export async function approveTool(): Promise<void> {
+    return await invoke('approve_tool');
+}
+
+/**
+ * Reject the pending tool call
+ */
+export async function rejectTool(): Promise<void> {
+    return await invoke('reject_tool');
 }

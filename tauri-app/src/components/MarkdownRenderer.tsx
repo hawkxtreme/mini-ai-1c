@@ -1,14 +1,16 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { PanelRight, ChevronDown, ChevronRight, BrainCircuit, Maximize2, Minimize2, X as CloseIcon } from 'lucide-react';
+import { PanelRight, ChevronDown, ChevronRight, BrainCircuit, Maximize2, Minimize2, X as CloseIcon, GitCompare } from 'lucide-react';
 import { BslEditor } from './ui/BslEditor';
+import { BslDiffEditor } from './ui/BslDiffEditor';
 import { useState, useMemo, memo } from 'react';
 
 interface MarkdownRendererProps {
     content: string;
     isStreaming?: boolean;
     onApplyCode?: (code: string) => void;
+    originalCode?: string; // Original code for diff view
 }
 
 function ThoughtSection({ title, children }: { title: string, children: React.ReactNode }) {
@@ -39,141 +41,194 @@ function ThoughtSection({ title, children }: { title: string, children: React.Re
     );
 }
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStreaming = false, onApplyCode }: MarkdownRendererProps) {
+const ThoughtSectionMemo = memo(ThoughtSection);
+
+interface CodeBlockProps {
+    inline?: boolean;
+    className?: string;
+    children: any;
+    isStreaming?: boolean;
+    onApplyCode?: (code: string) => void;
+    originalCode?: string;
+    [key: string]: any;
+}
+
+const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode, originalCode, ...props }: CodeBlockProps) => {
+    const match = /language-(\w+)/.exec(className || '');
+    const language = match ? match[1] : '';
+    const isBsl = language === 'bsl' || language === '1c';
+    const codeString = String(children).replace(/\n$/, '');
+    const isMultiline = codeString.includes('\n');
+
+    if (inline || !isMultiline) {
+        return (
+            <code
+                className="bg-[#27272a] text-blue-300 font-semibold px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-zinc-700/50 max-w-full overflow-x-auto inline-flex align-middle scrollbar-hide"
+                style={{ verticalAlign: 'middle', whiteSpace: 'nowrap' }}
+                {...props}
+            >
+                {children}
+            </code>
+        );
+    }
+
+    if (isStreaming) {
+        return (
+            <div className="relative my-4 group w-full">
+                <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 backdrop-blur-sm rounded-t-lg border-x border-t border-[#27272a]">
+                    <div className="flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">{isBsl ? 'BSL (1C:Enterprise)' : (language || 'code')}</span>
+                    </div>
+                </div>
+                <pre className="bg-[#1e1e1e] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300 text-[13px] font-mono min-h-[50px] whitespace-pre">
+                    {codeString}
+                </pre>
+            </div>
+        );
+    }
+
+    if (isBsl) {
+        const [isFullscreen, setIsFullscreen] = useState(false);
+        const [showDiff, setShowDiff] = useState(!!originalCode);
+        const hasDiff = originalCode && originalCode.trim().length > 0;
+
+        return (
+            <>
+                <div className="relative my-4 group w-full">
+                    <div className="flex flex-wrap items-center justify-between gap-y-1 px-3 py-1.5 bg-zinc-800/80 backdrop-blur-sm rounded-t-lg border-x border-t border-[#27272a]">
+                        <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest whitespace-nowrap">BSL (1C:Enterprise)</span>
+                            {hasDiff && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 font-bold uppercase whitespace-nowrap">
+                                    Changes
+                                </span>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-1.5 ml-auto">
+                            {hasDiff && (
+                                <button
+                                    onClick={() => setShowDiff(!showDiff)}
+                                    className={`p-1 px-2 text-[11px] font-medium transition-all rounded-md flex items-center gap-1 whitespace-nowrap ${showDiff
+                                            ? 'bg-blue-500/20 text-blue-400'
+                                            : 'text-zinc-400 hover:text-white hover:bg-zinc-700/50'
+                                        }`}
+                                    title={showDiff ? "Show code only" : "Show diff"}
+                                >
+                                    <GitCompare className="w-3.5 h-3.5" />
+                                    <span>{showDiff ? 'Diff' : 'Code'}</span>
+                                </button>
+                            )}
+                            <button
+                                onClick={() => setIsFullscreen(true)}
+                                className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
+                                title="Maximize"
+                            >
+                                <Maximize2 className="w-3.5 h-3.5" />
+                                <span>Max</span>
+                            </button>
+                            {onApplyCode && (
+                                <button
+                                    onClick={() => onApplyCode(codeString)}
+                                    className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-all hover:bg-blue-400/10 rounded-md whitespace-nowrap"
+                                    title="Load into Side Panel"
+                                >
+                                    <PanelRight className="w-3.5 h-3.5" />
+                                    <span>Apply</span>
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    {showDiff && hasDiff ? (
+                        <BslDiffEditor
+                            original={originalCode}
+                            modified={codeString}
+                            height={Math.min(400, Math.max(codeString.split('\n').length, originalCode.split('\n').length) * 20 + 20)}
+                        />
+                    ) : (
+                        <BslEditor code={codeString} height={Math.min(400, (codeString.split('\n').length * 20) + 20)} />
+                    )}
+                </div>
+
+                {isFullscreen && (
+                    <div className="fixed inset-0 z-[100] bg-zinc-950/95 flex flex-col backdrop-blur-md animate-in fade-in zoom-in duration-200">
+                        <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
+                            <div className="flex items-center gap-3">
+                                <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.3)]" />
+                                <span className="text-xs font-bold text-zinc-300 uppercase tracking-[0.2em]">BSL Fullscreen View</span>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                {hasDiff && (
+                                    <button
+                                        onClick={() => setShowDiff(!showDiff)}
+                                        className={`flex items-center gap-2 px-4 py-1.5 rounded-lg transition-all text-xs font-semibold ${showDiff
+                                                ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                                            }`}
+                                    >
+                                        <GitCompare className="w-4 h-4" />
+                                        <span>{showDiff ? 'Show Code Only' : 'Show Diff'}</span>
+                                    </button>
+                                )}
+                                {onApplyCode && (
+                                    <button
+                                        onClick={() => {
+                                            onApplyCode(codeString);
+                                            setIsFullscreen(false);
+                                        }}
+                                        className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all text-xs font-semibold shadow-lg shadow-blue-900/20"
+                                    >
+                                        <PanelRight className="w-4 h-4" />
+                                        <span>Apply Changes & Close</span>
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => setIsFullscreen(false)}
+                                    className="p-2 hover:bg-zinc-800 rounded-full transition-all text-zinc-400 hover:text-white hover:rotate-90 duration-300"
+                                >
+                                    <CloseIcon className="w-6 h-6" />
+                                </button>
+                            </div>
+                        </div>
+                        <div className="flex-1 p-8 overflow-hidden">
+                            <div className="w-full h-full rounded-2xl border border-zinc-800 overflow-hidden shadow-2xl bg-[#1e1e1e]">
+                                {showDiff && hasDiff ? (
+                                    <BslDiffEditor original={originalCode} modified={codeString} height="100%" hideBorder className="h-full" />
+                                ) : (
+                                    <BslEditor code={codeString} height="100%" hideBorder className="h-full" />
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </>
+        );
+    }
+
+    return (
+        <div className="relative my-2 group w-full">
+            <div className="flex items-center justify-between px-3 py-1 bg-zinc-800 rounded-t-lg border-x border-t border-[#27272a]">
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{language || 'code'}</span>
+                </div>
+            </div>
+            <pre className="bg-[#18181b] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300">
+                <code className={`text-[13px] font-mono leading-relaxed ${className || ''}`} {...props}>
+                    {children}
+                </code>
+            </pre>
+        </div>
+    );
+});
+
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStreaming = false, onApplyCode, originalCode }: MarkdownRendererProps) {
     const components = useMemo(() => ({
         // Handle <thought> or <thinking> tags as collapsible sections
         thought: (({ children }: any) => <ThoughtSection title="Reasoning">{children}</ThoughtSection>) as any,
         thinking: (({ children }: any) => <ThoughtSection title="Thinking">{children}</ThoughtSection>) as any,
 
-        // Code blocks with BSL support via Monaco
-        code({ inline, className, children, ...props }: any) {
-            const match = /language-(\w+)/.exec(className || '');
-            const language = match ? match[1] : '';
-            const isBsl = language === 'bsl' || language === '1c';
-            const codeString = String(children).replace(/\n$/, '');
-
-            // Improved inline vs block detection
-            const isMultiline = codeString.includes('\n');
-
-            if (inline || !isMultiline) {
-                return (
-                    <code
-                        className="bg-[#27272a] text-blue-300 font-semibold px-1.5 py-0.5 rounded-md text-[13px] font-mono border border-zinc-700/50 max-w-full overflow-x-auto inline-flex align-middle scrollbar-hide"
-                        style={{ verticalAlign: 'middle', whiteSpace: 'nowrap' }}
-                        {...props}
-                    >
-                        {children}
-                    </code>
-                );
-            }
-
-            // Show a lightweight placeholder during streaming to avoid Monaco's repeated "Loading..."
-            if (isStreaming) {
-                return (
-                    <div className="relative my-4 group w-full">
-                        <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 backdrop-blur-sm rounded-t-lg border-x border-t border-[#27272a]">
-                            <div className="flex items-center gap-2">
-                                <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">{isBsl ? 'BSL (1C:Enterprise)' : (language || 'code')}</span>
-                            </div>
-                        </div>
-                        <pre className="bg-[#1e1e1e] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300 text-[13px] font-mono min-h-[50px] whitespace-pre">
-                            {codeString}
-                        </pre>
-                    </div>
-                );
-            }
-
-            if (isBsl) {
-                const [isFullscreen, setIsFullscreen] = useState(false);
-
-                return (
-                    <>
-                        <div className="relative my-4 group w-full">
-                            <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800/80 backdrop-blur-sm rounded-t-lg border-x border-t border-[#27272a]">
-                                <div className="flex items-center gap-2">
-                                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">BSL (1C:Enterprise)</span>
-                                </div>
-                                <div className="flex items-center gap-1.5">
-                                    <button
-                                        onClick={() => setIsFullscreen(true)}
-                                        className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1"
-                                        title="Maximize"
-                                    >
-                                        <Maximize2 className="w-3.5 h-3.5" />
-                                        <span>Max</span>
-                                    </button>
-                                    {onApplyCode && (
-                                        <button
-                                            onClick={() => onApplyCode(codeString)}
-                                            className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-all hover:bg-blue-400/10 rounded-md"
-                                            title="Load into Side Panel"
-                                        >
-                                            <PanelRight className="w-3.5 h-3.5" />
-                                            <span>Apply Changes</span>
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                            <BslEditor code={codeString} height={Math.min(400, (codeString.split('\n').length * 20) + 20)} />
-                        </div>
-
-                        {/* Fullscreen Overlay */}
-                        {isFullscreen && (
-                            <div className="fixed inset-0 z-[100] bg-zinc-950/95 flex flex-col backdrop-blur-md animate-in fade-in zoom-in duration-200">
-                                <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.3)]" />
-                                        <span className="text-xs font-bold text-zinc-300 uppercase tracking-[0.2em]">BSL Fullscreen View</span>
-                                    </div>
-                                    <div className="flex items-center gap-4">
-                                        {onApplyCode && (
-                                            <button
-                                                onClick={() => {
-                                                    onApplyCode(codeString);
-                                                    setIsFullscreen(false);
-                                                }}
-                                                className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all text-xs font-semibold shadow-lg shadow-blue-900/20"
-                                            >
-                                                <PanelRight className="w-4 h-4" />
-                                                <span>Apply Changes & Close</span>
-                                            </button>
-                                        )}
-                                        <button
-                                            onClick={() => setIsFullscreen(false)}
-                                            className="p-2 hover:bg-zinc-800 rounded-full transition-all text-zinc-400 hover:text-white hover:rotate-90 duration-300"
-                                        >
-                                            <CloseIcon className="w-6 h-6" />
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className="flex-1 p-8 overflow-hidden">
-                                    <div className="w-full h-full rounded-2xl border border-zinc-800 overflow-hidden shadow-2xl bg-[#1e1e1e]">
-                                        <BslEditor code={codeString} height="100%" hideBorder className="h-full" />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </>
-                );
-            }
-
-            return (
-                <div className="relative my-2 group w-full">
-                    <div className="flex items-center justify-between px-3 py-1 bg-zinc-800 rounded-t-lg border-x border-t border-[#27272a]">
-                        <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{language || 'code'}</span>
-                        </div>
-                    </div>
-                    <pre className="bg-[#18181b] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300">
-                        <code className={`text-[13px] font-mono leading-relaxed ${className || ''}`} {...props}>
-                            {children}
-                        </code>
-                    </pre>
-                </div>
-            );
-        },
+        code: (props: any) => <CodeBlock {...props} isStreaming={isStreaming} onApplyCode={onApplyCode} originalCode={originalCode} />,
         // Styled paragraphs
         p({ children }: any) {
             return <p className="mb-3 last:mb-0 leading-relaxed text-zinc-300">{children}</p>;
@@ -225,7 +280,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStre
         td({ children }: any) {
             return <td className="px-4 py-2.5 border-b border-zinc-800 text-zinc-400 text-sm leading-relaxed">{children}</td>;
         },
-    }), [isStreaming, onApplyCode]);
+    }), [isStreaming, onApplyCode, originalCode]);
 
     return (
         <ReactMarkdown

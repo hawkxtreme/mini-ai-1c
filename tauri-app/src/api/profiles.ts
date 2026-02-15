@@ -5,8 +5,11 @@ export interface LLMProfile {
     name: string;
     provider: string;
     model: string;
-    // api_key is handled securely in backend or local storage, but interface might reflect what we receive
-    // Typically we don't receive api_key back for security, or we do if it's stored in plain text (which it seems to be in profiles.json based on previous analysis)
+    api_key_encrypted: string;
+    base_url: string | null;
+    max_tokens: number;
+    temperature: number;
+    context_window_override?: number;
 }
 
 export interface ProfileStore {
