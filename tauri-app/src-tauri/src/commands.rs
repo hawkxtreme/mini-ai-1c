@@ -498,6 +498,21 @@ pub fn find_configurator_windows_cmd(pattern: String) -> Vec<WindowInfo> {
     }
 }
 
+/// Check if there is an active selection in the window
+#[tauri::command]
+pub fn check_selection_state(hwnd: isize) -> bool {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        configurator::is_selection_active(hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        false
+    }
+}
+
 /// Get code from 1C Configurator window
 /// Get code from 1C Configurator window
 #[tauri::command]
@@ -528,20 +543,39 @@ pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
     }
 }
 
-/// Paste code to 1C Configurator window
+/// Paste code to 1C Configurator window with conflict detection
 #[tauri::command]
-pub async fn paste_code_to_configurator(hwnd: isize, code: String, use_select_all: Option<bool>) -> Result<(), String> {
+pub async fn paste_code_to_configurator(
+    hwnd: isize,
+    code: String,
+    use_select_all: Option<bool>,
+    original_content: Option<String>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         use crate::configurator;
         use crate::history_manager;
         
-        // 1. Try to get current code for snapshot before overwriting
-        if let Ok(current_code) = configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false)) {
+        let select_all = use_select_all.unwrap_or(false);
+        
+        // 1. Read current code for conflict detection & snapshot
+        if let Ok(current_code) = configurator::get_selected_code(hwnd, select_all) {
+            // 2. Conflict detection: compare hash of current code vs original
+            if let Some(ref original) = original_content {
+                let original_hash = configurator::calculate_content_hash(original);
+                let current_hash = configurator::calculate_content_hash(&current_code);
+                
+                if original_hash != current_hash {
+                    return Err("CONFLICT: Код в Конфигураторе был изменён с момента последнего чтения. Получите код заново перед применением.".to_string());
+                }
+            }
+            
+            // 3. Save snapshot for undo
             history_manager::save_snapshot(hwnd, current_code).await;
         }
         
-        configurator::paste_code(hwnd, &code, use_select_all.unwrap_or(false))
+        // 4. Paste code (with selection restoration built into configurator::paste_code)
+        configurator::paste_code(hwnd, &code, select_all)
     }
     #[cfg(not(windows))]
     {

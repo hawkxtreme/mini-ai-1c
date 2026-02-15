@@ -18,7 +18,7 @@ interface ChatAreaProps {
 export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics }: ChatAreaProps) {
     const { messages, isLoading, chatStatus, sendMessage, stopChat, editAndRerun } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
-    const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, getActiveConfiguratorTitle, getCode } = useConfigurator();
+    const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
 
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
@@ -346,13 +346,16 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                                     className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                                 >
                                     <Monitor className="w-3.5 h-3.5" />
-                                    <span className="truncate max-w-[80px] hidden sm:inline">{getActiveConfiguratorTitle()}</span>
+                                    <span className="truncate max-w-[80px] hidden sm:inline">{activeConfigTitle}</span>
                                 </button>
                                 {showConfigDropdown && (
                                     <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20 p-1">
                                         {detectedWindows.map(w => (
-                                            <button key={w.hwnd} onClick={() => { selectWindow(w.hwnd); setShowConfigDropdown(false); }} className={`w-full text-left px-3 py-2 rounded-md text-xs truncate ${selectedHwnd === w.hwnd ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a]'}`}>
-                                                {w.title}
+                                            <button key={w.hwnd} onClick={() => { selectWindow(w.hwnd); setShowConfigDropdown(false); }}
+                                                className={`w-full text-left px-3 py-2 rounded-md text-xs truncate ${selectedHwnd === w.hwnd ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a]'}`}
+                                                title={w.title}
+                                            >
+                                                {w.title.split(' - ').length >= 3 ? w.title.split(' - ').pop() : w.title}
                                             </button>
                                         ))}
                                     </div>

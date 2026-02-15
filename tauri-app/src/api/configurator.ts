@@ -33,9 +33,20 @@ export async function getActiveFragment(hwnd: number): Promise<string> {
  * @param hwnd Window handle
  * @param code Code to paste
  * @param useSelectAll If true, sends Ctrl+A before Paste (replacing everything)
+ * @param originalContent Original content for conflict detection
  */
-export async function pasteCodeToConfigurator(hwnd: number, code: string, useSelectAll: boolean = false): Promise<void> {
-    return await invoke('paste_code_to_configurator', { hwnd, code, useSelectAll });
+export async function pasteCodeToConfigurator(
+    hwnd: number,
+    code: string,
+    useSelectAll: boolean = false,
+    originalContent?: string
+): Promise<void> {
+    return await invoke('paste_code_to_configurator', {
+        hwnd,
+        code,
+        useSelectAll,
+        originalContent: originalContent ?? null,
+    });
 }
 
 /**
@@ -43,4 +54,11 @@ export async function pasteCodeToConfigurator(hwnd: number, code: string, useSel
  */
 export async function undoLastChange(hwnd: number): Promise<void> {
     return await invoke('undo_last_change', { hwnd });
+}
+
+/**
+ * Check if there is an active selection in the window
+ */
+export async function checkSelectionState(hwnd: number): Promise<boolean> {
+    return await invoke<boolean>('check_selection_state', { hwnd });
 }

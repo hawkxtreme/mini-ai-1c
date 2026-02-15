@@ -7,6 +7,7 @@ import { useChat } from '../../contexts/ChatContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { CodeSidePanel } from '../CodeSidePanel';
 import { SettingsPanel } from '../SettingsPanel';
+import { ConflictDialog } from '../ui/ConflictDialog';
 import { Header } from './Header';
 import { ChatArea } from '../chat/ChatArea';
 import logo from '../../assets/logo.png';
@@ -15,7 +16,7 @@ export function MainLayout() {
     const { settings } = useSettings();
     const { status: bslStatus, analyzeCode } = useBsl();
     const { clearChat } = useChat();
-    const { pasteCode } = useConfigurator();
+    const { pasteCode, checkSelection } = useConfigurator();
 
     const [showSidePanel, setShowSidePanel] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
@@ -25,6 +26,8 @@ export function MainLayout() {
     const [originalCode, setOriginalCode] = useState('');
     const [modifiedCode, setModifiedCode] = useState('');
     const [diagnostics, setDiagnostics] = useState<any[]>([]);
+    const [showConflictDialog, setShowConflictDialog] = useState(false);
+    const [selectionActive, setSelectionActive] = useState(true);
 
     const appWindow = getCurrentWindow();
 
@@ -72,10 +75,45 @@ export function MainLayout() {
     const handleApply = useCallback(async () => {
         setIsApplying(true);
         try {
+            // If original is empty (new module), force select all for clean write
+            const useSelectAll = !originalCode || originalCode.trim().length === 0;
+            await pasteCode(modifiedCode, useSelectAll, originalCode || undefined);
+        } catch (e: any) {
+            const errorMsg = typeof e === 'string' ? e : e?.message || String(e);
+            if (errorMsg.includes('CONFLICT')) {
+                const isActive = await checkSelection();
+                setSelectionActive(isActive);
+                setShowConflictDialog(true);
+            } else {
+                console.error("Apply failed", e);
+                alert("Ошибка применения: " + errorMsg);
+            }
+        } finally {
+            setIsApplying(false);
+        }
+    }, [modifiedCode, originalCode, pasteCode]);
+
+    const handleConflictApplyToAll = useCallback(async () => {
+        setShowConflictDialog(false);
+        setIsApplying(true);
+        try {
+            // useSelectAll = true, originalContent = undefined (bypass hash check)
             await pasteCode(modifiedCode, true);
-        } catch (e) {
-            console.error("Apply failed", e);
-            alert("Failed to apply: " + e);
+        } catch (e: any) {
+            alert("Ошибка применения: " + (e?.message || String(e)));
+        } finally {
+            setIsApplying(false);
+        }
+    }, [modifiedCode, pasteCode]);
+
+    const handleConflictApplyToSelection = useCallback(async () => {
+        setShowConflictDialog(false);
+        setIsApplying(true);
+        try {
+            // useSelectAll = false, originalContent = undefined (bypass hash check)
+            await pasteCode(modifiedCode, false);
+        } catch (e: any) {
+            alert("Ошибка применения: " + (e?.message || String(e)));
         } finally {
             setIsApplying(false);
         }
@@ -151,6 +189,14 @@ export function MainLayout() {
                     />
                 </div>
             </div>
+
+            <ConflictDialog
+                isOpen={showConflictDialog}
+                selectionActive={selectionActive}
+                onClose={() => setShowConflictDialog(false)}
+                onApplyToAll={handleConflictApplyToAll}
+                onApplyToSelection={handleConflictApplyToSelection}
+            />
         </div>
     );
 }

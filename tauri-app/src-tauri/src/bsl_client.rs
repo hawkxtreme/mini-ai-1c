@@ -74,6 +74,7 @@ pub struct BSLClient {
     server_process: Option<Child>,
     request_id: AtomicI32,
     capabilities: Option<serde_json::Value>,
+    workspace_root: Option<String>,
 }
 
 impl BSLClient {
@@ -83,6 +84,7 @@ impl BSLClient {
             server_process: None,
             request_id: AtomicI32::new(1),
             capabilities: None,
+            workspace_root: None,
         }
     }
 
@@ -107,6 +109,10 @@ impl BSLClient {
         
         let mut cmd = Command::new(&settings.bsl_server.java_path);
         cmd.args([
+                // Increase WebSocket message buffer from 8KB default to 1MB
+                // Without this, large BSL code files cause "text message too big" WebSocket close
+                "-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576",
+                "-Xmx1g",
                 "-jar",
                 jar_path,
                 "websocket",
@@ -156,6 +162,11 @@ impl BSLClient {
         
         // Initialize LSP with proper capabilities
         let client_capabilities = serde_json::json!({
+            "workspace": {
+                "configuration": true,
+                "workspaceFolders": true,
+                "didChangeConfiguration": { "dynamicRegistration": true }
+            },
             "textDocument": {
                 "synchronization": {
                     "dynamicRegistration": true,
@@ -163,31 +174,46 @@ impl BSLClient {
                     "willSaveWaitUntil": false,
                     "didSave": true
                 },
-                "diagnostic": {
-                    "dynamicRegistration": true
-                },
-                "formatting": {
-                    "dynamicRegistration": true
-                },
+                "diagnostic": { "dynamicRegistration": true },
+                "formatting": { "dynamicRegistration": true },
                 "publishDiagnostics": {
                     "relatedInformation": true,
-                    "tagSupport": {
-                        "valueSet": [1, 2]
-                    },
+                    "tagSupport": { "valueSet": [1, 2] },
                     "versionSupport": true
-                }
-            },
-            "workspace": {
-                "configuration": true,
-                "didChangeConfiguration": {
-                    "dynamicRegistration": true
                 }
             }
         });
 
+        // Setup persistent workspace for BSL LS
+        let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        let workspace_path = std::path::PathBuf::from(app_data).join("MiniAI1C").join("bsl-workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap_or_default();
+        let root_dir = workspace_path.to_string_lossy().replace('\\', "/");
+        self.workspace_root = Some(root_dir.clone());
+
+        // Create default bsl-ls.json if it doesn't exist
+        let config_path = workspace_path.join(".bsl-language-server.json");
+        if !config_path.exists() {
+            let config = serde_json::json!({
+                "language": "ru",
+                "diagnostics": {
+                    "parameters": {
+                        "EmptyLines": { "maxCount": 1 }
+                    }
+                }
+            });
+            let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default());
+        }
+
+        let root_uri = format!("file:///{}", root_dir.trim_start_matches('/'));
+        
         let initialize_result = self.send_request("initialize", serde_json::json!({
             "processId": std::process::id(),
-            "rootUri": null,
+            "rootUri": root_uri,
+            "workspaceFolders": [{
+                "uri": root_uri,
+                "name": "BSL Workspace"
+            }],
             "capabilities": client_capabilities,
             "trace": "verbose"
         })).await?;
@@ -196,10 +222,87 @@ impl BSLClient {
         self.capabilities = initialize_result.get("capabilities").cloned();
         println!("[BSL LS] Initialized. Server capabilities: {:?}", self.capabilities.as_ref().map(|c| c.to_string()));
 
-        // Notify initialized
-        self.send_notification("initialized", serde_json::json!({})).await?;
+        // Notify initialized and pump server messages for 1 second
+        {
+            let ws_ref = self.ws.as_ref().ok_or("Not connected")?;
+            let mut ws = ws_ref.lock().await;
+
+            let init_notif = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                method: "initialized".to_string(),
+                params: serde_json::json!({}),
+            };
+            if let Ok(msg) = serde_json::to_string(&init_notif) {
+                ws.send(Message::Text(msg)).await.map_err(|e| e.to_string())?;
+                println!("[BSL LS] Sent initialized notification");
+            }
+
+            // Quick drain for server-initiated requests (configuration, etc.)
+            let drain_timeout = tokio::time::sleep(tokio::time::Duration::from_millis(500));
+            tokio::pin!(drain_timeout);
+            loop {
+                tokio::select! {
+                    msg = ws.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&text) {
+                                    if resp.method.is_some() && resp.id.is_some() {
+                                        let method = resp.method.as_ref().unwrap();
+                                        let id = resp.id.unwrap();
+                                        println!("[BSL LS] <<< Server request: {} id={}", method, id);
+                                        Self::handle_server_request(&mut ws, method, id, &resp.params).await;
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ = &mut drain_timeout => break,
+                }
+            }
+        }
         
         Ok(())
+    }
+
+    /// Send a JSON-RPC response to a server-initiated request
+    async fn send_response_raw(ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>, id: i32, result: serde_json::Value) -> Result<(), String> {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        });
+        let msg = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+        ws.send(Message::Text(msg)).await.map_err(|e| e.to_string())
+    }
+
+    /// Handle server-initiated requests
+    async fn handle_server_request(ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>, method: &str, id: i32, _params: &Option<serde_json::Value>) {
+        match method {
+            "workspace/configuration" => {
+                // Return default configuration
+                let config = serde_json::json!([{
+                    "bsl": {
+                        "language": "ru",
+                        "diagnostics": {
+                            "parameters": {
+                                "EmptyLines": { "maxCount": 1 }
+                            }
+                        }
+                    }
+                }]);
+                let _ = Self::send_response_raw(ws, id, config).await;
+            }
+            "client/registerCapability" => {
+                let _ = Self::send_response_raw(ws, id, serde_json::json!({})).await;
+            }
+            _ => {
+                println!("[BSL LS] Warning: Unhandled server request: {}", method);
+                let _ = Self::send_response_raw(ws, id, serde_json::Value::Null).await;
+            }
+        }
     }
 
     /// Send JSON-RPC request
@@ -225,6 +328,15 @@ impl BSLClient {
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
+                        // Server request
+                        if response.method.is_some() && response.id.is_some() {
+                            let method = response.method.as_ref().unwrap();
+                            let srv_id = response.id.unwrap();
+                            Self::handle_server_request(&mut ws, method, srv_id, &response.params).await;
+                            continue;
+                        }
+
+                        // Response for our request
                         if response.id == Some(id) {
                             if let Some(error) = response.error {
                                 return Err(format!("LSP error {}: {}", error.code, error.message));
@@ -322,8 +434,15 @@ impl BSLClient {
                 msg = ws.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            // println!("[BSL LS] Received: {}", text); // excessive?
                             if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
+                                // Server request
+                                if response.method.is_some() && response.id.is_some() {
+                                    let method = response.method.as_ref().unwrap();
+                                    let srv_id = response.id.unwrap();
+                                    Self::handle_server_request(&mut ws, method, srv_id, &response.params).await;
+                                    continue;
+                                }
+
                                 // Check if it is publishDiagnostics
                                 if let Some(method) = &response.method {
                                     if method == "textDocument/publishDiagnostics" {
@@ -333,8 +452,7 @@ impl BSLClient {
                                             if let Some(diag_uri) = params.get("uri").and_then(|u| u.as_str()) {
                                                 println!("[BSL LS] Diagnostics URI: {}, Expected: {}", diag_uri, uri);
                                                 
-                                                // Normalize check: BSL LS might add drive letter (e.g. file:///D:/temp.bsl)
-                                                // We check if diag_uri ends with the filename we sent
+                                                // Normalize check: BSL LS might add drive letter
                                                 let filename = uri.split('/').last().unwrap_or(uri);
                                                 
                                                 if diag_uri == uri || diag_uri.ends_with(filename) {
@@ -351,17 +469,12 @@ impl BSLClient {
                                                         .collect();
                                                     
                                                     // Close document
-                                                    // (We need to unlock ws to call send_notification, so we can't use self.send_notification here easily because we hold the lock)
-                                                    // We'll just construct the close message manually to reuse the stream
-                                                    
                                                     let close_req = JsonRpcRequest {
                                                         jsonrpc: "2.0".to_string(),
                                                         id: None,
                                                         method: "textDocument/didClose".to_string(),
                                                         params: serde_json::json!({
-                                                            "textDocument": {
-                                                                "uri": uri
-                                                            }
+                                                            "textDocument": { "uri": uri }
                                                         }),
                                                     };
                                                     if let Ok(msg) = serde_json::to_string(&close_req) {
@@ -370,16 +483,15 @@ impl BSLClient {
                                                     }
 
                                                     return Ok(diagnostics);
-                                                } else {
-                                                    println!("[BSL LS] URI mismatch, ignoring");
                                                 }
                                             }
                                         }
-                                    } else {
-                                         println!("[BSL LS] Received notification/request method: {}", method);
+                                    } else if method == "window/logMessage" {
+                                        if let Some(params) = &response.params {
+                                            let msg_text = params.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                                            println!("[BSL LS][server] {}", msg_text);
+                                        }
                                     }
-                                } else if let Some(id) = response.id {
-                                     println!("[BSL LS] Received response for id: {:?}, result: {:?}", id, response.result);
                                 }
                             }
                         }

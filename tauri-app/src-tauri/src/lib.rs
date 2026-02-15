@@ -48,6 +48,7 @@ pub fn run() {
             find_configurator_windows_cmd,
             get_code_from_configurator,
             get_active_fragment_cmd,
+            check_selection_state,
             paste_code_to_configurator,
             // Chat history
             get_chat_sessions,

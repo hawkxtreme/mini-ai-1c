@@ -8,13 +8,22 @@ use windows::{
     },
     Win32::System::ProcessStatus::K32GetModuleFileNameExW,
     Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU,
+        SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU, VK_SHIFT, VK_UP,
     },
     Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic,
         SetForegroundWindow, ShowWindow, SW_RESTORE,
     },
 };
+
+/// Calculate a simple hash of content for conflict detection
+pub fn calculate_content_hash(content: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    content.trim().hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
 
 fn send_ctrl_a() {
     unsafe {
@@ -52,6 +61,66 @@ fn send_ctrl_a() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
+
+/// Send Shift+Up `count` times to re-select pasted lines
+fn send_shift_up(count: usize) {
+    unsafe {
+        // First: send Home to go to beginning of current line
+        let home_inputs = vec![
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, ..Default::default() },
+                },
+            },
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                },
+            },
+        ];
+        SendInput(&home_inputs, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Then: Shift+Up for each line to select upward
+        for _ in 0..count {
+            let shift_up = vec![
+                // Shift down
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_SHIFT, ..Default::default() },
+                    },
+                },
+                // Up down
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_UP, ..Default::default() },
+                    },
+                },
+                // Up up
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_UP, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                    },
+                },
+                // Shift up
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_SHIFT, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                    },
+                },
+            ];
+            SendInput(&shift_up, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+}
+
 
 #[cfg(windows)]
 use std::sync::Mutex;
@@ -373,6 +442,23 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
         
         SendInput(&ctrl_v_inputs, std::mem::size_of::<INPUT>() as i32);
         println!("[Configurator] Sent Ctrl+V inputs");
+        
+        // Wait for paste to complete
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        
+        // Restore selection
+        if use_select_all {
+            // For full module: re-select all
+            println!("[Configurator] Re-selecting all after paste");
+            send_ctrl_a();
+        } else {
+            // For fragment: try to re-select pasted lines using Shift+Up
+            let line_count = code.lines().count();
+            if line_count > 1 {
+                println!("[Configurator] Re-selecting {} lines after paste", line_count - 1);
+                send_shift_up(line_count - 1);
+            }
+        }
     }
     
     Ok(())
@@ -393,4 +479,68 @@ pub fn get_selected_code(_hwnd: isize) -> Result<String, String> {
 #[cfg(not(windows))]
 pub fn paste_code(_hwnd: isize, _code: &str, _use_select_all: bool) -> Result<(), String> {
     Err("Configurator integration is only available on Windows".to_string())
+}
+
+/// Check if there is an active selection in the window
+pub fn is_selection_active(hwnd: isize) -> bool {
+    #[cfg(windows)]
+    {
+        use clipboard_win::{empty, formats, get_clipboard};
+        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        
+        let window = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
+        
+        unsafe {
+            // 1. Clear clipboard
+            let _ = empty();
+            
+            // 2. Focus window
+            if windows::Win32::UI::WindowsAndMessaging::IsIconic(window).as_bool() {
+                windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+            }
+            windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            
+            // 3. Send Ctrl+C
+            let inputs = vec![
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_C, ..Default::default() },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_C, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                        ki: KEYBDINPUT { wVk: VK_CONTROL, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                    },
+                },
+            ];
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            
+            // 4. Check if clipboard is NOT empty
+            match get_clipboard::<String, _>(formats::Unicode) {
+                Ok(content) => !content.is_empty(),
+                Err(_) => false,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        false
+    }
 }

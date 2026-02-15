@@ -6,6 +6,7 @@ import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Data
 import { LLMSettings } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
 import { useProfiles, ProfileStore } from '../contexts/ProfileContext';
+import { parseConfiguratorTitle } from '../utils/configurator';
 
 interface WindowInfo {
     hwnd: number;
@@ -261,7 +262,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                                 ) : (
                                                     detectedWindows.map(w => (
                                                         <div key={w.hwnd} className="p-2 border-b border-zinc-800 text-sm hover:bg-zinc-800 flex justify-between items-center group">
-                                                            <span className="truncate">{w.title}</span>
+                                                            <span className="truncate" title={w.title}>{parseConfiguratorTitle(w.title)}</span>
                                                             <button onClick={() => testCapture(w.hwnd)} className="opacity-0 group-hover:opacity-100 text-xs bg-blue-600 px-2 py-0.5 rounded text-white">Test</button>
                                                         </div>
                                                     ))
