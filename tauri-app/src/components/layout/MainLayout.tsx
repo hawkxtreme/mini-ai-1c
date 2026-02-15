@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { PanelRight, Trash2, Settings, Minus, Square, X } from 'lucide-react';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -69,7 +69,7 @@ export function MainLayout() {
         }
     }, [modifiedCode, showSidePanel]);
 
-    const handleApply = async () => {
+    const handleApply = useCallback(async () => {
         setIsApplying(true);
         try {
             await pasteCode(modifiedCode, true);
@@ -79,13 +79,13 @@ export function MainLayout() {
         } finally {
             setIsApplying(false);
         }
-    };
+    }, [modifiedCode, pasteCode]);
 
-    const handleCodeLoaded = (code: string, isSelection: boolean) => {
+    const handleCodeLoaded = useCallback((code: string, isSelection: boolean) => {
         setOriginalCode(code);
         setModifiedCode(code);
         setShowSidePanel(true);
-    };
+    }, []);
 
     const minimize = () => appWindow.minimize();
     const maximize = async () => {
@@ -129,10 +129,10 @@ export function MainLayout() {
             <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
                 <ChatArea
                     modifiedCode={modifiedCode}
-                    onApplyCode={(code) => {
+                    onApplyCode={useCallback((code: string) => {
                         setModifiedCode(code);
                         setShowSidePanel(true);
-                    }}
+                    }, [])}
                     onCodeLoaded={handleCodeLoaded}
                     diagnostics={diagnostics}
                 />

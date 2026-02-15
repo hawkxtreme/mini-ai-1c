@@ -223,12 +223,17 @@ pub async fn stream_chat_completion(
     let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
     // Build request
+    // Heuristic: If max_tokens (Context Window in UI) is very large (> 16k), 
+    // it likely represents input capacity, not generation limit.
+    // Most APIs reject huge max_tokens for generation. Clamp to safe default (4096).
+    let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
+
     let request_body = ChatRequest {
         model: profile.model.clone(),
         messages: api_messages,
         stream: true,
         temperature: profile.temperature,
-        max_tokens: profile.max_tokens,
+        max_tokens: api_max_tokens,
         tools: tools_opt,
     };
     
@@ -280,6 +285,8 @@ pub async fn stream_chat_completion(
     let mut buffer = String::new();
     let mut full_content = String::new();
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut announced_tool_calls = std::collections::HashSet::new();
+    let mut is_thinking = false;
     
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
@@ -304,10 +311,44 @@ pub async fn stream_chat_completion(
                     
                     if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
                         if let Some(choice) = chunk.choices.first() {
-                            // 1. Handle content
+                            // 1. Handle content & thinking tags
                             if let Some(content) = &choice.delta.content {
-                                full_content.push_str(content);
-                                let _ = app_handle.emit("chat-chunk", content.clone());
+                                let mut current_content = content.as_str();
+                                
+                                // Simple state machine for <thinking> tags
+                                while !current_content.is_empty() {
+                                    if !is_thinking {
+                                        if let Some(start_pos) = current_content.find("<thinking>") {
+                                            // Emit text before <thinking>
+                                            if start_pos > 0 {
+                                                let text = &current_content[..start_pos];
+                                                full_content.push_str(text);
+                                                let _ = app_handle.emit("chat-chunk", text.to_string());
+                                            }
+                                            is_thinking = true;
+                                            current_content = &current_content[start_pos + 10..];
+                                        } else {
+                                            // No <thinking> tag, process everything
+                                            full_content.push_str(current_content);
+                                            let _ = app_handle.emit("chat-chunk", current_content.to_string());
+                                            break;
+                                        }
+                                    } else {
+                                        if let Some(end_pos) = current_content.find("</thinking>") {
+                                            // Emit thinking chunk before </thinking>
+                                            if end_pos > 0 {
+                                                let text = &current_content[..end_pos];
+                                                let _ = app_handle.emit("chat-thinking-chunk", text.to_string());
+                                            }
+                                            is_thinking = false;
+                                            current_content = &current_content[end_pos + 11..];
+                                        } else {
+                                            // Still thinking, emit everything
+                                            let _ = app_handle.emit("chat-thinking-chunk", current_content.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             
                             // 2. Handle tool calls
@@ -326,8 +367,27 @@ pub async fn stream_chat_completion(
                                     let tc = &mut accumulated_tool_calls[idx];
                                     if let Some(id) = &tc_delta.id { tc.id.push_str(id); }
                                     if let Some(f) = &tc_delta.function {
-                                        if let Some(name) = &f.name { tc.function.name.push_str(name); }
-                                        if let Some(args) = &f.arguments { tc.function.arguments.push_str(args); }
+                                        if let Some(name) = &f.name { 
+                                            tc.function.name.push_str(name); 
+                                        }
+                                        if let Some(args) = &f.arguments { 
+                                            tc.function.arguments.push_str(args);
+                                            // Emit progress
+                                            let _ = app_handle.emit("tool-call-progress", serde_json::json!({
+                                                "index": idx,
+                                                "arguments": args
+                                            }));
+                                        }
+                                    }
+
+                                    // Emit "started" event when we have an ID or name
+                                    if !announced_tool_calls.contains(&idx) && (!tc.id.is_empty() || !tc.function.name.is_empty()) {
+                                        let _ = app_handle.emit("tool-call-started", serde_json::json!({
+                                            "index": idx,
+                                            "id": tc.id,
+                                            "name": tc.function.name
+                                        }));
+                                        announced_tool_calls.insert(idx);
                                     }
                                 }
                             }

@@ -84,6 +84,7 @@ pub fn set_active_profile(profile_id: String) -> Result<(), String> {
 #[derive(Default)]
 pub struct ChatState {
     pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    pub approval_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<bool>>>,
 }
 
 /// Stop the current chat generation
@@ -101,6 +102,34 @@ pub async fn stop_chat(
     Ok(())
 }
 
+/// Approve the pending tool call
+#[tauri::command]
+pub async fn approve_tool(
+    state: tauri::State<'_, ChatState>,
+) -> Result<(), String> {
+    let guard = state.approval_tx.lock().await;
+    if let Some(tx) = &*guard {
+        let _ = tx.send(true).await;
+        Ok(())
+    } else {
+        Err("No pending tool call to approve".to_string())
+    }
+}
+
+/// Reject the pending tool call
+#[tauri::command]
+pub async fn reject_tool(
+    state: tauri::State<'_, ChatState>,
+) -> Result<(), String> {
+    let guard = state.approval_tx.lock().await;
+    if let Some(tx) = &*guard {
+        let _ = tx.send(false).await;
+        Ok(())
+    } else {
+        Err("No pending tool call to reject".to_string())
+    }
+}
+
 /// Stream chat response using AI client with automatic BSL correction
 #[tauri::command]
 pub async fn stream_chat(
@@ -111,9 +140,16 @@ pub async fn stream_chat(
 ) -> Result<(), String> {
     use crate::ai_client::{extract_bsl_code, stream_chat_completion, ApiMessage};
     use tauri::{Emitter, Manager};
+    
+    // Create channel for tool approval
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bool>(1);
+    {
+        let mut guard = chat_state.approval_tx.lock().await;
+        *guard = Some(tx);
+    }
 
     // 1. Initial status
-    let _ = app_handle.emit("chat-status", "Thinking...");
+    let _ = app_handle.emit("chat-status", "Думаю...");
 
     // Convert to API messages
     let mut api_messages: Vec<ApiMessage> = messages
@@ -132,7 +168,7 @@ pub async fn stream_chat(
     
     let join_handle = tokio::spawn(async move {
         // 1. Initial status
-        let _ = task_app_handle.emit("chat-status", "Thinking...");
+        let _ = task_app_handle.emit("chat-status", "Думаю...");
         
         let bsl_state = task_app_handle.state::<tokio::sync::Mutex<crate::bsl_client::BSLClient>>();
         let settings = crate::settings::load_settings();
@@ -163,11 +199,36 @@ pub async fn stream_chat(
 
             // 1. Check for tool calls
             if let Some(tool_calls) = &assistant_msg.tool_calls {
-                let _ = task_app_handle.emit("chat-status", "Executing tools...");
-                println!("[AI][LOOP] Processing {} tool calls", tool_calls.len());
+                let _ = task_app_handle.emit("chat-status", "Ожидаю подтверждения...");
+                let _ = task_app_handle.emit("waiting-for-approval", serde_json::json!({
+                    "count": tool_calls.len()
+                }));
+                
+                // Wait for approval signal
+                let approved = rx.recv().await.unwrap_or(false);
+                
+                if !approved {
+                    let _ = task_app_handle.emit("chat-status", "Действие отклонено пользователем");
+                    println!("[AI][LOOP] Tool calls rejected by user");
+                    
+                    for tool_call in tool_calls {
+                         api_messages.push(ApiMessage {
+                            role: "tool".to_string(),
+                            content: Some("Error: Action rejected by user".to_string()),
+                            tool_call_id: Some(tool_call.id.clone()),
+                            tool_calls: None,
+                            name: Some(tool_call.function.name.clone()),
+                        });
+                    }
+                    continue;
+                }
+
+                let _ = task_app_handle.emit("chat-status", "Вызов MCP...");
+                println!("[AI][LOOP] Processing {} tool calls (Approved)", tool_calls.len());
 
                 for tool_call in tool_calls {
                     let tool_name = &tool_call.function.name;
+                    let _ = task_app_handle.emit("chat-status", format!("Вызов MCP: {}...", tool_name));
                     // Deserialize arguments safely
                     let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
                         .unwrap_or(serde_json::json!({}));
@@ -180,8 +241,6 @@ pub async fn stream_chat(
                     for config in &settings.mcp_servers {
                         if !config.enabled { continue; }
                         
-                        println!("[AI][TOOL] Checking server: {}", config.name);
-                        
                         if let Ok(client) = crate::mcp_client::McpClient::new(config.clone()).await {
                             if let Ok(tools) = client.list_tools().await {
                                 // Find tool by sanitized name
@@ -193,15 +252,22 @@ pub async fn stream_chat(
                                 });
 
                                 if let Some(t) = target_tool {
-                                    println!("[AI][TOOL] Found on server '{}'. Calling...", config.name);
                                     match client.call_tool(&t.name, arguments.clone()).await {
                                         Ok(res) => {
                                             tool_result = res.to_string();
-                                            println!("[AI][TOOL] Success. Result len: {}", tool_result.len());
+                                            let _ = task_app_handle.emit("tool-call-completed", serde_json::json!({
+                                                "id": tool_call.id,
+                                                "status": "done",
+                                                "result": tool_result
+                                            }));
                                         },
                                         Err(e) => {
                                             tool_result = format!("Error calling tool: {}", e);
-                                            println!("[AI][TOOL] Failed: {}", e);
+                                            let _ = task_app_handle.emit("tool-call-completed", serde_json::json!({
+                                                "id": tool_call.id,
+                                                "status": "error",
+                                                "result": tool_result
+                                            }));
                                         },
                                     }
                                     found = true;
@@ -211,10 +277,6 @@ pub async fn stream_chat(
                         }
                     }
                     
-                    if !found {
-                        println!("[AI][TOOL] Tool '{}' not found in any server.", tool_name);
-                    }
-
                     api_messages.push(ApiMessage {
                         role: "tool".to_string(),
                         content: Some(tool_result),
@@ -224,8 +286,6 @@ pub async fn stream_chat(
                     });
                 }
                 
-                println!("[AI][LOOP] All tools processed. Sending results back to LLM...");
-                // Assistant might need to respond based on tool results
                 continue;
             }
 
@@ -237,7 +297,7 @@ pub async fn stream_chat(
                  break;
             }
 
-            let _ = task_app_handle.emit("chat-status", "Validating BSL code...");
+            let _ = task_app_handle.emit("chat-status", "Проверка BSL кода...");
             
             let validation_result = tokio::time::timeout(
                 tokio::time::Duration::from_secs(30),
@@ -248,10 +308,25 @@ pub async fn stream_chat(
                     }
 
                     let mut all_errors: Vec<String> = Vec::new();
+                    let mut ui_diagnostics: Vec<BSLDiagnostic> = Vec::new();
+
                     for (idx, code) in bsl_blocks.iter().enumerate() {
                         let uri = format!("file:///iteration_{}_{}.bsl", current_iteration, idx);
                         match client.analyze_code(code, &uri).await {
                             Ok(diagnostics) => {
+                                for d in &diagnostics {
+                                    ui_diagnostics.push(BSLDiagnostic {
+                                        line: d.range.start.line,
+                                        character: d.range.start.character,
+                                        message: d.message.clone(),
+                                        severity: match d.severity {
+                                            Some(1) => "error".to_string(),
+                                            Some(2) => "warning".to_string(),
+                                            _ => "info".to_string(),
+                                        },
+                                    });
+                                }
+
                                 let errors: Vec<crate::bsl_client::Diagnostic> = diagnostics.into_iter()
                                     .filter(|d| d.severity == Some(1)) // Only Errors
                                     .collect();
@@ -267,17 +342,20 @@ pub async fn stream_chat(
                             Err(_) => {}
                         }
                     }
-                    all_errors
+                    (all_errors, ui_diagnostics)
                 }
             ).await;
 
-            let all_errors = match validation_result {
-                Ok(errors) => errors,
+            let (all_errors, ui_diagnostics) = match validation_result {
+                Ok(res) => res,
                 Err(_) => {
                     let _ = task_app_handle.emit("chat-status", "Ошибка проверки кода: Таймаут (30с)");
                     break;
                 }
             };
+
+            // Emit BSL validation results for UI
+            let _ = task_app_handle.emit("bsl-validation-result", &ui_diagnostics);
 
             if all_errors.is_empty() {
                 break;
@@ -452,11 +530,39 @@ pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
 
 /// Paste code to 1C Configurator window
 #[tauri::command]
-pub fn paste_code_to_configurator(hwnd: isize, code: String, use_select_all: Option<bool>) -> Result<(), String> {
+pub async fn paste_code_to_configurator(hwnd: isize, code: String, use_select_all: Option<bool>) -> Result<(), String> {
     #[cfg(windows)]
     {
         use crate::configurator;
+        use crate::history_manager;
+        
+        // 1. Try to get current code for snapshot before overwriting
+        if let Ok(current_code) = configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false)) {
+            history_manager::save_snapshot(hwnd, current_code).await;
+        }
+        
         configurator::paste_code(hwnd, &code, use_select_all.unwrap_or(false))
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Undo last code change in 1C Configurator
+#[tauri::command]
+pub async fn undo_last_change(hwnd: isize) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        use crate::history_manager;
+        
+        if let Some(snapshot) = history_manager::pop_snapshot(hwnd).await {
+            // Restore code (usually requires select all if we want to replace back)
+            configurator::paste_code(hwnd, &snapshot.original_code, true)
+        } else {
+            Err("No history for this window".to_string())
+        }
     }
     #[cfg(not(windows))]
     {

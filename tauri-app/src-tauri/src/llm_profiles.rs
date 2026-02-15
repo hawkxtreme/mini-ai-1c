@@ -19,6 +19,7 @@ pub enum LLMProvider {
     XAI,
     Perplexity,
     Ollama,
+    ZAI,
     Custom,
 }
 
@@ -90,6 +91,7 @@ impl LLMProfile {
                 LLMProvider::Mistral => "https://api.mistral.ai/v1".to_string(),
                 LLMProvider::XAI => "https://api.x.ai/v1".to_string(),
                 LLMProvider::Perplexity => "https://api.perplexity.ai".to_string(),
+                LLMProvider::ZAI => "https://api.z.ai/api/coding/paas/v4".to_string(),
                 LLMProvider::Ollama => "http://localhost:11434/v1".to_string(),
                 LLMProvider::Custom => String::new(),
             }

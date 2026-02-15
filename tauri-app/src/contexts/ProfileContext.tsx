@@ -1,17 +1,9 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import * as api from '../api';
 
-export interface LLMProfile {
-    id: string;
-    name: string;
-    provider: string;
-    model: string;
-}
+import { LLMProfile, ProfileStore } from '../api';
 
-export interface ProfileStore {
-    profiles: LLMProfile[];
-    active_profile_id: string;
-}
+export type { LLMProfile, ProfileStore };
 
 interface ProfileContextType {
     profiles: LLMProfile[];

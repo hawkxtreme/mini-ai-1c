@@ -1,10 +1,12 @@
-import { useRef, useEffect, useState } from 'react';
-import { useChat } from '../../contexts/ChatContext';
+import { useRef, useEffect, useState, useMemo } from 'react';
+import { useChat, ToolCall } from '../../contexts/ChatContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { MarkdownRenderer } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, FileText, MousePointerClick } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, FileText, MousePointerClick, Brain, Check, X, Terminal, Pencil, Play, Send } from 'lucide-react';
 import logo from '../../assets/logo.png';
+import ToolCallBlock from './ToolCallBlock';
+import { MessageActions } from './MessageActions';
 
 interface ChatAreaProps {
     modifiedCode: string;
@@ -14,16 +16,19 @@ interface ChatAreaProps {
 }
 
 export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, sendMessage, stopChat } = useChat();
+    const { messages, isLoading, chatStatus, sendMessage, stopChat, editAndRerun } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, getActiveConfiguratorTitle, getCode } = useConfigurator();
 
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
-    const [showConfigDropdown, setShowConfigDropdown] = useState(false); // Duplicated from Header logic? Ideally Config/Code logic should be in one place (e.g. Header or ChatInput)
-    // Refactoring note: Original App.tsx had Config/Code dropdowns in the Input Area. I'll keep them there.
-
+    const [showConfigDropdown, setShowConfigDropdown] = useState(false);
     const [showGetCodeDropdown, setShowGetCodeDropdown] = useState(false);
+    const [expandedThinking, setExpandedThinking] = useState<Record<number, boolean>>({});
+    const [contextCode, setContextCode] = useState('');
+    const [isContextSelection, setIsContextSelection] = useState(false);
+    const [editingIndex, setEditingIndex] = useState<number | null>(null);
+    const [editText, setEditText] = useState('');
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -47,13 +52,12 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
 
     const handleSendMessage = () => {
         if (!input.trim() || isLoading) return;
-
-        // Pass code context and diagnostics if available (basic simple strings for now)
-        // Diagnostics type mapping might be needed if complex
         const diagStrings = diagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
-
-        sendMessage(input, modifiedCode, diagStrings);
+        sendMessage(input, contextCode || modifiedCode, diagStrings);
         setInput('');
+        // Clear context after sending
+        setContextCode('');
+        setIsContextSelection(false);
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -63,12 +67,56 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
         }
     };
 
+    const toggleThinking = (index: number) => {
+        setExpandedThinking(prev => ({ ...prev, [index]: !prev[index] }));
+    };
+
+    const handleLoadCode = async (isSelection: boolean) => {
+        const code = await getCode(isSelection);
+        setContextCode(code);
+        setIsContextSelection(isSelection);
+        onCodeLoaded(code, isSelection);
+        setShowGetCodeDropdown(false);
+    };
+
+    const handleRemoveCodeContext = () => {
+        setContextCode('');
+        setIsContextSelection(false);
+    };
+
+    const handleStartEdit = (index: number, content: string) => {
+        setEditingIndex(index);
+        setEditText(content);
+    };
+
+    const handleCancelEdit = () => {
+        setEditingIndex(null);
+        setEditText('');
+    };
+
+    const handleSaveEdit = (index: number) => {
+        if (editText.trim()) {
+            const diagStrings = diagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+            editAndRerun(index, editText, contextCode || modifiedCode, diagStrings);
+            setEditingIndex(null);
+            setEditText('');
+        }
+    };
+
+    const handleEditKeyDown = (e: React.KeyboardEvent, index: number) => {
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            handleSaveEdit(index);
+        } else if (e.key === 'Escape') {
+            handleCancelEdit();
+        }
+    };
+
     return (
         <div className="flex flex-col flex-1 min-w-[400px] transition-all duration-300">
             {/* Messages List */}
-            <div className="flex-1 overflow-y-auto bg-[#09090b]">
+            <div className={`flex-1 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin scrollbar-thumb-white/10'} bg-[#09090b]`}>
                 {messages.length === 0 && (
-                    <div className="flex-1 flex flex-col items-center justify-center p-8 max-w-3xl mx-auto w-full h-full">
+                    <div className="flex-1 flex flex-col items-center justify-center p-4 max-w-3xl mx-auto w-full h-full">
                         <div className="relative mb-10 group">
                             <div className="absolute inset-0 bg-blue-500/20 blur-3xl rounded-full group-hover:bg-blue-500/30 transition-all duration-700 animate-pulse"></div>
                             <div className="relative bg-zinc-900 p-6 rounded-3xl border border-zinc-800 shadow-2xl transform group-hover:scale-105 transition-transform duration-500">
@@ -83,32 +131,14 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
                             {[
-                                {
-                                    title: "Анализ кода",
-                                    desc: "Получите код модуля или выделенный фрагмент из Конфигуратора для разбора.",
-                                    icon: <FileText className="w-5 h-5 text-blue-400" />,
-                                },
-                                {
-                                    title: "Генерация кода",
-                                    desc: "Опишите задачу, и AI предложит решение в формате BSL с возможностью вставки.",
-                                    icon: <RefreshCw className="w-5 h-5 text-purple-400" />,
-                                },
-                                {
-                                    title: "Проверка BSL LS",
-                                    desc: "Интеграция с BSL Language Server для поиска ошибок и предупреждений.",
-                                    icon: <Monitor className="w-5 h-5 text-green-400" />,
-                                },
-                                {
-                                    title: "Профили LLM",
-                                    desc: "Настройте DeepSeek, OpenAI или локальные LLM через Ollama.",
-                                    icon: <Settings className="w-5 h-5 text-orange-400" />,
-                                }
+                                { title: "Анализ кода", desc: "Получите код модуля или выделенный фрагмент из Конфигуратора для разбора.", icon: <FileText className="w-5 h-5 text-blue-400" /> },
+                                { title: "Генерация кода", desc: "Опишите задачу, и AI предложит решение в формате BSL с возможностью вставки.", icon: <RefreshCw className="w-5 h-5 text-purple-400" /> },
+                                { title: "Проверка BSL LS", desc: "Интеграция с BSL Language Server для поиска ошибок и предупреждений.", icon: <Monitor className="w-5 h-5 text-green-400" /> },
+                                { title: "Серверы MCP", desc: "Предустановленные инструменты: 1C:Метаданные, 1C:Напарник.", icon: <Settings className="w-5 h-5 text-orange-400" /> }
                             ].map((step, i) => (
                                 <div key={i} className="p-5 rounded-2xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700/50 transition-all hover:bg-zinc-850 group cursor-default">
                                     <div className="flex items-start gap-4">
-                                        <div className="p-2.5 rounded-xl bg-zinc-800/50 group-hover:bg-zinc-800 transition-colors">
-                                            {step.icon}
-                                        </div>
+                                        <div className="p-2.5 rounded-xl bg-zinc-800/50 group-hover:bg-zinc-800 transition-colors">{step.icon}</div>
                                         <div className="space-y-1">
                                             <h3 className="text-sm font-semibold text-zinc-200">{step.title}</h3>
                                             <p className="text-xs text-zinc-500 leading-relaxed">{step.desc}</p>
@@ -119,16 +149,9 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                         </div>
 
                         <div className="mt-12 flex flex-col items-center gap-6 pb-2">
-                            <a
-                                href="https://t.me/hawkxtreme"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="group flex items-center gap-3 px-4 py-2 rounded-2xl bg-zinc-900/10 border border-zinc-800/30 hover:bg-zinc-800/30 hover:border-zinc-700/50 transition-all duration-300"
-                            >
+                            <a href="https://t.me/hawkxtreme" target="_blank" rel="noopener noreferrer" className="group flex items-center gap-3 px-4 py-2 rounded-2xl bg-zinc-900/10 border border-zinc-800/30 hover:bg-zinc-800/30 hover:border-zinc-700/50 transition-all duration-300">
                                 <div className="p-1.5 rounded-lg bg-blue-500/10 group-hover:bg-blue-500/20 transition-colors">
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-blue-400">
-                                        <path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" />
-                                    </svg>
+                                    <Send className="w-3.5 h-3.5 text-blue-400" />
                                 </div>
                                 <div className="flex flex-col items-start leading-tight">
                                     <span className="text-[10px] text-zinc-600 uppercase tracking-wider font-semibold">Feedback & Support</span>
@@ -139,25 +162,114 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                     </div>
                 )}
 
-                <div className={`flex flex-col pb-4 gap-2 px-4 w-full pt-4`}>
+                <div className={`flex flex-col pb-4 gap-4 px-4 w-full pt-4`}>
                     {messages.map((msg, i) => (
-                        <div key={i} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`w-full max-w-full p-4 rounded-xl border text-[13px] leading-relaxed ${msg.role === 'user' ? 'bg-[#1b1b1f] border-zinc-800 text-zinc-300' : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300'}`}>
-                                <div className="min-w-0">
-                                    {msg.role === 'assistant' ? (
-                                        <MarkdownRenderer content={msg.content} isStreaming={isLoading && i === messages.length - 1} onApplyCode={onApplyCode} />
-                                    ) : (
-                                        <pre className="whitespace-pre-wrap font-sans" style={{ fontFamily: 'Inter, sans-serif' }}>{msg.content}</pre>
+                        <div key={msg.id || i} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`p-4 rounded-xl border text-[13px] leading-relaxed group ${msg.role === 'user' ? 'bg-[#1b1b1f] border-zinc-800/80 text-zinc-300 max-w-[90%]' : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300 shadow-sm w-full max-w-full'}`}>
+                                <div className="min-w-0 flex flex-col gap-3">
+                                    {/* Message Header with Actions */}
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="flex-1 min-w-0">
+                                            {/* Thinking Section */}
+                                            {msg.thinking && (
+                                                <div className="border-l-2 border-white/10 pl-3">
+                                                    <button
+                                                        onClick={() => toggleThinking(i)}
+                                                        className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-tighter mb-1 transition-colors group"
+                                                    >
+                                                        <Brain size={12} className={expandedThinking[i] ? 'text-blue-400' : ''} />
+                                                        Думаю
+                                                        <ChevronDown size={12} className={`transition-transform ${expandedThinking[i] ? 'rotate-180' : ''}`} />
+                                                    </button>
+                                                    {expandedThinking[i] && (
+                                                        <div className="text-[12px] italic text-white/40 leading-snug animate-in fade-in slide-in-from-top-1">
+                                                            {msg.thinking}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                        {/* Actions */}
+                                        <MessageActions
+                                            content={msg.content}
+                                            timestamp={msg.timestamp}
+                                            isUser={msg.role === 'user'}
+                                            onEdit={msg.role === 'user' ? () => handleStartEdit(i, msg.content) : undefined}
+                                        />
+                                    </div>
+
+                                    {/* Tool Calls */}
+                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                        <div className="flex flex-col gap-1">
+                                            {msg.toolCalls.map((tc, idx) => (
+                                                <ToolCallBlock key={idx} toolCall={tc} />
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {/* Content */}
+                                    <div className="min-w-0">
+                                        {msg.role === 'assistant' ? (
+                                            <MarkdownRenderer
+                                                content={msg.content}
+                                                isStreaming={isLoading && i === messages.length - 1}
+                                                onApplyCode={onApplyCode}
+                                                originalCode={contextCode || modifiedCode}
+                                            />
+                                        ) : editingIndex === i ? (
+                                            <div className="w-full">
+                                                <textarea
+                                                    value={editText}
+                                                    onChange={(e) => setEditText(e.target.value)}
+                                                    onKeyDown={(e) => handleEditKeyDown(e, i)}
+                                                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-zinc-300 text-[13px] font-sans resize-none focus:outline-none focus:border-blue-500/50 transition-colors"
+                                                    rows={Math.min(10, Math.max(3, editText.split('\n').length))}
+                                                    autoFocus
+                                                />
+                                                <div className="flex justify-end gap-2 mt-2">
+                                                    <button
+                                                        onClick={handleCancelEdit}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700 transition-all"
+                                                    >
+                                                        <X size={14} />
+                                                        Отмена
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleSaveEdit(i)}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-500 transition-all"
+                                                    >
+                                                        <Play size={14} />
+                                                        Сохранить и перезапустить
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <pre className="whitespace-pre-wrap font-sans break-words break-all overflow-hidden" style={{ fontFamily: 'Inter, sans-serif', overflowWrap: 'anywhere' }}>{msg.content}</pre>
+                                        )}
+                                    </div>
+
+                                    {/* BSL Diagnostics */}
+                                    {msg.diagnostics && msg.diagnostics.length > 0 && (
+                                        <div className="mt-2 p-2 rounded bg-red-500/10 border border-red-500/20">
+                                            <div className="flex items-center gap-2 text-[11px] font-bold text-red-400 uppercase mb-1">
+                                                <Terminal size={12} /> Ошибки проверки кода
+                                            </div>
+                                            {msg.diagnostics.map((d, di) => (
+                                                <div key={di} className="text-[11px] text-red-300/80 font-mono">
+                                                    Строка {d.line + 1}: {d.message}
+                                                </div>
+                                            ))}
+                                        </div>
                                     )}
                                 </div>
                             </div>
                         </div>
                     ))}
                     {isLoading && (
-                        <div className="w-full px-4 mb-4">
-                            <div className="p-6 rounded-xl border border-[#27272a] bg-transparent flex items-center gap-3">
+                        <div className="w-full px-0">
+                            <div className="p-4 rounded-xl border border-zinc-800/50 bg-transparent flex items-center gap-3">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <span className="text-zinc-400 text-sm">{chatStatus || 'Thinking...'}</span>
+                                <span className="text-zinc-500 text-xs font-medium">{chatStatus || 'Думаю...'}</span>
                             </div>
                         </div>
                     )}
@@ -166,16 +278,26 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-[#09090b] border-t border-[#27272a] w-full">
-                {messages.length === 0 && (
-                    <div className="max-w-4xl mx-auto mb-3 flex justify-center">
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-500 opacity-80 hover:opacity-100 transition-opacity">
+            <div className="p-4 bg-[#09090b] border-t border-[#27272a] shadow-2xl z-10">
+                {/* Context Stats Overlay */}
+                <div className="max-w-4xl mx-auto mb-3 flex items-center justify-between px-1">
+                    {messages.length === 0 ? (
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-600 italic">
                             <ChevronDown className="w-3.5 h-3.5 animate-bounce" />
-                            <span>Начните с подключения к окну Конфигуратора снизу</span>
+                            <span>Выберите окно Конфигуратора снизу</span>
                         </div>
+                    ) : (
+                        <div className="flex items-center gap-3">
+                            {/* Actions removed */}
+                        </div>
+                    )}
+
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-600 font-mono">
+                        {modifiedCode.length > 0 && `CONTEXT: ${modifiedCode.length} chars`}
                     </div>
-                )}
+                </div>
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
+
                     <textarea
                         ref={inputRef}
                         value={input}
@@ -254,10 +376,10 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                                 </button>
                                 {showGetCodeDropdown && (
                                     <div className="absolute bottom-full left-0 mb-2 w-40 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20 p-1 flex flex-col">
-                                        <button onClick={async () => { const code = await getCode(true); onCodeLoaded(code, false); setShowGetCodeDropdown(false); }} className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left rounded-md">
+                                        <button onClick={() => handleLoadCode(true)} className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left rounded-md">
                                             <FileText className="w-3.5 h-3.5" /> Модуль целиком
                                         </button>
-                                        <button onClick={async () => { const code = await getCode(false); onCodeLoaded(code, true); setShowGetCodeDropdown(false); }} className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left rounded-md">
+                                        <button onClick={() => handleLoadCode(false)} className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-[#27272a] transition-colors text-left rounded-md">
                                             <MousePointerClick className="w-3.5 h-3.5" /> Выделенный фрагмент
                                         </button>
                                     </div>

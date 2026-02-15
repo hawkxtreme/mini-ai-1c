@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import * as api from '../api';
 
 export interface BslStatus {
@@ -34,16 +34,23 @@ export function BslProvider({ children }: { children: React.ReactNode }) {
         return () => clearInterval(interval);
     }, []);
 
-    const analyzeCode = async (code: string) => {
+    const analyzeCode = useCallback(async (code: string) => {
         return await api.analyzeBsl(code);
-    };
+    }, []);
 
-    const formatCode = async (code: string) => {
+    const formatCode = useCallback(async (code: string) => {
         return await api.formatBsl(code);
-    };
+    }, []);
+
+    const contextValue = useMemo(() => ({
+        status,
+        checkStatus,
+        analyzeCode,
+        formatCode
+    }), [status, analyzeCode, formatCode]);
 
     return (
-        <BslContext.Provider value={{ status, checkStatus, analyzeCode, formatCode }}>
+        <BslContext.Provider value={contextValue}>
             {children}
         </BslContext.Provider>
     );
