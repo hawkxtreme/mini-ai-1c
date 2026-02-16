@@ -35,7 +35,7 @@ interface AppSettings {
         id: string;
         name: string;
         enabled: boolean;
-        transport: 'http' | 'stdio';
+        transport: 'http' | 'stdio' | 'internal';
         url?: string | null;
         login?: string | null;
         password?: string | null;
@@ -79,7 +79,15 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     };
 
     const refreshBslStatus = () => {
-        invoke<BslStatus>('check_bsl_status_cmd').then(setBslStatus);
+        console.log('[DEBUG] refreshBslStatus called');
+        invoke<BslStatus>('check_bsl_status_cmd')
+            .then((status) => {
+                console.log('[DEBUG] refreshBslStatus success:', status);
+                setBslStatus(status);
+            })
+            .catch((err) => {
+                console.error('[DEBUG] refreshBslStatus error:', err);
+            });
     };
 
     const handleSaveSettings = async () => {
@@ -111,6 +119,18 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
             if (interval) clearInterval(interval);
         };
     }, [tab, isOpen, settings?.configurator.window_title_pattern]);
+
+    // Auto-refresh BSL status
+    useEffect(() => {
+        let interval: any;
+        if (tab === 'bsl' && isOpen) {
+            refreshBslStatus();
+            interval = setInterval(refreshBslStatus, 5000);
+        }
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [tab, isOpen]);
 
     const testCapture = async (hwnd: number) => {
         try {

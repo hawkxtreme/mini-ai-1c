@@ -2,7 +2,7 @@
 //! Downloads and installs BSL LS from GitHub releases
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+
 use tokio::io::AsyncWriteExt;
 use tauri::{AppHandle, Emitter};
 use futures::StreamExt;

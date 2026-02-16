@@ -12,6 +12,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use lazy_static::lazy_static;
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 use std::thread;
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait InternalMcpHandler: Send + Sync {
+    async fn list_tools(&self) -> Vec<McpTool>;
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String>;
+    fn is_alive(&self) -> bool { true }
+}
 
 #[derive(Serialize)]
 struct JsonRpcRequest {
@@ -58,17 +66,43 @@ lazy_static! {
 pub struct McpManager {
     // Store both config and session to check for changes
     sessions: Arc<Mutex<HashMap<String, (McpServerConfig, Arc<McpSession>)>>>,
+    internal_handlers: Arc<Mutex<HashMap<String, Arc<dyn InternalMcpHandler>>>>,
 }
 
 impl McpManager {
     fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            internal_handlers: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn register_internal_handler(id: &str, handler: Arc<dyn InternalMcpHandler>) {
+        let mut handlers = MCP_MANAGER.internal_handlers.lock().await;
+        handlers.insert(id.to_string(), handler);
     }
 
     pub async fn get_client(config: McpServerConfig) -> Result<Arc<McpSession>, String> {
         let mut sessions = MCP_MANAGER.sessions.lock().await;
+
+        // For Internal transport, we look up the registered handler
+        if config.transport == McpTransport::Internal {
+            println!("[DEBUG] get_client for Internal: {}", config.id);
+            if let Some((_, session)) = sessions.get(&config.id) {
+                 if session.is_alive().await {
+                     return Ok(session.clone());
+                 }
+            }
+            
+            let handlers = MCP_MANAGER.internal_handlers.lock().await;
+            if let Some(handler) = handlers.get(&config.id) {
+                let session = Arc::new(McpSession::new_internal(config.clone(), handler.clone()));
+                sessions.insert(config.id.clone(), (config, session.clone()));
+                return Ok(session);
+            } else {
+                return Err(format!("Internal handler not found for {}", config.id));
+            }
+        }
 
         // For HTTP transport, we don't need persistence in the same way, but let's unify interface
         if config.transport == McpTransport::Http {
@@ -120,6 +154,15 @@ impl McpManager {
                 // Remove old session if exists to ensure cleanup (drop will kill child)
                 sessions.remove(&config.id);
 
+                if config.transport == McpTransport::Internal {
+                    let handlers = MCP_MANAGER.internal_handlers.lock().await;
+                    if let Some(handler) = handlers.get(&config.id) {
+                        let session = Arc::new(McpSession::new_internal(config.clone(), handler.clone()));
+                        sessions.insert(config.id.clone(), (config, session));
+                    }
+                    continue;
+                }
+
                 match McpSession::new_stdio(config.clone(), new_settings.debug_mcp).await {
                     Ok(session) => {
                         let session = Arc::new(session);
@@ -141,19 +184,38 @@ impl McpManager {
         // Load settings to get the full list of servers, including those not running
         let settings = crate::settings::load_settings();
 
-        for config in settings.mcp_servers {
+        let mut all_configs = settings.mcp_servers.clone();
+        
+        // Add virtual BSL server
+        all_configs.push(crate::settings::McpServerConfig {
+            id: "bsl-ls".to_string(),
+            name: "BSL Language Server".to_string(),
+            enabled: settings.bsl_server.enabled,
+            transport: crate::settings::McpTransport::Internal,
+            ..Default::default()
+        });
+
+        for config in all_configs {
              let status = if !config.enabled {
                  "disabled"
              } else if let Some((_, session)) = sessions.get(&config.id) {
                  if session.is_alive().await {
                      "connected"
                  } else {
-                     "stopped" // Was started but died
+                     "stopped"
+                 }
+             } else if config.transport == McpTransport::Internal {
+                 let handlers = MCP_MANAGER.internal_handlers.lock().await;
+                 if handlers.contains_key(&config.id) {
+                     "connected"
+                 } else {
+                     "stopped"
                  }
              } else {
                  "stopped" // Enabled but not in sessions (failed to start or never started)
              };
 
+             println!("[DEBUG] MCP Server status for {}: {}", config.id, status);
              statuses.push(McpServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
@@ -256,6 +318,9 @@ enum TransportImpl {
         pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
         // We keep the child here just to keep the process alive
         _child: Arc<Mutex<Child>>, 
+    },
+    Internal {
+        handler: Arc<dyn InternalMcpHandler>,
     }
 }
 
@@ -276,6 +341,16 @@ impl McpSession {
                 url: config.url.unwrap_or_default(),
                 login: config.login,
                 password: config.password,
+            },
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            logs: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    fn new_internal(_config: McpServerConfig, handler: Arc<dyn InternalMcpHandler>) -> Self {
+        Self {
+            transport: TransportImpl::Internal {
+                handler,
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -413,6 +488,7 @@ impl McpSession {
                 let mut child = _child.lock().await;
                 child.try_wait().map(|s| s.is_none()).unwrap_or(false)
             }
+            TransportImpl::Internal { handler } => handler.is_alive(),
         }
     }
 
@@ -421,7 +497,7 @@ impl McpSession {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
-            params,
+            params: params.clone(),
             id,
         };
 
@@ -459,29 +535,46 @@ impl McpSession {
                     }
                 }
             }
+            TransportImpl::Internal { handler } => {
+                handler.call_tool(method, params.clone()).await
+            }
         }
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
-        let result = self.request("tools/list", json!({})).await?;
-        if let Some(tools_arr) = result.get("tools").and_then(|v| v.as_array()) {
-             let tools = tools_arr.iter().filter_map(|v| {
-                Some(McpTool {
-                    name: v.get("name")?.as_str()?.to_string(),
-                    description: v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                    input_schema: v.get("inputSchema")?.clone(),
-                })
-            }).collect();
-            Ok(tools)
-        } else {
-            Ok(Vec::new())
+        match &self.transport {
+            TransportImpl::Internal { handler } => Ok(handler.list_tools().await),
+            _ => {
+                let result = self.request("tools/list", json!({})).await?;
+                if let Some(tools_arr) = result.get("tools").and_then(|v| v.as_array()) {
+                        let tools = tools_arr.iter().filter_map(|v| {
+                        Some(McpTool {
+                            name: v.get("name")?.as_str()?.to_string(),
+                            description: v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                            input_schema: v.get("inputSchema")?.clone(),
+                        })
+                    }).collect();
+                    Ok(tools)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
         }
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
-        self.request("tools/call", json!({
-            "name": name,
-            "arguments": arguments
-        })).await
+        println!("[DEBUG] McpSession::call_tool: {}", name);
+        match &self.transport {
+            TransportImpl::Internal { handler } => {
+                println!("[DEBUG] McpSession::call_tool handling Internal for {}", name);
+                handler.call_tool(name, arguments).await
+            }
+            _ => {
+                self.request("tools/call", json!({
+                    "name": name,
+                    "arguments": arguments
+                })).await
+            }
+        }
     }
 }

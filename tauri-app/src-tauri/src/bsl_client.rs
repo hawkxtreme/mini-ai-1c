@@ -10,6 +10,10 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::settings::load_settings;
+use crate::mcp_client::{InternalMcpHandler, McpTool};
+use async_trait::async_trait;
+use serde_json::json;
+use std::sync::Arc;
 
 /// JSON-RPC request
 #[derive(Debug, Serialize)]
@@ -106,6 +110,12 @@ impl BSLClient {
         }
         
         let port = settings.bsl_server.websocket_port;
+
+        // Check if port is already in use
+        if let Ok(_stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            println!("[BSL LS] Port {} already in use. Assuming server is already running.", port);
+            return Ok(());
+        }
         
         let mut cmd = Command::new(&settings.bsl_server.java_path);
         cmd.args([
@@ -141,7 +151,7 @@ impl BSLClient {
         let url = format!("ws://127.0.0.1:{}/lsp", port);
         
         let mut retries = 0;
-        let max_retries = 20; // 10 seconds total
+        let max_retries = 30; // 15 seconds total
         
         loop {
             match connect_async(&url).await {
@@ -154,7 +164,9 @@ impl BSLClient {
                     if retries >= max_retries {
                          return Err(format!("Failed to connect to BSL LS after {} attempts: {}", max_retries, e));
                     }
-                    println!("BSL LS connection attempt {}/{} failed, retrying in 500ms...", retries, max_retries);
+                    if retries % 5 == 0 {
+                        println!("BSL LS connection attempt {}/{}... (retrying in 500ms)", retries, max_retries);
+                    }
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
             }
@@ -744,6 +756,94 @@ impl BSLClient {
     /// Check if BSL LS is installed (JAR exists)
     pub fn check_install(jar_path: &str) -> bool {
         std::path::Path::new(jar_path).exists()
+    }
+}
+
+pub struct BSLMcpHandler {
+    client: Arc<Mutex<BSLClient>>,
+}
+
+impl BSLMcpHandler {
+    pub fn new(client: Arc<Mutex<BSLClient>>) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl InternalMcpHandler for BSLMcpHandler {
+    async fn list_tools(&self) -> Vec<McpTool> {
+        vec![
+            McpTool {
+                name: "check_bsl_syntax".to_string(),
+                description: "Проверяет BSL код (1С) на наличие синтаксических ошибок и предупреждений с использованием BSL Language Server.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Исходный код на языке BSL для анализа."
+                        }
+                    },
+                    "required": ["code"]
+                }),
+            }
+        ]
+    }
+
+    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+        match name {
+            "check_bsl_syntax" => {
+                let code = arguments.get("code")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Параметр 'code' обязателен для check_bsl_syntax")?;
+                
+                let mut client = self.client.lock().await;
+                
+                // Ensure server is started and connected
+                if !client.is_connected() {
+                    // Try to connect if server is likely running
+                    if let Err(e) = client.connect().await {
+                         // If connection fails, check if server needs to be started
+                         if client.server_process.is_none() {
+                             client.start_server()?;
+                         }
+                         client.connect().await.map_err(|e2| format!("BSL LS не запущен или недоступен: {}\nДоп. ошибка: {}", e, e2))?;
+                    }
+                }
+
+                let uri = "file:///mcp_check_syntax.bsl";
+                let diagnostics = client.analyze_code(code, uri).await?;
+                
+                Ok(json!({
+                    "diagnostics": diagnostics,
+                    "count": diagnostics.len()
+                }))
+            }
+            _ => Err(format!("Неизвестный инструмент BSL: {}", name)),
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        // Run checks for Java and JAR
+        let settings = load_settings();
+        
+        // 1. Check if enabled
+        if !settings.bsl_server.enabled {
+            return false;
+        }
+
+        // 2. Check JAR
+        if !BSLClient::check_install(&settings.bsl_server.jar_path) {
+            return false;
+        }
+
+        // 3. Check Java
+        let java_ver = BSLClient::check_java(&settings.bsl_server.java_path);
+        if java_ver == "Not found" {
+            return false;
+        }
+
+        true 
     }
 }
 

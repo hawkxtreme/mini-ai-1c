@@ -97,7 +97,16 @@ struct ToolCallFunctionDelta {
 }
 
 /// System prompt for 1C assistant
-const SYSTEM_PROMPT: &str = r#"Ты - AI-ассистент для разработки на платформе 1С:Предприятие.
+/// Extended tool info for internal prompt generation
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    pub tool: Tool,
+    pub server_id: String,
+}
+
+/// Get dynamic system prompt based on available tools
+pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
+    let mut prompt = r#"Ты - AI-ассистент для разработки на платформе 1С:Предприятие.
 
 Твои возможности:
 - Анализ и рефакторинг кода на языке BSL (1С)
@@ -106,29 +115,69 @@ const SYSTEM_PROMPT: &str = r#"Ты - AI-ассистент для разраб�
 - Написание нового кода по описанию
 - Форматирование и улучшение читаемости кода
 
-ВАЖНО: У тебя есть доступ к специализированному MCP серверу "1C:Напарник" (1С.ai), который предоставляет экспертные знания.
-Используй следующие инструменты для ответов на вопросы по 1С:
-1. `ask_1c_ai` - для любых вопросов по платформе 1С, синтаксису, стандартным библиотекам (БСП) и лучшим практикам. Если вопрос касается "как сделать в 1С" или "как работает метод X", используй этот инструмент.
-2. `explain_1c_syntax` - для детального объяснения конкретных конструкций языка или объектов метаданных.
-3. `check_1c_code` - ОБЯЗАТЕЛЬНО используй этот инструмент для проверки любого написанного или анализируемого тобой кода 1С перед выдачей ответа пользователю. Это поможет избежать синтаксических ошибок.
-
 Используй русский язык в ответах. Форматируй код в блоках ```bsl...```.
-ВАЖНО: При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL). 
+При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL). 
 - Если исходный код пользователя использует русские ключевые слова (Если...Тогда), пиши на русском. 
 - Если исходный код использует английские ключевые слова (If...Then), пиши на английском.
 - По умолчанию (для нового кода) используй РУССКИЙ язык ключевых слов.
 
-У тебя также есть доступ к другим инструментам (файловая система, браузер), используй их по необходимости."#;
+У тебя также есть доступ к базовым инструментам (файловая система, браузер), используй их по необходимости."#.to_string();
+
+    if !available_tools.is_empty() {
+        prompt.push_str("\n\nВАЖНО: Тебе доступны следующие специализированные инструменты MCP:\n");
+        for info in available_tools {
+            let tool = &info.tool;
+            let desc = if tool.function.description.is_empty() {
+                "(описание отсутствует)"
+            } else {
+                &tool.function.description
+            };
+            prompt.push_str(&format!("- `{}` (сервер: {}): {}\n", tool.function.name, info.server_id, desc));
+        }
+
+        prompt.push_str("\nКРИТИЧЕСКИЕ ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:\n");
+        
+        if available_tools.iter().any(|t| t.tool.function.name == "check_bsl_syntax") {
+            prompt.push_str("1. `check_bsl_syntax` (сервер bsl-ls): ТЫ ОБЯЗАН вызывать этот инструмент ПЕРЕД выдачей любого кода BSL пользователю. 
+   - Если инструмент вернул ошибки (severity: 1), ТЫ ОБЯЗАН исправить их и ВЫЗВАТЬ ИНСТРУМЕНТ СНОВА.
+   - НЕ выдавай ответ пользователю, пока не убедишься, что `check_bsl_syntax` не возвращает ошибок в твоем коде.
+   - Итерация «Вызов инструмента -> Исправление -> Вызов инструмента» должна продолжаться до полной чистоты кода.\n");
+        }
+        
+        if available_tools.iter().any(|t| t.tool.function.name == "ask_1c_ai") {
+            prompt.push_str("2. `ask_1c_ai`: Пользуйся этим инструментом для консультаций по стандартам 1С и БСП, чтобы твой код был не просто синтаксически верным, а профессиональным.\n");
+        }
+
+        if available_tools.iter().any(|t| t.tool.function.name.contains("metadata")) {
+            prompt.push_str("3. Инструменты метаданных: ВСЕГДА проверяй структуру объектов перед написанием запросов или обращением к полям через точку, чтобы избежать ошибок 'Поле объекта не обнаружено'.\n");
+        }
+    }
+
+    prompt
+}
 
 /// Collect all tools from enabled MCP servers to inject into LLM request
-pub async fn get_available_tools() -> Vec<Tool> {
+pub async fn get_available_tools() -> Vec<ToolInfo> {
     let settings = load_settings();
     let mut all_tools = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
     println!("[MCP][TOOLS] Collecting tools...");
 
-    for config in settings.mcp_servers {
+    let mut all_configs = settings.mcp_servers.clone();
+    
+    // Add virtual BSL server only if not already present
+    if !all_configs.iter().any(|c| c.id == "bsl-ls") {
+        all_configs.push(crate::settings::McpServerConfig {
+            id: "bsl-ls".to_string(),
+            name: "BSL Language Server".to_string(),
+            enabled: settings.bsl_server.enabled,
+            transport: crate::settings::McpTransport::Internal,
+            ..Default::default()
+        });
+    }
+
+    for config in all_configs {
         if !config.enabled { 
             println!("[MCP][TOOLS] Skipping disabled server: {}", config.name);
             continue; 
@@ -177,12 +226,15 @@ pub async fn get_available_tools() -> Vec<Tool> {
                             }
 
                             println!("[MCP][TOOLS]   + Registered: {}", name);
-                            all_tools.push(Tool {
-                                r#type: "function".to_string(),
-                                function: ToolFunction {
-                                    name,
-                                    description: tool.description,
-                                    parameters,
+                            all_tools.push(ToolInfo {
+                                server_id: config.id.clone(),
+                                tool: Tool {
+                                    r#type: "function".to_string(),
+                                    function: ToolFunction {
+                                        name,
+                                        description: tool.description,
+                                        parameters,
+                                    },
                                 },
                             });
                         }
@@ -213,24 +265,28 @@ pub async fn stream_chat_completion(
     let base_url = profile.get_base_url();
     let url = format!("{}/chat/completions", base_url);
     
-    // Build messages with system prompt
+    // Get tools first to build dynamic prompt
+    let tools_info = get_available_tools().await;
+    let tools: Vec<Tool> = tools_info.iter().map(|i| i.tool.clone()).collect();
+    let tools_opt = if tools.is_empty() { None } else { Some(tools) };
+
+    // Build messages with dynamic system prompt
     let mut api_messages = vec![ApiMessage {
         role: "system".to_string(),
-        content: Some(SYSTEM_PROMPT.to_string()),
+        content: Some(get_system_prompt(&tools_info)),
         tool_calls: None,
         tool_call_id: None,
         name: None,
     }];
     api_messages.extend(messages);
     
-    // Get tools
-    let tools = get_available_tools().await;
-    let tools_opt = if tools.is_empty() { None } else { Some(tools) };
-
     // Build request
     // Heuristic: If max_tokens (Context Window in UI) is very large (> 16k), 
     // it likely represents input capacity, not generation limit.
     // Most APIs reject huge max_tokens for generation. Clamp to safe default (4096).
+    let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
+
+    // Build request
     let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
 
     let request_body = ChatRequest {
@@ -259,31 +315,48 @@ pub async fn stream_chat_completion(
         headers.insert("X-Title", HeaderValue::from_static("Mini AI 1C Agent"));
     }
     
-    // Make streaming request
     println!("[AI] Sending request to {} (Model: {})", url, request_body.model);
-    println!("[AI] Tools count: {}", request_body.tools.as_ref().map(|t| t.len()).unwrap_or(0));
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
-        
-    let response = client
-        .post(&url)
-        .headers(headers)
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
+
+    // Retry logic for 500 errors
+    let mut attempt = 0;
+    let max_retries = 3;
+    let response = loop {
+        attempt += 1;
+        let res = client
+            .post(&url)
+            .headers(headers.clone())
+            .json(&request_body)
+            .send()
+            .await;
+
+        match res {
+            Ok(r) if r.status().is_success() => break r,
+            Ok(r) if r.status().as_u16() == 500 && attempt < max_retries => {
+                println!("[AI][RETRY] Attempt {} failed with 500. Retrying in 2s...", attempt);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            Ok(r) => {
+                let status = r.status();
+                let error_body = r.text().await.unwrap_or_default();
+                println!("[AI] API Error (Attempt {}): {} - {}", attempt, status, error_body);
+                return Err(format!("API error {}: {}", status, error_body));
+            }
+            Err(e) if attempt < max_retries => {
+                println!("[AI][RETRY] Request failed (Attempt {}): {}. Retrying in 2s...", attempt, e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(e) => return Err(format!("Request failed after {} attempts: {}", attempt, e)),
+        }
+    };
     
     println!("[AI] Response received. Status: {}", response.status());
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = response.text().await.unwrap_or_default();
-        println!("[AI] API Error: {} - {}", status, error_body);
-        return Err(format!("API error {}: {}", status, error_body));
-    }
     
     // Stream response
     let mut stream = response.bytes_stream();

@@ -34,6 +34,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
 lazy_static = "1.5.0"
 notify = "8.2.0"
+async-trait = "0.1.89"
 
 
 [target.'cfg(windows)'.dependencies]

@@ -48,6 +48,7 @@ impl Default for BSLServerSettings {
 pub enum McpTransport {
     Http,
     Stdio,
+    Internal,
 }
 
 /// Configuration for an MCP server (HTTP or Stdio)

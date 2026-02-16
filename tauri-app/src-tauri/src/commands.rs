@@ -1,5 +1,6 @@
 //! Tauri commands for IPC with frontend
 
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::llm_profiles::{self, LLMProfile, ProfileStore};
@@ -16,6 +17,7 @@ pub struct ChatMessage {
 /// Get application settings
 #[tauri::command]
 pub fn get_settings() -> AppSettings {
+    println!("[DEBUG] get_settings called");
     settings::load_settings()
 }
 
@@ -135,7 +137,7 @@ pub async fn reject_tool(
 pub async fn stream_chat(
     messages: Vec<ChatMessage>,
     app_handle: tauri::AppHandle,
-    _state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>,
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
     chat_state: tauri::State<'_, ChatState>,
 ) -> Result<(), String> {
     use crate::ai_client::{extract_bsl_code, stream_chat_completion, ApiMessage};
@@ -170,15 +172,15 @@ pub async fn stream_chat(
         // 1. Initial status
         let _ = task_app_handle.emit("chat-status", "Думаю...");
         
-        let bsl_state = task_app_handle.state::<tokio::sync::Mutex<crate::bsl_client::BSLClient>>();
+        let bsl_state = task_app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
         let settings = crate::settings::load_settings();
 
         let mut current_iteration = 0;
-        const MAX_ITERATIONS: u32 = 25;
+        const MAX_ITERATIONS: u32 = 3;
 
         loop {
             if current_iteration >= MAX_ITERATIONS {
-                let _ = task_app_handle.emit("chat-chunk", "\n[System] Conversation iteration limit reached.");
+                let _ = task_app_handle.emit("chat-chunk", "\n\n**[Система] Достигнут лимит итераций диалога (3).** Пожалуйста, уточните запрос или продолжите в новом сообщении.");
                 break;
             }
             current_iteration += 1;
@@ -238,7 +240,20 @@ pub async fn stream_chat(
                     let mut tool_result = "Error: Tool not found".to_string();
                     let mut found = false;
 
-                    for config in &settings.mcp_servers {
+                    let mut all_configs = settings.mcp_servers.clone();
+                    
+                    // Add virtual BSL server only if not already present
+                    if !all_configs.iter().any(|c| c.id == "bsl-ls") {
+                        all_configs.push(crate::settings::McpServerConfig {
+                            id: "bsl-ls".to_string(),
+                            name: "BSL Language Server".to_string(),
+                            enabled: settings.bsl_server.enabled,
+                            transport: crate::settings::McpTransport::Internal,
+                            ..Default::default()
+                        });
+                    }
+
+                    for config in all_configs {
                         if !config.enabled { continue; }
                         
                         if let Ok(client) = crate::mcp_client::McpClient::new(config.clone()).await {
@@ -419,9 +434,9 @@ pub struct BSLDiagnostic {
 #[tauri::command]
 pub async fn analyze_bsl(
     code: String,
-    state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<Vec<BSLDiagnostic>, String> {
-    let mut client = state.lock().await;
+    let mut client = state.inner().lock().await;
     
     // Ensure connected
     if !client.is_connected() {
@@ -458,9 +473,9 @@ pub async fn analyze_bsl(
 #[tauri::command]
 pub async fn format_bsl(
     code: String, 
-    state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<String, String> {
-    let mut client = state.lock().await;
+    let mut client = state.inner().lock().await;
     
     // Ensure connected
     if !client.is_connected() {
@@ -746,22 +761,30 @@ pub struct BslStatus {
 /// Check BSL LS status
 #[tauri::command]
 pub async fn check_bsl_status_cmd(
-    state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<BslStatus, String> {
     use crate::bsl_client::BSLClient;
+    println!("[DEBUG] check_bsl_status_cmd called");
     let settings = settings::load_settings();
     
     let installed = BSLClient::check_install(&settings.bsl_server.jar_path);
     let java_info = BSLClient::check_java(&settings.bsl_server.java_path);
     
-    let client = state.lock().await;
-    let connected = client.is_connected();
+    // Use try_lock to avoid blocking the UI thread if another task (like connect) is holding the lock
+    let connected = if let Ok(client) = state.inner().try_lock() {
+        client.is_connected()
+    } else {
+        println!("[DEBUG] check_bsl_status_cmd: state is locked, returning connected=false");
+        false
+    };
     
-    Ok(BslStatus {
+    let status = BslStatus {
         installed,
         java_info,
         connected,
-    })
+    };
+    println!("[DEBUG] check_bsl_status_cmd result: {:?}", status);
+    Ok(status)
 }
 
 /// Install (download) BSL Language Server
@@ -773,24 +796,21 @@ pub async fn install_bsl_ls_cmd(app: tauri::AppHandle) -> Result<String, String>
 /// Reconnect BSL Language Server (stop and restart)
 #[tauri::command]
 pub async fn reconnect_bsl_ls_cmd(
-    state: tauri::State<'_, tokio::sync::Mutex<crate::bsl_client::BSLClient>>
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<(), String> {
-    let mut client = state.lock().await;
+    {
+        let mut client = state.inner().lock().await;
+        // Stop current server if running
+        client.stop();
+        // Start server again
+        client.start_server()?;
+    }
     
-    // Stop current server if running
-    client.stop();
-    
-    // Start server again
-    client.start_server()?;
-    
-    // Drop lock to allow connection
-    drop(client);
-    
-    // Wait a bit for server to start
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Wait a bit for server to start in background
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     
     // Try to connect
-    let mut client = state.lock().await;
+    let mut client = state.inner().lock().await;
     client.connect().await?;
     
     Ok(())
@@ -854,6 +874,19 @@ pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
     let config = settings.mcp_servers.iter()
         .find(|s| s.id == server_id)
         .cloned()
+        .or_else(|| {
+            if server_id == "bsl-ls" {
+                Some(crate::settings::McpServerConfig {
+                    id: "bsl-ls".to_string(),
+                    name: "BSL Language Server".to_string(),
+                    enabled: settings.bsl_server.enabled,
+                    transport: crate::settings::McpTransport::Internal,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| format!("MCP server with ID '{}' not found", server_id))?;
 
     let client = McpClient::new(config).await?;
@@ -879,6 +912,19 @@ pub async fn call_mcp_tool(server_id: String, name: String, arguments: serde_jso
     let config = settings.mcp_servers.iter()
         .find(|s| s.id == server_id)
         .cloned()
+        .or_else(|| {
+            if server_id == "bsl-ls" {
+                Some(crate::settings::McpServerConfig {
+                    id: "bsl-ls".to_string(),
+                    name: "BSL Language Server".to_string(),
+                    enabled: settings.bsl_server.enabled,
+                    transport: crate::settings::McpTransport::Internal,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| format!("MCP server with ID '{}' not found", server_id))?;
 
     let client = McpClient::new(config).await?;

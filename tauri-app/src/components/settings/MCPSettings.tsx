@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles } from 'lucide-react';
 
-export type McpTransport = 'http' | 'stdio';
+export type McpTransport = 'http' | 'stdio' | 'internal';
 
 export interface McpServerConfig {
     id: string;
@@ -33,6 +33,7 @@ interface MCPSettingsProps {
 
 const BUILTIN_1C_SERVER_ID = 'builtin-1c-naparnik';
 const BUILTIN_1C_METADATA_ID = 'builtin-1c-metadata';
+const BUILTIN_BSL_LS_ID = 'bsl-ls';
 
 export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
@@ -83,6 +84,18 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             needsUpdate = true;
         } else if (JSON.stringify(updatedServers[metadataIndex].args) !== JSON.stringify(metadataArgs)) {
             updatedServers[metadataIndex] = { ...updatedServers[metadataIndex], args: metadataArgs };
+            needsUpdate = true;
+        }
+
+        // Check BSL LS
+        const bslIndex = updatedServers.findIndex(s => s.id === BUILTIN_BSL_LS_ID);
+        if (bslIndex === -1) {
+            updatedServers.push({
+                id: BUILTIN_BSL_LS_ID,
+                name: 'BSL Language Server',
+                enabled: false,
+                transport: 'internal',
+            });
             needsUpdate = true;
         }
 
@@ -160,7 +173,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
     // Sort servers: Built-in first, then others
     const sortedServers = [...servers].sort((a, b) => {
-        const builtinIds = [BUILTIN_1C_METADATA_ID, BUILTIN_1C_SERVER_ID];
+        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_METADATA_ID, BUILTIN_1C_SERVER_ID];
         const aIdx = builtinIds.indexOf(a.id);
         const bIdx = builtinIds.indexOf(b.id);
 
@@ -169,6 +182,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         if (bIdx !== -1) return 1;
         return 0;
     });
+
+    const isInternal = (transport: string) => transport.toLowerCase() === 'internal';
 
     return (
         <div className="space-y-6 relative">
@@ -197,7 +212,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                         const isConnected = status?.status === 'connected';
                         const isStopped = status?.status === 'stopped';
                         const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
-                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata;
+                        const isBslLs = server.id === BUILTIN_BSL_LS_ID;
+                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs;
 
                         return (
                             <div
@@ -223,7 +239,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2">
-                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
+                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
                                                 <span className="text-zinc-100 font-medium text-sm">{server.name}</span>
                                                 <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20">
                                                     PRE-INSTALLED
@@ -304,6 +320,11 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                         className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
                                                         placeholder="Вставьте ваш токен 1C.ai"
                                                     />
+                                                </div>
+                                            ) : server.id === BUILTIN_BSL_LS_ID ? (
+                                                <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
+                                                    Этот сервер интегрирован как внутренний инструмент анализа кода.
+                                                    Основные настройки (путь к Java, JAR и порт) находятся во вкладке <b>"BSL Server"</b> выше.
                                                 </div>
                                             ) : (
                                                 <>

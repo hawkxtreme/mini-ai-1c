@@ -18,6 +18,8 @@ mod llm;
 mod mcp_client;
 mod settings;
 
+use std::sync::Arc;
+
 use commands::*;
 
 use tauri::{Manager, tray::TrayIconBuilder};
@@ -29,7 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_mcp_bridge::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(tokio::sync::Mutex::new(crate::bsl_client::BSLClient::new()))
+        .manage(Arc::new(tokio::sync::Mutex::new(crate::bsl_client::BSLClient::new())))
         .manage(crate::commands::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -96,8 +98,11 @@ pub fn run() {
                 // Wait a bit for app to fully start
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 
-                let client_state = app_handle.state::<tokio::sync::Mutex<crate::bsl_client::BSLClient>>();
-                let mut client = client_state.lock().await;
+                let client_arc = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+                let client_inner = client_arc.inner().clone();
+                crate::mcp_client::McpManager::register_internal_handler("bsl-ls", Arc::new(crate::bsl_client::BSLMcpHandler::new(client_inner.clone()))).await;
+                
+                let mut client = client_inner.lock().await;
                 
                 if let Err(e) = client.start_server() {
                     eprintln!("Failed to start BSL LS: {}", e);
