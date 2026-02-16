@@ -936,7 +936,7 @@ pub async fn call_mcp_tool(server_id: String, name: String, arguments: serde_jso
 pub async fn test_mcp_connection(config: McpServerConfig) -> Result<String, String> {
     let client = McpClient::new(config).await?;
     match client.list_tools().await {
-        Ok(tools) => Ok(format!("Подключено успешно! Доступно инструментов: {}.", tools.len())),
-        Err(e) => Err(format!("Ошибка подключения: {}", e)),
+        Ok(tools) => Ok(format!("Подключено! ({})", tools.len())),
+        Err(e) => Err(format!("Ошибка: {}", e)),
     }
 }

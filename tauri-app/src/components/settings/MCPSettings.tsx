@@ -307,9 +307,19 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                         <div className="mt-0 space-y-4">
                                             {server.id === BUILTIN_1C_SERVER_ID ? (
                                                 <div>
-                                                    <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                        <Key className="w-3 h-3" /> 1C.ai Token
-                                                    </label>
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1">
+                                                            <Key className="w-3 h-3" /> 1C.ai Token
+                                                        </label>
+                                                        <a
+                                                            href="https://code.1c.ai/tokens/"
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"
+                                                        >
+                                                            <Link2 className="w-2.5 h-2.5" /> Получить токен
+                                                        </a>
+                                                    </div>
                                                     <input
                                                         type="password"
                                                         value={server.env?.['ONEC_AI_TOKEN'] || ''}
@@ -525,9 +535,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                         </div>
 
                                         {testResults[server.id] && (
-                                            <div className={`flex items-center gap-2 text-xs font-medium ${testResults[server.id].success ? 'text-green-400' : 'text-red-400'}`}>
-                                                {testResults[server.id].success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
-                                                <span className="truncate max-w-[200px]">{testResults[server.id].message}</span>
+                                            <div className={`flex items-center gap-2 text-xs font-medium ${testResults[server.id].success ? 'text-green-400' : 'text-red-400'} min-w-0`}>
+                                                {testResults[server.id].success ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                                                <span className="truncate max-w-[300px]">{testResults[server.id].message}</span>
                                             </div>
                                         )}
                                     </div>
