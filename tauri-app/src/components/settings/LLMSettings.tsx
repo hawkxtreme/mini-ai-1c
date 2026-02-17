@@ -161,7 +161,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     return (
         <div className="flex h-full w-full">
             {/* Sidebar List */}
-            <div className="w-40 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
+            <div className="w-32 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
                 <div className="space-y-1.5">
                     {profiles.profiles.map(p => (
                         <div
@@ -189,7 +189,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             </div>
 
             {/* Main Form */}
-            <div className="flex-1 p-6 bg-zinc-900 overflow-y-auto">
+            <div className="flex-1 p-4 sm:p-6 bg-zinc-900 overflow-y-auto">
                 {editForm ? (
                     <div className="space-y-6 max-w-xl">
                         <div className="flex justify-between items-center pb-4 border-b border-zinc-800">
@@ -203,8 +203,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         </div>
 
                         {/* Name & Provider */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
+                        <div className="flex flex-wrap gap-4">
+                            <div className="flex-1 min-w-[150px]">
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Profile Name</label>
                                 <input
                                     className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none"
@@ -212,7 +212,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     onChange={e => setEditForm({ ...editForm, name: e.target.value })}
                                 />
                             </div>
-                            <div>
+                            <div className="flex-1 min-w-[150px]">
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Provider</label>
                                 <Select value={editForm.provider} onValueChange={v => {
                                     setEditForm(prev => {
@@ -348,8 +348,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 );
                             })()}
 
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                                <div>
+                            <div className="flex flex-wrap gap-4 pt-2">
+                                <div className="flex-1 min-w-[120px]">
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Context Window</label>
                                     <input
                                         type="number"
@@ -358,7 +358,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                         onChange={e => setEditForm({ ...editForm, max_tokens: parseInt(e.target.value) || 0 })}
                                     />
                                 </div>
-                                <div>
+                                <div className="flex-1 min-w-[120px]">
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Temperature</label>
                                     <input
                                         type="number" step="0.1" min="0" max="2"

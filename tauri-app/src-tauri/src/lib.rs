@@ -71,6 +71,10 @@ pub fn run() {
             install_bsl_ls_cmd,
             reconnect_bsl_ls_cmd,
             diagnose_bsl_ls_cmd,
+            check_java_cmd,
+            complete_onboarding,
+            reset_onboarding,
+            restart_app_cmd,
             // MCP
             get_mcp_tools,
             call_mcp_tool,
@@ -92,7 +96,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
              
             // Start settings watcher for reactive MCP
-            crate::mcp_client::start_settings_watcher();
+            crate::mcp_client::start_settings_watcher(app.handle().clone());
 
             tauri::async_runtime::spawn(async move {
                 // Wait a bit for app to fully start

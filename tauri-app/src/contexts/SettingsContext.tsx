@@ -13,6 +13,10 @@ export interface AppSettings {
         java_path: string;
         auto_download: boolean;
     };
+    mcp_servers?: api.McpServerConfig[];
+    active_llm_profile?: string;
+    onboarding_completed?: boolean;
+    debug_mcp?: boolean;
 }
 
 interface SettingsContextType {

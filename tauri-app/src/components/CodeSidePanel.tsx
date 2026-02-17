@@ -101,6 +101,7 @@ export function CodeSidePanel({
 
     return (
         <div
+            id="code-side-panel"
             ref={panelRef}
             style={{ width: isExpanded ? `${width}px` : '280px' }}
             className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out flex-shrink-0 relative ${isResizing ? 'transition-none' : ''}`}
@@ -198,7 +199,7 @@ export function CodeSidePanel({
             </div>
 
             {/* Editor Area */}
-            <div className="flex-1 overflow-hidden relative group">
+            <div id="tour-editor" className="flex-1 overflow-hidden relative group">
                 {viewMode === 'editor' ? (
                     <Editor
                         height="100%"
@@ -328,6 +329,7 @@ export function CodeSidePanel({
                         ? 'bg-[#27272a] text-zinc-500 cursor-not-allowed'
                         : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/10'
                         }`}
+                    id="tour-apply"
                 >
                     {isApplying ? (
                         <>Applying...</>

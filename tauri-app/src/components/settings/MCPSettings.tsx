@@ -42,6 +42,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [viewingLogsId, setViewingLogsId] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+    const [smartImportId, setSmartImportId] = useState<string | null>(null);
+    const [smartImportUrl, setSmartImportUrl] = useState('');
 
     // Ensure pre-installed servers exist
     useEffect(() => {
@@ -171,9 +173,35 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         }
     };
 
-    // Sort servers: Built-in first, then others
+    const handleSmartImport = (id: string, urlStr: string) => {
+        const val = urlStr.trim();
+        if (!val) return;
+
+        try {
+            const url = new URL(val.startsWith('http') ? val : `http://${val}`);
+            const proto = url.protocol.replace(':', '');
+            const host = url.host;
+            const pathParts = url.pathname.split('/').filter(p => p && p !== 'hs' && p !== 'mcp');
+            const base = pathParts[0] || 'base';
+
+            const newUrl = `${proto}://${host}/${base}/hs/mcp`;
+            const server = servers.find(s => s.id === id);
+            if (server) {
+                const newEnv = {
+                    ...(server.env || {}),
+                    'ONEC_METADATA_URL': newUrl
+                };
+                handleUpdateServer(id, { env: newEnv });
+            }
+            setSmartImportId(null);
+            setSmartImportUrl('');
+        } catch (err) {
+            console.error("Invalid URL for smart import", err);
+        }
+    };
+
     const sortedServers = [...servers].sort((a, b) => {
-        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_METADATA_ID, BUILTIN_1C_SERVER_ID];
+        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
         const aIdx = builtinIds.indexOf(a.id);
         const bIdx = builtinIds.indexOf(b.id);
 
@@ -228,20 +256,20 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                             >
                                 {/* Server Header */}
                                 <div className={`
-                                    px-4 py-3 border-b flex items-center justify-between
+                                    px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap
                                     ${isBuiltin
                                         ? 'bg-yellow-500/5 border-yellow-500/20'
                                         : 'bg-zinc-800/80 border-zinc-700'
                                     }
                                 `}>
-                                    <div className="flex items-center gap-3">
-                                        <div className={`w-2 h-2 rounded-full transition-all duration-300 ${server.enabled ? (isConnected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 animate-pulse') : 'bg-zinc-600'}`} title={server.enabled ? (isConnected ? "Connected" : "Disconnected") : "Disabled"} />
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <div className={`w-2 h-2 rounded-full shrink-0 transition-all duration-300 ${server.enabled ? (isConnected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 animate-pulse') : 'bg-zinc-600'}`} title={server.enabled ? (isConnected ? "Connected" : "Disconnected") : "Disabled"} />
 
                                         {isBuiltin ? (
-                                            <div className="flex items-center gap-2">
-                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500" /> : <Sparkles className="w-4 h-4 text-yellow-500" />}
-                                                <span className="text-zinc-100 font-medium text-sm">{server.name}</span>
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500 shrink-0" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500 shrink-0" /> : <Sparkles className="w-4 h-4 text-yellow-500 shrink-0" />}
+                                                <span className="text-zinc-100 font-medium text-sm truncate">{server.name}</span>
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20 whitespace-nowrap shrink-0">
                                                     PRE-INSTALLED
                                                 </span>
                                             </div>
@@ -250,19 +278,19 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                 type="text"
                                                 value={server.name}
                                                 onChange={(e) => handleUpdateServer(server.id, { name: e.target.value })}
-                                                className="bg-transparent border-none text-zinc-100 font-medium focus:ring-0 p-0 text-sm w-48"
+                                                className="bg-transparent border-none text-zinc-100 font-medium focus:ring-0 p-0 text-sm w-full min-w-[100px]"
                                                 placeholder="Название сервера"
                                             />
                                         )}
 
                                         {server.enabled && (
-                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border ${isConnected ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
+                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${isConnected ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
                                                 {isConnected ? 'LIVE' : (isStopped ? 'STOPPED' : 'OFFLINE')}
                                             </span>
                                         )}
                                     </div>
 
-                                    <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-3 ml-auto">
                                         {!isBuiltin && (
                                             <div className="flex bg-zinc-900 rounded-lg p-0.5 border border-zinc-700">
                                                 <button
@@ -338,8 +366,21 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                 </div>
                                             ) : (
                                                 <>
-                                                    <div className="grid grid-cols-12 gap-2">
-                                                        <div className="col-span-3">
+                                                    <div className="flex items-center justify-between mb-4">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                                                            <span className="text-[10px] text-zinc-400 font-medium">Параметры соединения</span>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => setSmartImportId(server.id)}
+                                                            className="flex items-center gap-1.5 px-2 py-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-md text-[10px] font-bold transition border border-blue-500/20"
+                                                        >
+                                                            <Sparkles className="w-3 h-3" /> Импорт URL
+                                                        </button>
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-2">
+                                                        <div className="flex-1 min-w-[100px]">
                                                             <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
                                                                 <Globe className="w-3 h-3" /> Protocol
                                                             </label>
@@ -358,9 +399,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                 <option value="https">HTTPS</option>
                                                             </select>
                                                         </div>
-                                                        <div className="col-span-5">
+                                                        <div className="flex-[2] min-w-[150px]">
                                                             <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                                <Terminal className="w-3 h-3" /> Server (Host)
+                                                                <Terminal className="w-3 h-3" /> Host
                                                             </label>
                                                             <input
                                                                 type="text"
@@ -378,9 +419,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                 placeholder="localhost"
                                                             />
                                                         </div>
-                                                        <div className="col-span-4">
+                                                        <div className="flex-1 min-w-[120px]">
                                                             <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
-                                                                <Database className="w-3 h-3" /> Base Name
+                                                                <Database className="w-3 h-3" /> Base
                                                             </label>
                                                             <input
                                                                 type="text"
@@ -402,8 +443,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                         <Link2 className="w-2.5 h-2.5" />
                                                         Будет использован: {server.env?.['ONEC_METADATA_URL']}/...
                                                     </div>
-                                                    <div className="grid grid-cols-2 gap-4">
-                                                        <div>
+                                                    <div className="flex flex-wrap gap-4">
+                                                        <div className="flex-1 min-w-[140px]">
                                                             <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
                                                                 <Key className="w-3 h-3" /> Login
                                                             </label>
@@ -418,7 +459,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                 placeholder="Администратор"
                                                             />
                                                         </div>
-                                                        <div>
+                                                        <div className="flex-1 min-w-[140px]">
                                                             <label className="text-[10px] text-zinc-500 uppercase font-bold mb-1 block flex items-center gap-1">
                                                                 <ShieldCheck className="w-3 h-3" /> Password
                                                             </label>
@@ -514,7 +555,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                             )}
                                         </>
                                     )}
-                                    <div className="flex items-center justify-between pt-1">
+                                    <div className="flex flex-wrap items-center justify-between gap-y-3 pt-1">
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => handleTestConnection(server)}
@@ -535,9 +576,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                         </div>
 
                                         {testResults[server.id] && (
-                                            <div className={`flex items-center gap-2 text-xs font-medium ${testResults[server.id].success ? 'text-green-400' : 'text-red-400'} min-w-0`}>
+                                            <div className={`flex items-center gap-2 text-xs font-medium ${testResults[server.id].success ? 'text-green-400' : 'text-red-400'} min-w-0 max-w-full`}>
                                                 {testResults[server.id].success ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
-                                                <span className="truncate max-w-[300px]">{testResults[server.id].message}</span>
+                                                <span className="truncate">{testResults[server.id].message}</span>
                                             </div>
                                         )}
                                     </div>
@@ -582,6 +623,85 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 ))
                             )}
                             <div className="h-4" /> {/* Spacer */}
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Smart Import Modal */}
+            {smartImportId && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-in fade-in duration-200">
+                    <div className="bg-zinc-900 border border-zinc-700/50 rounded-2xl w-full max-w-lg shadow-[0_20px_50px_rgba(0,0,0,0.5)] overflow-hidden">
+                        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/50">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-blue-500/10 rounded-xl">
+                                    <Sparkles className="w-5 h-5 text-blue-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-zinc-100 italic">Импорт публикации</h3>
+                                    <p className="text-[10px] text-zinc-500">Автозаполнение параметров из URL</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => {
+                                    setSmartImportId(null);
+                                    setSmartImportUrl('');
+                                }}
+                                className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-500 hover:text-zinc-200 transition"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Вставьте URL публикации</label>
+                                <div className="relative group">
+                                    <input
+                                        autoFocus
+                                        type="text"
+                                        value={smartImportUrl}
+                                        onChange={(e) => setSmartImportUrl(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleSmartImport(smartImportId, smartImportUrl);
+                                            if (e.key === 'Escape') setSmartImportId(null);
+                                        }}
+                                        className="w-full bg-zinc-950 border border-zinc-800 group-focus-within:border-blue-500/50 rounded-xl px-4 py-3 text-sm text-zinc-100 focus:outline-none focus:ring-4 focus:ring-blue-500/5 transition-all placeholder:text-zinc-700"
+                                        placeholder="http://myserver/demo_base"
+                                    />
+                                    <Globe className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-800 group-focus-within:text-blue-500/30 transition-colors" />
+                                </div>
+                            </div>
+
+                            <div className="bg-blue-500/5 border border-blue-500/10 rounded-xl p-4 flex gap-3">
+                                <Activity className="w-5 h-5 text-blue-400/50 shrink-0" />
+                                <div className="space-y-1">
+                                    <p className="text-[11px] text-zinc-300 leading-relaxed font-medium">
+                                        Система автоматически извлечет протокол, хост и имя базы.
+                                    </p>
+                                    <p className="text-[10px] text-zinc-500">
+                                        Например: из <code>http://dev/base</code> получится <b>dev</b> и <b>base</b>.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="px-6 py-4 bg-zinc-900/80 border-t border-zinc-800 flex items-center justify-end gap-3">
+                            <button
+                                onClick={() => {
+                                    setSmartImportId(null);
+                                    setSmartImportUrl('');
+                                }}
+                                className="px-4 py-2 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-xl text-xs font-bold transition-colors"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                onClick={() => handleSmartImport(smartImportId, smartImportUrl)}
+                                disabled={!smartImportUrl.trim()}
+                                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                            >
+                                Импортировать
+                            </button>
                         </div>
                     </div>
                 </div>

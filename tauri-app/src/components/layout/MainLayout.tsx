@@ -10,6 +10,7 @@ import { SettingsPanel } from '../SettingsPanel';
 import { ConflictDialog } from '../ui/ConflictDialog';
 import { Header } from './Header';
 import { ChatArea } from '../chat/ChatArea';
+import { OnboardingWizard } from '../Onboarding/OnboardingWizard';
 import logo from '../../assets/logo.png';
 
 export function MainLayout() {
@@ -20,6 +21,7 @@ export function MainLayout() {
 
     const [showSidePanel, setShowSidePanel] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [settingsTab, setSettingsTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug' | undefined>(undefined);
     const [isApplying, setIsApplying] = useState(false);
     const [isValidating, setIsValidating] = useState(false);
 
@@ -133,8 +135,8 @@ export function MainLayout() {
     const close = () => appWindow.close();
 
     return (
-        <div className="flex flex-col h-screen bg-transparent">
-            <SettingsPanel isOpen={showSettings} onClose={() => setShowSettings(false)} />
+        <div className="flex flex-col h-screen bg-transparent relative overflow-hidden">
+            <SettingsPanel isOpen={showSettings} onClose={() => setShowSettings(false)} initialTab={settingsTab as any} />
 
             {/* Custom Title Bar */}
             <div className="relative h-10 bg-[#09090b] flex items-center justify-between px-4 border-b border-[#27272a] select-none z-50">
@@ -150,53 +152,63 @@ export function MainLayout() {
                 </div>
             </div>
 
-            <Header
-                bslStatus={bslStatus}
-                showSidePanel={showSidePanel}
-                toggleSidePanel={() => setShowSidePanel(!showSidePanel)}
-                onClearChat={() => {
-                    clearChat();
-                    setOriginalCode('');
-                    setModifiedCode('');
-                    setDiagnostics([]);
-                }}
-                onOpenSettings={() => setShowSettings(true)}
-                onCodeLoaded={handleCodeLoaded}
-            />
+            <div className="flex-1 flex flex-col relative overflow-hidden">
+                {(settings && !settings.onboarding_completed) && (
+                    <OnboardingWizard onComplete={() => window.location.reload()} />
+                )}
 
-            <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
-                <ChatArea
-                    modifiedCode={modifiedCode}
-                    onApplyCode={useCallback((code: string) => {
-                        setModifiedCode(code);
-                        setShowSidePanel(true);
-                    }, [])}
+                <Header
+                    bslStatus={bslStatus}
+                    showSidePanel={showSidePanel}
+                    toggleSidePanel={() => setShowSidePanel(!showSidePanel)}
+                    onClearChat={() => {
+                        clearChat();
+                        setOriginalCode('');
+                        setModifiedCode('');
+                        setDiagnostics([]);
+                    }}
+                    onOpenSettings={() => setShowSettings(true)}
                     onCodeLoaded={handleCodeLoaded}
-                    diagnostics={diagnostics}
                 />
 
-                <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>
-                    <CodeSidePanel
-                        isOpen={showSidePanel}
-                        onClose={() => setShowSidePanel(false)}
-                        originalCode={originalCode}
+                <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
+                    <ChatArea
                         modifiedCode={modifiedCode}
-                        onModifiedCodeChange={setModifiedCode}
+                        onApplyCode={useCallback((code: string) => {
+                            setModifiedCode(code);
+                            setShowSidePanel(true);
+                        }, [])}
+                        onCodeLoaded={handleCodeLoaded}
                         diagnostics={diagnostics}
-                        onApply={handleApply}
-                        isApplying={isApplying}
-                        isValidating={isValidating}
+                        onOpenSettings={(tab) => {
+                            setSettingsTab(tab as any);
+                            setShowSettings(true);
+                        }}
                     />
-                </div>
-            </div>
 
-            <ConflictDialog
-                isOpen={showConflictDialog}
-                selectionActive={selectionActive}
-                onClose={() => setShowConflictDialog(false)}
-                onApplyToAll={handleConflictApplyToAll}
-                onApplyToSelection={handleConflictApplyToSelection}
-            />
+                    <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>
+                        <CodeSidePanel
+                            isOpen={showSidePanel}
+                            onClose={() => setShowSidePanel(false)}
+                            originalCode={originalCode}
+                            modifiedCode={modifiedCode}
+                            onModifiedCodeChange={setModifiedCode}
+                            diagnostics={diagnostics}
+                            onApply={handleApply}
+                            isApplying={isApplying}
+                            isValidating={isValidating}
+                        />
+                    </div>
+                </div>
+
+                <ConflictDialog
+                    isOpen={showConflictDialog}
+                    selectionActive={selectionActive}
+                    onClose={() => setShowConflictDialog(false)}
+                    onApplyToAll={handleConflictApplyToAll}
+                    onApplyToSelection={handleConflictApplyToSelection}
+                />
+            </div>
         </div>
     );
 }

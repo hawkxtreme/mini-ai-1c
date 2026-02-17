@@ -13,10 +13,11 @@ interface ChatAreaProps {
     onApplyCode: (code: string) => void;
     onCodeLoaded: (code: string, isSelection: boolean) => void;
     diagnostics: any[];
+    onOpenSettings: (tab: string) => void;
 }
 
-export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, sendMessage, stopChat, editAndRerun } = useChat();
+export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics, onOpenSettings }: ChatAreaProps) {
+    const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
 
@@ -112,7 +113,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
     };
 
     return (
-        <div className="flex flex-col flex-1 min-w-[400px] transition-all duration-300">
+        <div id="chat-area" className="flex flex-col flex-1 min-w-[400px] transition-all duration-300">
             {/* Messages List */}
             <div className={`flex-1 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin scrollbar-thumb-white/10'} bg-[#09090b]`}>
                 {messages.length === 0 && (
@@ -131,17 +132,44 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
                             {[
-                                { title: "Анализ кода", desc: "Получите код модуля или выделенный фрагмент из Конфигуратора для разбора.", icon: <FileText className="w-5 h-5 text-blue-400" /> },
-                                { title: "Генерация кода", desc: "Опишите задачу, и AI предложит решение в формате BSL с возможностью вставки.", icon: <RefreshCw className="w-5 h-5 text-purple-400" /> },
-                                { title: "Проверка BSL LS", desc: "Интеграция с BSL Language Server для поиска ошибок и предупреждений.", icon: <Monitor className="w-5 h-5 text-green-400" /> },
-                                { title: "Серверы MCP", desc: "Предустановленные инструменты: 1C:Метаданные, 1C:Напарник.", icon: <Settings className="w-5 h-5 text-orange-400" /> }
+                                {
+                                    title: "Анализ кода",
+                                    desc: "Получить код модуля или выделенный фрагмент из Конфигуратора для разбора.",
+                                    icon: <FileText className="w-5 h-5 text-blue-400" />,
+                                    onClick: () => handleLoadCode(true)
+                                },
+                                {
+                                    title: "Генерация кода",
+                                    desc: "Опишите задачу, и AI предложит решение в формате BSL с возможностью вставки.",
+                                    icon: <RefreshCw className="w-5 h-5 text-purple-400" />,
+                                    onClick: () => {
+                                        setInput("Напиши процедуру для...");
+                                        inputRef.current?.focus();
+                                    }
+                                },
+                                {
+                                    title: "Проверка BSL LS",
+                                    desc: "Интеграция с BSL Language Server для поиска ошибок и предупреждений.",
+                                    icon: <Monitor className="w-5 h-5 text-green-400" />,
+                                    onClick: () => onOpenSettings('bsl')
+                                },
+                                {
+                                    title: "Серверы MCP",
+                                    desc: "Предустановленные инструменты: 1C:Метаданные, 1C:Напарник.",
+                                    icon: <Settings className="w-5 h-5 text-orange-400" />,
+                                    onClick: () => onOpenSettings('mcp')
+                                }
                             ].map((step, i) => (
-                                <div key={i} className="p-5 rounded-2xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700/50 transition-all hover:bg-zinc-850 group cursor-default">
+                                <div
+                                    key={i}
+                                    onClick={step.onClick}
+                                    className="p-5 rounded-2xl bg-zinc-900/50 border border-zinc-800/50 hover:border-blue-500/30 transition-all hover:bg-zinc-800/80 group cursor-pointer active:scale-[0.98]"
+                                >
                                     <div className="flex items-start gap-4">
-                                        <div className="p-2.5 rounded-xl bg-zinc-800/50 group-hover:bg-zinc-800 transition-colors">{step.icon}</div>
+                                        <div className="p-2.5 rounded-xl bg-zinc-800/50 group-hover:bg-blue-500/10 transition-colors">{step.icon}</div>
                                         <div className="space-y-1">
-                                            <h3 className="text-sm font-semibold text-zinc-200">{step.title}</h3>
-                                            <p className="text-xs text-zinc-500 leading-relaxed">{step.desc}</p>
+                                            <h3 className="text-sm font-semibold text-zinc-200 group-hover:text-blue-400 transition-colors">{step.title}</h3>
+                                            <p className="text-xs text-zinc-500 leading-relaxed group-hover:text-zinc-400 transition-colors">{step.desc}</p>
                                         </div>
                                     </div>
                                 </div>
@@ -269,7 +297,14 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                         <div className="w-full px-0">
                             <div className="p-4 rounded-xl border border-zinc-800/50 bg-transparent flex items-center gap-3">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <span className="text-zinc-500 text-xs font-medium">{chatStatus || 'Думаю...'}</span>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-zinc-300 text-xs font-medium">{chatStatus || 'Думаю...'}</span>
+                                    {currentIteration > 1 && (
+                                        <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono">
+                                            Шаг {currentIteration}
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     )}
@@ -278,13 +313,13 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-[#09090b] border-t border-[#27272a] shadow-2xl z-10">
+            <div className="px-6 pb-6 pt-4 bg-[#09090b] border-t border-[#27272a] shadow-2xl z-10">
                 {/* Context Stats Overlay */}
                 <div className="max-w-4xl mx-auto mb-3 flex items-center justify-between px-1">
                     {messages.length === 0 ? (
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-600 italic">
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-600 italic transition-all duration-500">
                             <ChevronDown className="w-3.5 h-3.5 animate-bounce" />
-                            <span>Выберите окно Конфигуратора снизу</span>
+                            <span>{selectedHwnd ? 'Окно выбрано' : 'Выберите окно Конфигуратора снизу'}</span>
                         </div>
                     ) : (
                         <div className="flex items-center gap-3">
@@ -308,10 +343,10 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                         style={{ fontFamily: 'Inter, sans-serif' }}
                     />
 
-                    <div ref={dropdownRef} className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-nowrap w-full">
-                        <div className="flex items-center gap-1 flex-1 flex-shrink-0">
+                    <div ref={dropdownRef} className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-wrap w-full">
+                        <div className="flex items-center gap-1 flex-1 flex-shrink-0 min-w-0">
                             {/* Model Selector */}
-                            <div className="relative flex-shrink-0">
+                            <div className="relative flex-shrink-1 min-w-0">
                                 <button
                                     onClick={() => setShowModelDropdown(!showModelDropdown)}
                                     className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
@@ -333,7 +368,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                             </div>
 
                             {/* Configurator Selector */}
-                            <div className="relative flex-shrink-0">
+                            <div className="relative flex-shrink-0" id="configurator-selector">
                                 <button onClick={() => {
                                     const next = !showConfigDropdown;
                                     setShowConfigDropdown(next);
@@ -345,8 +380,8 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                                 }}
                                     className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                                 >
-                                    <Monitor className="w-3.5 h-3.5" />
-                                    <span className="truncate max-w-[80px] hidden sm:inline">{activeConfigTitle}</span>
+                                    <Monitor className="w-3.5 h-3.5 flex-shrink-0" />
+                                    <span className="sm:inline">{activeConfigTitle}</span>
                                 </button>
                                 {showConfigDropdown && (
                                     <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20 p-1">
@@ -363,7 +398,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics 
                             </div>
 
                             {/* Get Code Button */}
-                            <div className="relative flex-shrink-0">
+                            <div className="relative flex-shrink-0" id="tour-get-code">
                                 <button onClick={() => {
                                     const next = !showGetCodeDropdown;
                                     setShowGetCodeDropdown(next);

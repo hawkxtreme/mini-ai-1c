@@ -79,6 +79,7 @@ pub struct BSLClient {
     request_id: AtomicI32,
     capabilities: Option<serde_json::Value>,
     workspace_root: Option<String>,
+    actual_port: Option<u16>,
 }
 
 impl BSLClient {
@@ -89,7 +90,20 @@ impl BSLClient {
             request_id: AtomicI32::new(1),
             capabilities: None,
             workspace_root: None,
+            actual_port: None,
         }
+    }
+
+    /// Find an available TCP port starting from the preferred port
+    fn find_available_port(preferred: u16) -> u16 {
+        let mut port = preferred;
+        while port < preferred + 100 {
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+            port += 1;
+        }
+        preferred // Fallback to preferred if none found in range
     }
 
     pub fn is_connected(&self) -> bool {
@@ -109,20 +123,20 @@ impl BSLClient {
             return Err("BSL LS JAR path not configured".to_string());
         }
         
-        let port = settings.bsl_server.websocket_port;
+        // Dynamic port search for terminal server compatibility
+        let preferred_port = settings.bsl_server.websocket_port;
+        let port = Self::find_available_port(preferred_port);
+        self.actual_port = Some(port);
 
-        // Check if port is already in use
-        if let Ok(_stream) = std::net::TcpStream::connect(format!("127.0.0.1:{}", port)) {
-            println!("[BSL LS] Port {} already in use. Assuming server is already running.", port);
-            return Ok(());
-        }
+        println!("[BSL LS] Starting on port {} (preferred was {})", port, preferred_port);
         
         let mut cmd = Command::new(&settings.bsl_server.java_path);
         cmd.args([
                 // Increase WebSocket message buffer from 8KB default to 1MB
-                // Without this, large BSL code files cause "text message too big" WebSocket close
                 "-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576",
-                "-Xmx1g",
+                // Minimal memory footprint for terminal server (256MB heap + Serial GC)
+                "-Xmx256m",
+                "-XX:+UseSerialGC",
                 "-jar",
                 jar_path,
                 "websocket",
@@ -146,8 +160,9 @@ impl BSLClient {
 
     /// Connect to the BSL Language Server
     pub async fn connect(&mut self) -> Result<(), String> {
-        let settings = load_settings();
-        let port = settings.bsl_server.websocket_port;
+        let port = self.actual_port.unwrap_or_else(|| {
+            load_settings().bsl_server.websocket_port
+        });
         let url = format!("ws://127.0.0.1:{}/lsp", port);
         
         let mut retries = 0;

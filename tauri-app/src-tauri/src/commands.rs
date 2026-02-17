@@ -27,6 +27,49 @@ pub fn save_settings(new_settings: AppSettings) -> Result<(), String> {
     settings::save_settings(&new_settings)
 }
 
+/// Mark onboarding as completed
+#[tauri::command]
+pub fn complete_onboarding() -> Result<(), String> {
+    let mut settings = settings::load_settings();
+    settings.onboarding_completed = true;
+    settings::save_settings(&settings)
+}
+
+#[tauri::command]
+pub fn reset_onboarding() -> Result<(), String> {
+    let mut settings = settings::load_settings();
+    settings.onboarding_completed = false;
+    settings::save_settings(&settings)
+}
+
+/// Restart the application
+#[tauri::command]
+pub fn restart_app_cmd(app_handle: tauri::AppHandle) {
+    app_handle.restart();
+}
+
+/// Check if Java is installed and available in PATH
+#[tauri::command]
+pub fn check_java_cmd() -> bool {
+    use std::process::Command;
+    
+    // Try verification by running java -version
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd")
+        .args(["/C", "java -version"])
+        .output();
+        
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("java")
+        .arg("-version")
+        .output();
+
+    match output {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
 /// Get all LLM profiles
 #[tauri::command]
 pub fn get_profiles() -> ProfileStore {
@@ -55,15 +98,26 @@ pub fn save_profile(mut profile: LLMProfile, api_key: Option<String>) -> Result<
 /// Delete a profile
 #[tauri::command]
 pub fn delete_profile(profile_id: String) -> Result<(), String> {
-    if profile_id == "default" {
-        return Err("Cannot delete default profile".to_string());
+    let mut store = llm_profiles::load_profiles();
+
+    // Check if profile exists
+    if !store.profiles.iter().any(|p| p.id == profile_id) {
+        return Err("Профиль не найден".to_string());
     }
 
-    let mut store = llm_profiles::load_profiles();
+    // Don't allow deleting the last profile
+    if store.profiles.len() <= 1 {
+        return Err("Нельзя удалить последний профиль".to_string());
+    }
+
+    // Remove the profile
     store.profiles.retain(|p| p.id != profile_id);
 
+    // If we deleted the active profile, pick the first available one
     if store.active_profile_id == profile_id {
-        store.active_profile_id = "default".to_string();
+        if let Some(first) = store.profiles.first() {
+            store.active_profile_id = first.id.clone();
+        }
     }
 
     llm_profiles::save_profiles(&store)
@@ -176,14 +230,16 @@ pub async fn stream_chat(
         let settings = crate::settings::load_settings();
 
         let mut current_iteration = 0;
-        const MAX_ITERATIONS: u32 = 3;
+        const MAX_ITERATIONS: u32 = 7;
 
         loop {
-            if current_iteration >= MAX_ITERATIONS {
-                let _ = task_app_handle.emit("chat-chunk", "\n\n**[Система] Достигнут лимит итераций диалога (3).** Пожалуйста, уточните запрос или продолжите в новом сообщении.");
+            current_iteration += 1;
+            let _ = task_app_handle.emit("chat-iteration", current_iteration);
+
+            if current_iteration > MAX_ITERATIONS {
+                let _ = task_app_handle.emit("chat-chunk", "\n\n**[Система] Достигнут лимит итераций диалога (7).** Пожалуйста, уточните запрос или продолжите в новом сообщении.");
                 break;
             }
-            current_iteration += 1;
 
             // Stream chat completion
             let response_msg = stream_chat_completion(api_messages.clone(), task_app_handle.clone()).await;
@@ -191,7 +247,6 @@ pub async fn stream_chat(
             let assistant_msg = match response_msg {
                 Ok(m) => m,
                 Err(e) => {
-                    let _ = task_app_handle.emit("chat-chunk", format!("\nError: {}", e));
                     return Err(e);
                 }
             };

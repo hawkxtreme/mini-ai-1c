@@ -13,6 +13,7 @@ use lazy_static::lazy_static;
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 use std::thread;
 use async_trait::async_trait;
+use tauri::Manager;
 
 #[async_trait]
 pub trait InternalMcpHandler: Send + Sync {
@@ -124,7 +125,7 @@ impl McpManager {
         Ok(session)
     }
 
-    pub async fn reconfigure(new_settings: AppSettings) {
+    pub async fn reconfigure(new_settings: AppSettings, app_handle: &tauri::AppHandle) {
         println!("Reconfiguring MCP servers...");
         let mut sessions = MCP_MANAGER.sessions.lock().await;
 
@@ -174,6 +175,22 @@ impl McpManager {
                     }
                 }
             }
+        }
+
+        // 3. Handle BSL Server (Virtual)
+        let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+        let bsl_client = bsl_client_state.inner().clone();
+        
+        let mut bsl = bsl_client.lock().await;
+        if new_settings.bsl_server.enabled {
+            let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
+            if jar_exists && !bsl.is_connected() {
+                println!("Restarting/Starting BSL LS because it was enabled and not connected");
+                let _ = bsl.start_server();
+                let _ = bsl.connect().await;
+            }
+        } else {
+            bsl.stop();
         }
     }
 
@@ -238,8 +255,8 @@ impl McpManager {
     }
 }
 
-pub fn start_settings_watcher() {
-    thread::spawn(|| {
+pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
+    thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
         
         // Use RecommendedWatcher
@@ -269,9 +286,10 @@ pub fn start_settings_watcher() {
                         thread::sleep(Duration::from_millis(100));
                         
                         // Run async reconfigure in tauri runtime
-                        tauri::async_runtime::spawn(async {
+                        let app_handle_clone = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
                             let settings = crate::settings::load_settings();
-                            McpManager::reconfigure(settings).await;
+                            McpManager::reconfigure(settings, &app_handle_clone).await;
                         });
                     }
                 },

@@ -33,6 +33,7 @@ interface ChatContextType {
     messages: ChatMessage[];
     isLoading: boolean;
     chatStatus: string;
+    currentIteration: number;
     sendMessage: (content: string, codeContext?: string, diagnostics?: string[]) => Promise<void>;
     stopChat: () => Promise<void>;
     clearChat: () => void;
@@ -45,6 +46,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [chatStatus, setChatStatus] = useState('');
+    const [currentIteration, setCurrentIteration] = useState(0);
 
     useEffect(() => {
         let isMounted = true;
@@ -139,9 +141,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     listen<string>('chat-status', (event) => {
                         setChatStatus(event.payload);
                     }),
+                    listen<number>('chat-iteration', (event) => {
+                        setCurrentIteration(event.payload);
+                    }),
                     listen('chat-done', () => {
                         setIsLoading(false);
                         setChatStatus('');
+                        setCurrentIteration(0);
                         setMessages(prev => {
                             const last = prev[prev.length - 1];
                             if (last && last.role === 'assistant') {
@@ -275,6 +281,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             messages,
             isLoading,
             chatStatus,
+            currentIteration,
             sendMessage,
             stopChat,
             clearChat,

@@ -49,10 +49,18 @@ interface AppSettings {
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
+    initialTab?: 'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug';
 }
 
-export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProps) {
     const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug'>('llm');
+
+    useEffect(() => {
+        if (isOpen && initialTab) {
+            setTab(initialTab);
+        }
+    }, [isOpen, initialTab]);
+
     const { profiles, activeProfileId, loadProfiles } = useProfiles();
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
@@ -200,12 +208,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-            <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-[95vw] max-w-4xl h-[85vh] overflow-hidden flex flex-col shadow-2xl">
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-2 sm:p-4">
+            <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-4xl h-full sm:h-[85vh] overflow-hidden flex flex-col shadow-2xl">
                 {/* Header */}
-                <div data-tauri-drag-region className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900 select-none">
-                    <h2 className="text-xl font-bold text-zinc-100 pointer-events-none">Settings</h2>
-                    <button onClick={onClose} className="p-1 hover:bg-zinc-800 rounded transition">
+                <div data-tauri-drag-region className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-zinc-800 bg-zinc-900 select-none">
+                    <h2 className="text-lg sm:text-xl font-bold text-zinc-100 pointer-events-none">Settings</h2>
+                    <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded transition">
                         <X className="w-5 h-5 text-zinc-400" />
                     </button>
                 </div>
@@ -247,8 +255,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* Configurator Tab */}
                     {tab === 'configurator' && settings && (
-                        <div className="p-8 w-full h-full overflow-y-auto">
-                            <div className="max-w-2xl mx-auto space-y-8">
+                        <div className="p-4 sm:p-8 w-full h-full overflow-y-auto">
+                            <div className="max-w-2xl mx-auto space-y-6 sm:space-y-8">
                                 <section>
                                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
                                         <Monitor className="w-5 h-5 text-blue-500" />
@@ -303,8 +311,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* BSL Tab */}
                     {tab === 'bsl' && settings && (
-                        <div className="p-8 w-full h-full overflow-y-auto">
-                            <div className="max-w-2xl mx-auto space-y-8">
+                        <div className="p-4 sm:p-8 w-full h-full overflow-y-auto">
+                            <div className="max-w-2xl mx-auto space-y-6 sm:space-y-8">
                                 <section>
                                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
                                         <FileCode className="w-5 h-5 text-blue-500" />
@@ -421,7 +429,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* MCP Tab */}
                     {tab === 'mcp' && settings && (
-                        <div className="p-8 w-full h-full overflow-y-auto">
+                        <div className="p-4 sm:p-8 w-full h-full overflow-y-auto scrollbar-thin">
                             <div className="max-w-2xl mx-auto">
                                 <MCPSettings
                                     servers={settings.mcp_servers}
@@ -433,8 +441,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
                     {/* Debug Tab */}
                     {tab === 'debug' && settings && (
-                        <div className="p-8 w-full h-full overflow-y-auto">
-                            <div className="max-w-2xl mx-auto space-y-8">
+                        <div className="p-4 sm:p-8 w-full h-full overflow-y-auto">
+                            <div className="max-w-2xl mx-auto space-y-6 sm:space-y-8">
                                 <section>
                                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
                                         <Bug className="w-5 h-5 text-red-500" />
@@ -451,6 +459,24 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                                             >
                                                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${settings.debug_mcp ? 'translate-x-6 bg-blue-500' : 'translate-x-1'}`} />
                                             </div>
+                                        </div>
+
+                                        <div className="flex items-center justify-between pt-4 border-t border-zinc-700">
+                                            <div>
+                                                <div className="font-medium text-zinc-200">Reset Onboarding</div>
+                                                <div className="text-xs text-zinc-500">Reset the "first run" flag to show the wizard again on next restart.</div>
+                                            </div>
+                                            <button
+                                                onClick={async () => {
+                                                    if (confirm('Are you sure you want to reset onboarding status? The application will reload.')) {
+                                                        await invoke('reset_onboarding');
+                                                        window.location.reload();
+                                                    }
+                                                }}
+                                                className="px-3 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/30 rounded-lg text-sm transition-colors"
+                                            >
+                                                Reset Wizard
+                                            </button>
                                         </div>
                                     </div>
                                 </section>

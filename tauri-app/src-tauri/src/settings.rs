@@ -97,6 +97,8 @@ pub struct AppSettings {
     pub llm: LLMGlobalSettings,
     #[serde(default)]
     pub debug_mcp: bool,
+    #[serde(default)]
+    pub onboarding_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,5 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export type McpTransport = 'http' | 'stdio' | 'internal';
+
+export interface McpServerConfig {
+    id: string;
+    name: string;
+    enabled: boolean;
+    transport: McpTransport;
+    url?: string | null;
+    login?: string | null;
+    password?: string | null;
+    command?: string | null;
+    args?: string[] | null;
+    env?: Record<string, string> | null;
+}
+
 export interface AppSettings {
     configurator: {
         window_title_pattern: string;
@@ -12,6 +27,10 @@ export interface AppSettings {
         java_path: string;
         auto_download: boolean;
     };
+    mcp_servers?: McpServerConfig[];
+    active_llm_profile?: string;
+    onboarding_completed?: boolean;
+    debug_mcp?: boolean;
 }
 
 /**

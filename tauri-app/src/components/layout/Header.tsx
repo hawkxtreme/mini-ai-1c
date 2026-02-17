@@ -1,6 +1,7 @@
-import { Settings, PanelRight, Trash2, RefreshCw, Monitor, ChevronDown, FileText, MousePointerClick } from 'lucide-react';
+import { Settings, PanelRight, Trash2, Maximize2, Minimize2 } from 'lucide-react';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface HeaderProps {
     bslStatus: { connected: boolean } | null;
@@ -12,6 +13,36 @@ interface HeaderProps {
 }
 
 export function Header({ bslStatus, showSidePanel, toggleSidePanel, onClearChat, onOpenSettings, onCodeLoaded }: HeaderProps) {
+    const [isCompact, setIsCompact] = useState(false);
+
+    useEffect(() => {
+        const updateCompactStatus = () => {
+            setIsCompact(window.innerWidth < 500);
+        };
+
+        window.addEventListener('resize', updateCompactStatus);
+        updateCompactStatus(); // Initial check
+
+        return () => window.removeEventListener('resize', updateCompactStatus);
+    }, []);
+
+    const toggleCompactMode = async () => {
+        const appWindow = getCurrentWindow();
+        const size = await appWindow.innerSize();
+        const factor = await appWindow.scaleFactor();
+        const logicalWidth = size.width / factor;
+        const currentHeight = size.height / factor;
+
+        const goingToCompact = logicalWidth >= 500; // If current width is >= 500, we are going to compact (400)
+        const newWidth = goingToCompact ? 400 : 700;
+
+        if (goingToCompact && showSidePanel) {
+            toggleSidePanel(); // Close side panel when going compact
+        }
+
+        await appWindow.setSize(new LogicalSize(newWidth, currentHeight));
+        // isCompact state will be updated by the window.resize listener
+    };
 
     return (
         <div className="flex items-center justify-between px-4 py-2 border-b border-[#27272a] bg-[#09090b]">
@@ -27,9 +58,17 @@ export function Header({ bslStatus, showSidePanel, toggleSidePanel, onClearChat,
 
             <div className="flex items-center gap-2">
                 <button
+                    onClick={toggleCompactMode}
+                    className="p-2 hover:bg-[#27272a] rounded-lg transition-colors text-zinc-400"
+                    title={isCompact ? "Expand Window" : "Compact Window"}
+                >
+                    {isCompact ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
+                </button>
+                <button
                     onClick={toggleSidePanel}
                     className={`p-2 hover:bg-[#27272a] rounded-lg transition-colors ${showSidePanel ? 'text-blue-400 bg-blue-500/10' : 'text-zinc-400'}`}
                     title="Toggle Code Panel"
+                    id="tour-side-panel"
                 >
                     <PanelRight className="w-4 h-4" />
                 </button>
@@ -49,6 +88,6 @@ export function Header({ bslStatus, showSidePanel, toggleSidePanel, onClearChat,
                     <Settings className="w-4 h-4 text-zinc-400" />
                 </button>
             </div>
-        </div>
+        </div >
     );
 }
