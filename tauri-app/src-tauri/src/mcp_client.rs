@@ -88,42 +88,32 @@ impl McpManager {
     pub async fn get_client(config: McpServerConfig) -> Result<Arc<McpSession>, String> {
         let mut sessions = MCP_MANAGER.sessions.lock().await;
 
-        // For Internal transport, we look up the registered handler
-        if config.transport == McpTransport::Internal {
-            crate::app_log!("[DEBUG] get_client for Internal: {}", config.id);
-            if let Some((_, session)) = sessions.get(&config.id) {
-                 if session.is_alive().await {
-                     return Ok(session.clone());
-                 }
-            }
-            
-            let handlers = MCP_MANAGER.internal_handlers.lock().await;
-            if let Some(handler) = handlers.get(&config.id) {
-                let session = Arc::new(McpSession::new_internal(config.clone(), handler.clone()));
-                sessions.insert(config.id.clone(), (config, session.clone()));
-                return Ok(session);
-            } else {
-                return Err(format!("Internal handler not found for {}", config.id));
-            }
-        }
-
-        // For HTTP transport, we don't need persistence in the same way, but let's unify interface
-        if config.transport == McpTransport::Http {
-            return Ok(Arc::new(McpSession::new_http(config)));
-        }
-
-        // For Stdio, we check if we have a running session AND if config matches
         if let Some((stored_config, session)) = sessions.get(&config.id) {
+            // For Stdio and Internal, check if config matches or session is alive
+            // For HTTP, we also reuse the session if URL is the same
             if session.is_alive().await && stored_config == &config {
                 return Ok(session.clone());
             }
-            // If config changed or dead, we'll replace it below
         }
 
         // Create new session
-        let settings = crate::settings::load_settings();
-        let session = Arc::new(McpSession::new_stdio(config.clone(), settings.debug_mcp).await?);
-        sessions.insert(config.id.clone(), (config.clone(), session.clone()));
+        let session = match config.transport {
+            McpTransport::Internal => {
+                let handlers = MCP_MANAGER.internal_handlers.lock().await;
+                if let Some(handler) = handlers.get(&config.id) {
+                    Arc::new(McpSession::new_internal(config.clone(), handler.clone()))
+                } else {
+                    return Err(format!("Internal handler not found for {}", config.id));
+                }
+            },
+            McpTransport::Http => Arc::new(McpSession::new_http(config.clone())),
+            McpTransport::Stdio => {
+                let settings = crate::settings::load_settings();
+                Arc::new(McpSession::new_stdio(config.clone(), settings.debug_mcp).await?)
+            }
+        };
+
+        sessions.insert(config.id.clone(), (config, session.clone()));
         Ok(session)
     }
 
@@ -180,19 +170,27 @@ impl McpManager {
         }
 
         // 3. Handle BSL Server (Virtual)
-        let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
-        let bsl_client = bsl_client_state.inner().clone();
-        
-        let mut bsl = bsl_client.lock().await;
+        // Optimization: only lock and restart if enabled status changed or not connected
         if new_settings.bsl_server.enabled {
-            let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
-            if jar_exists && !bsl.is_connected() {
-                println!("Restarting/Starting BSL LS because it was enabled and not connected");
-                let _ = bsl.start_server();
-                let _ = bsl.connect().await;
-            }
+             let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+             // Try lock with timeout to avoid hanging if BSL is currently busy analyzing large file
+             let bsl_client = bsl_client_state.inner();
+             let bsl_lock_future = bsl_client.lock();
+             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(100), bsl_lock_future).await {
+                 let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
+                 if jar_exists && !bsl.is_connected() {
+                     crate::app_log!("[MCP] Restarting/Starting BSL LS because it was enabled and not connected");
+                     let _ = bsl.start_server();
+                     let _ = bsl.connect().await;
+                 }
+             };
         } else {
-            bsl.stop();
+             // If disabled, we still need to stop it
+             let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+             let bsl_client = bsl_client_state.inner();
+             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(500), bsl_client.lock()).await {
+                 bsl.stop();
+             };
         }
     }
 

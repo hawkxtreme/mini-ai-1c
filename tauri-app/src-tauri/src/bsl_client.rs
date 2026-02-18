@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use std::time::Duration;
+use url::Url;
 
 use crate::settings::load_settings;
 use crate::mcp_client::{InternalMcpHandler, McpTool};
@@ -253,8 +254,8 @@ impl BSLClient {
         });
 
         // Setup persistent workspace for BSL LS
-        let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        let workspace_path = std::path::PathBuf::from(app_data).join("MiniAI1C").join("bsl-workspace");
+        // Use settings dir which is already guaranteed to be local (%LOCALAPPDATA%)
+        let workspace_path = crate::settings::get_settings_dir().join("bsl-workspace");
         std::fs::create_dir_all(&workspace_path).unwrap_or_default();
         let root_dir = workspace_path.to_string_lossy().replace('\\', "/");
         self.workspace_root = Some(root_dir.clone());
@@ -273,7 +274,19 @@ impl BSLClient {
             let _ = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default());
         }
 
-        let root_uri = format!("file:///{}", root_dir.trim_start_matches('/'));
+        // Properly format file URI using url crate (critical for UNC and spaces)
+        let root_path = std::fs::canonicalize(&workspace_path).unwrap_or(workspace_path.clone());
+        let root_uri = Url::from_file_path(&root_path)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| {
+                if root_dir.starts_with('/') {
+                    format!("file://{}", root_dir)
+                } else {
+                    format!("file:///{}", root_dir)
+                }
+            });
+        
+        crate::app_log!("[BSL LS] Using rootUri: {}", root_uri);
         
         let initialize_result = self.send_request("initialize", serde_json::json!({
             "processId": std::process::id(),
@@ -369,6 +382,28 @@ impl BSLClient {
             }
             "client/registerCapability" => {
                 let _ = Self::send_response_raw(ws, id, serde_json::json!({})).await;
+            }
+            "window/logMessage" => {
+                if let Some(params) = _params {
+                    let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::app_log!("[BSL LS][server] {}", msg);
+                }
+            }
+            "window/showMessageRequest" => {
+                // Auto-accept error reporting and other prompts to avoid UI hangs
+                // For "Agree to send error report", take the first option (usually "Yes")
+                if let Some(params) = _params {
+                    let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::app_log!("[BSL LS] Auto-responding to showMessageRequest: {}", msg);
+                    
+                    let actions = params.get("actions").and_then(|v| v.as_array());
+                    let result = if let Some(first_action) = actions.and_then(|a| a.first()) {
+                        first_action.get("title").cloned().unwrap_or(serde_json::json!("Да"))
+                    } else {
+                        serde_json::json!("Да")
+                    };
+                    let _ = Self::send_response_raw(ws, id, serde_json::json!({ "title": result })).await;
+                }
             }
             _ => {
                 crate::app_log!("[BSL LS] Warning: Unhandled server request: {}", method);
@@ -467,7 +502,7 @@ impl BSLClient {
 
     /// Analyze code and return diagnostics
     pub async fn analyze_code(&self, code: &str, uri: &str) -> Result<Vec<Diagnostic>, String> {
-        println!("[BSL LS] Starting analysis for URI: {}", uri);
+        crate::app_log!("[BSL LS] Starting analysis for URI: {}", uri);
 
         // Send didOpen notification
         self.send_notification("textDocument/didOpen", serde_json::json!({
@@ -485,7 +520,7 @@ impl BSLClient {
             .is_some();
 
         if supports_pull_diagnostics {
-            println!("[BSL LS] Using pull-model diagnostics");
+            crate::app_log!("[BSL LS] Using pull-model diagnostics");
             let result = self.send_request("textDocument/diagnostic", serde_json::json!({
                 "textDocument": {
                     "uri": uri
@@ -500,20 +535,20 @@ impl BSLClient {
             })).await?;
 
             if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
-                println!("[BSL LS] Pull diagnostics raw: {:?}", items);
+                crate::app_log!("[BSL LS] Pull diagnostics raw: {:?}", items);
                 let diagnostics: Vec<Diagnostic> = items
                     .iter()
                     .filter_map(|v| serde_json::from_value(v.clone()).ok())
                     .collect();
-                println!("[BSL LS] Parsed diagnostics count: {}", diagnostics.len());
+                crate::app_log!("[BSL LS] Parsed diagnostics count: {}", diagnostics.len());
                 return Ok(diagnostics);
             } else {
-                println!("[BSL LS] Pull diagnostics 'items' field missing or not array");
+                crate::app_log!("[BSL LS] Pull diagnostics 'items' field missing or not array");
             }
         }
 
         // Fallback or parallel: Listen for publishDiagnostics
-        println!("[BSL LS] Falling back to publishDiagnostics listener");
+        crate::app_log!("[BSL LS] Falling back to publishDiagnostics listener");
         let ws = self.ws.as_ref().ok_or("Not connected")?;
         let mut ws = ws.lock().await;
 
@@ -538,11 +573,11 @@ impl BSLClient {
                                 // Check if it is publishDiagnostics
                                 if let Some(method) = &response.method {
                                     if method == "textDocument/publishDiagnostics" {
-                                        println!("[BSL LS] Received publishDiagnostics");
+                                        crate::app_log!("[BSL LS] Received publishDiagnostics");
                                         if let Some(params) = response.params {
                                             // Ensure it's for our URI
                                             if let Some(diag_uri) = params.get("uri").and_then(|u| u.as_str()) {
-                                                println!("[BSL LS] Diagnostics URI: {}, Expected: {}", diag_uri, uri);
+                                                crate::app_log!("[BSL LS] Diagnostics URI: {}, Expected: {}", diag_uri, uri);
                                                 
                                                 // Normalize check: BSL LS might add drive letter
                                                 let filename = uri.split('/').last().unwrap_or(uri);
@@ -553,7 +588,7 @@ impl BSLClient {
                                                         .cloned()
                                                         .unwrap_or_default();
                                                     
-                                                    println!("[BSL LS] Found {} diagnostics", items.len());
+                                                    crate::app_log!("[BSL LS] Found {} diagnostics", items.len());
 
                                                     let diagnostics: Vec<Diagnostic> = items
                                                         .into_iter()
@@ -571,7 +606,7 @@ impl BSLClient {
                                                     };
                                                     if let Ok(msg) = serde_json::to_string(&close_req) {
                                                          let _ = ws.send(Message::Text(msg)).await;
-                                                         println!("[BSL LS] Sent didClose (manual)");
+                                                         crate::app_log!("[BSL LS] Sent didClose (manual)");
                                                     }
 
                                                     return Ok(diagnostics);
@@ -581,18 +616,18 @@ impl BSLClient {
                                     } else if method == "window/logMessage" {
                                         if let Some(params) = &response.params {
                                             let msg_text = params.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                                            println!("[BSL LS][server] {}", msg_text);
+                                            crate::app_log!("[BSL LS][server] {}", msg_text);
                                         }
                                     }
                                 }
                             }
                         }
                         Some(Err(e)) => {
-                            println!("[BSL LS] Error reading message: {}", e);
+                            crate::app_log!("[BSL LS] Error reading message: {}", e);
                             return Err(e.to_string());
                         }
                         None => {
-                            println!("[BSL LS] Connection closed by server");
+                            crate::app_log!("[BSL LS] Connection closed by server");
                             return Err("Connection closed".to_string());
                         }
                         _ => {
