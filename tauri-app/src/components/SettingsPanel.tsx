@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database, Bug } from 'lucide-react';
+import { X, Save, Cpu, RefreshCw, CheckCircle, Monitor, FileCode, Download, Database, Bug, AlertCircle, Info, ExternalLink, AlertTriangle, Terminal } from 'lucide-react';
 import { LLMSettings } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
 import { useProfiles, ProfileStore } from '../contexts/ProfileContext';
@@ -46,10 +46,17 @@ interface AppSettings {
     debug_mcp: boolean;
 }
 
+interface BslDiagnosticItem {
+    status: 'ok' | 'warn' | 'error';
+    title: string;
+    message: string;
+    suggestion?: string;
+}
+
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
-    initialTab?: 'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug';
+    initialTab?: 'configurator' | 'llm' | 'bsl' | 'mcp' | 'debug';
 }
 
 export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProps) {
@@ -73,6 +80,9 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     const [bslStatus, setBslStatus] = useState<BslStatus | null>(null);
     const [downloading, setDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState<number>(0);
+    const [diagnosing, setDiagnosing] = useState(false);
+    const [diagReport, setDiagReport] = useState<BslDiagnosticItem[] | null>(null);
+    const [showResetConfirm, setShowResetConfirm] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -151,22 +161,28 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
     // --- BSL Actions ---
     const browseJar = async () => {
-        const file = await open({
-            multiple: false,
-            filters: [{ name: 'JAR Files', extensions: ['jar'] }]
-        });
-        if (file && settings) {
-            setSettings({
-                ...settings,
-                bsl_server: { ...settings.bsl_server, jar_path: file as string }
+        try {
+            const file = await open({
+                multiple: false,
+                filters: [{ name: 'JAR Files', extensions: ['jar'] }],
+                directory: false
             });
+
+            // open() returns string | string[] | null
+            if (file && typeof file === 'string' && settings) {
+                setSettings({
+                    ...settings,
+                    bsl_server: { ...settings.bsl_server, jar_path: file }
+                });
+            }
+        } catch (error) {
+            console.error('Failed to open file dialog:', error);
         }
     };
 
     // --- BSL Download ---
     const handleDownloadBslLs = async () => {
         setDownloading(true);
-        setDownloadProgress(0);
 
         // Listen for progress events
         const unlisten = await listen<{ percent: number }>('bsl-download-progress', (event) => {
@@ -356,13 +372,16 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                                             </div>
                                             {downloading && (
                                                 <div className="mt-2 space-y-1">
-                                                    <div className="flex justify-between text-xs text-zinc-400">
-                                                        <span>Downloading BSL Language Server...</span>
+                                                    <div className="flex justify-between text-[10px] text-zinc-500 font-bold uppercase tracking-wider">
+                                                        <span className="flex items-center gap-1">
+                                                            <RefreshCw className="w-3 h-3 animate-spin" />
+                                                            Загрузка сервера...
+                                                        </span>
                                                         <span>{downloadProgress}%</span>
                                                     </div>
-                                                    <div className="w-full h-1.5 bg-zinc-700 rounded-full overflow-hidden">
+                                                    <div className="w-full h-1.5 bg-zinc-800 border border-zinc-700 rounded-full overflow-hidden">
                                                         <div
-                                                            className="h-full bg-green-500 transition-all duration-300"
+                                                            className="h-full bg-gradient-to-r from-blue-600 to-blue-400 transition-all duration-300"
                                                             style={{ width: `${downloadProgress}%` }}
                                                         />
                                                     </div>
@@ -399,29 +418,121 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                                 </section>
 
                                 <section>
-                                    <h3 className="text-lg font-medium mb-4">Status</h3>
-                                    <div className="bg-zinc-800/50 border border-zinc-700 rounded-xl p-5">
-                                        <div className="space-y-2 text-sm">
-                                            <div className="flex justify-between border-b border-zinc-800 pb-2">
-                                                <span className="text-zinc-400">Java Runtime:</span>
-                                                <span className={bslStatus?.java_info.includes('found') ? 'text-green-400' : 'text-red-400'}>
-                                                    {bslStatus?.java_info || 'Checking...'}
-                                                </span>
+                                    <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
+                                        <RefreshCw className={`w-5 h-5 ${bslStatus?.connected ? 'text-green-400' : 'text-zinc-500'}`} />
+                                        Состояние системы
+                                    </h3>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                                        {/* Java Runtime Card */}
+                                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-xl p-4 flex flex-col items-center text-center">
+                                            <div className={`p-2 rounded-full mb-3 ${bslStatus?.java_info.includes('version') ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                <Cpu className="w-5 h-5" />
                                             </div>
-                                            <div className="flex justify-between pt-2">
-                                                <span className="text-zinc-400">BSL Server JAR:</span>
-                                                <span className={bslStatus?.installed ? 'text-green-400' : 'text-red-400'}>
-                                                    {bslStatus?.installed ? 'Installed' : 'Not Found'}
-                                                </span>
+                                            <div className="text-xs text-zinc-500 font-medium uppercase mb-1">Java Runtime</div>
+                                            <div className="text-sm font-semibold truncate w-full" title={bslStatus?.java_info}>
+                                                {bslStatus?.java_info.includes('version') ? 'Установлена' : 'Не найдена'}
                                             </div>
-                                            <div className="flex justify-between pt-2">
-                                                <span className="text-zinc-400">LSP Connection:</span>
-                                                <span className={bslStatus?.connected ? 'text-green-400' : 'text-red-400'}>
-                                                    {bslStatus?.connected ? 'Connected' : 'Disconnected'}
-                                                </span>
+                                        </div>
+
+                                        {/* BSL JAR Card */}
+                                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-xl p-4 flex flex-col items-center text-center">
+                                            <div className={`p-2 rounded-full mb-3 ${bslStatus?.installed ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                <FileCode className="w-5 h-5" />
+                                            </div>
+                                            <div className="text-xs text-zinc-500 font-medium uppercase mb-1">BSL Server</div>
+                                            <div className="text-sm font-semibold">
+                                                {bslStatus?.installed ? 'Готов' : 'Отсутствует'}
+                                            </div>
+                                        </div>
+
+                                        {/* Connection Card */}
+                                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-xl p-4 flex flex-col items-center text-center">
+                                            <div className={`p-2 rounded-full mb-3 ${bslStatus?.connected ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                <RefreshCw className={`w-5 h-5 ${bslStatus?.connected ? 'animate-spin-slow' : ''}`} />
+                                            </div>
+                                            <div className="text-xs text-zinc-500 font-medium uppercase mb-1">LSP Статус</div>
+                                            <div className="text-sm font-semibold">
+                                                {bslStatus?.connected ? 'Online' : 'Offline'}
                                             </div>
                                         </div>
                                     </div>
+
+                                    {/* Diagnose button */}
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={async () => {
+                                                setDiagnosing(true);
+                                                setDiagReport(null);
+                                                try {
+                                                    const report = await invoke<BslDiagnosticItem[]>('diagnose_bsl_ls_cmd');
+                                                    setDiagReport(report);
+                                                } catch (e) {
+                                                    // Fallback for unexpected errors
+                                                    setDiagReport([{
+                                                        status: 'error',
+                                                        title: 'Системная ошибка',
+                                                        message: String(e)
+                                                    }]);
+                                                }
+                                                setDiagnosing(false);
+                                            }}
+                                            disabled={diagnosing}
+                                            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+                                        >
+                                            <Terminal className={`w-4 h-4 ${diagnosing ? 'animate-pulse' : ''}`} />
+                                            {diagnosing ? 'Выполняется диагностика...' : 'Запустить диагностику'}
+                                        </button>
+
+                                        <button
+                                            onClick={refreshBslStatus}
+                                            className="p-2.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-all"
+                                            title="Обновить статус"
+                                        >
+                                            <RefreshCw className="w-4 h-4" />
+                                        </button>
+                                    </div>
+
+                                    {/* Diagnostic report */}
+                                    {diagReport && (
+                                        <div className="mt-6 space-y-3 animate-in fade-in slide-in-from-top-4 duration-300">
+                                            <div className="flex items-center justify-between">
+                                                <h4 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Результаты диагностики</h4>
+                                                <button onClick={() => setDiagReport(null)} className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">Очистить</button>
+                                            </div>
+
+                                            <div className="space-y-3">
+                                                {diagReport.map((item, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        className={`p-4 rounded-xl border flex gap-4 ${item.status === 'ok' ? 'bg-green-500/5 border-green-500/20' :
+                                                            item.status === 'warn' ? 'bg-amber-500/5 border-amber-500/20' :
+                                                                'bg-red-500/5 border-red-500/20'
+                                                            }`}
+                                                    >
+                                                        <div className={`shrink-0 p-2 h-fit rounded-lg ${item.status === 'ok' ? 'bg-green-500/10 text-green-400' :
+                                                            item.status === 'warn' ? 'bg-amber-500/10 text-amber-400' :
+                                                                'bg-red-500/10 text-red-400'
+                                                            }`}>
+                                                            {item.status === 'ok' ? <CheckCircle className="w-5 h-5" /> :
+                                                                item.status === 'warn' ? <AlertTriangle className="w-5 h-5" /> :
+                                                                    <AlertCircle className="w-5 h-5" />}
+                                                        </div>
+                                                        <div className="flex-1 space-y-1">
+                                                            <div className="font-semibold text-sm">{item.title}</div>
+                                                            <div className="text-sm text-zinc-400 leading-relaxed">{item.message}</div>
+                                                            {item.suggestion && (
+                                                                <div className="mt-2 text-xs flex items-start gap-2 text-zinc-300 bg-white/5 p-2 rounded-lg">
+                                                                    <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-400" />
+                                                                    <div>{item.suggestion}</div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </section>
                             </div>
                         </div>
@@ -451,6 +562,48 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                                     <div className="bg-zinc-800/50 border border-zinc-700 rounded-xl p-5 space-y-4">
                                         <div className="flex items-center justify-between">
                                             <div>
+                                                <div className="font-medium text-zinc-200">Reset Onboarding</div>
+                                                <div className="text-xs text-zinc-500">Reset the "first run" flag to show the wizard again on next restart.</div>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                {!showResetConfirm ? (
+                                                    <button
+                                                        onClick={() => setShowResetConfirm(true)}
+                                                        className="px-3 py-1 bg-red-900/40 text-red-300 border border-red-800/50 rounded-lg text-xs hover:bg-red-800/60 transition-colors"
+                                                    >
+                                                        Reset Onboarding
+                                                    </button>
+                                                ) : (
+                                                    <div className="flex items-center gap-2 bg-red-950/40 border border-red-900/50 rounded-lg p-1 animate-in fade-in zoom-in-95 duration-200">
+                                                        <span className="text-[10px] uppercase font-bold text-red-400 px-2">Are you sure?</span>
+                                                        <button
+                                                            onClick={async () => {
+                                                                await invoke('reset_onboarding');
+                                                                window.location.reload();
+                                                            }}
+                                                            className="px-3 py-1 bg-red-600 text-white rounded-md text-xs font-bold hover:bg-red-500 transition-colors"
+                                                        >
+                                                            YES, RESET
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setShowResetConfirm(false)}
+                                                            className="px-3 py-1 bg-zinc-800 text-zinc-300 rounded-md text-xs hover:bg-zinc-700 transition-colors"
+                                                        >
+                                                            NO
+                                                        </button>
+                                                    </div>
+                                                )}
+                                                <button
+                                                    onClick={() => window.location.reload()}
+                                                    className="px-3 py-1 bg-zinc-800 border border-zinc-700 rounded-lg text-xs hover:bg-zinc-700 transition-colors"
+                                                >
+                                                    Reload App
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center justify-between pt-4 border-t border-zinc-700">
+                                            <div>
                                                 <div className="font-medium">MCP Verbose Logging</div>
                                                 <div className="text-xs text-zinc-500">Log all SSE events and tool payloads to terminal. Can impact performance.</div>
                                             </div>
@@ -463,19 +616,21 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
                                         <div className="flex items-center justify-between pt-4 border-t border-zinc-700">
                                             <div>
-                                                <div className="font-medium text-zinc-200">Reset Onboarding</div>
-                                                <div className="text-xs text-zinc-500">Reset the "first run" flag to show the wizard again on next restart.</div>
+                                                <div className="font-medium text-zinc-200">System Logs</div>
+                                                <div className="text-xs text-zinc-500">Экспорт всех логов приложения и серверов (BSL LS, MCP) в текстовый файл.</div>
                                             </div>
                                             <button
                                                 onClick={async () => {
-                                                    if (confirm('Are you sure you want to reset onboarding status? The application will reload.')) {
-                                                        await invoke('reset_onboarding');
-                                                        window.location.reload();
+                                                    try {
+                                                        await invoke('save_debug_logs');
+                                                    } catch (e) {
+                                                        console.error('Failed to save logs:', e);
                                                     }
                                                 }}
-                                                className="px-3 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/30 rounded-lg text-sm transition-colors"
+                                                className="flex items-center gap-2 px-3 py-1 bg-zinc-700 text-zinc-200 border border-zinc-600 rounded-lg text-xs hover:bg-zinc-600 transition-colors"
                                             >
-                                                Reset Wizard
+                                                <Save className="w-4 h-4" />
+                                                Save Logs
                                             </button>
                                         </div>
                                     </div>

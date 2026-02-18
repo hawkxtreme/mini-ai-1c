@@ -32,6 +32,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const [modelList, setModelList] = useState<any[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
     const [connectionTest, setConnectionTest] = useState<string | null>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const [showSaved, setShowSaved] = useState(false);
 
     // Select profile to edit
     // Select profile to edit
@@ -64,15 +66,20 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const handleSave = async () => {
         if (!editForm) return;
 
+        setIsSaving(true);
+        setShowSaved(false);
         try {
             await invoke('save_profile', {
                 profile: editForm,
                 apiKey: newApiKey || null
             });
             onUpdate();
-            alert('Profile saved!');
+            setShowSaved(true);
+            setTimeout(() => setShowSaved(false), 3000);
         } catch (e) {
             alert('Failed to save: ' + e);
+        } finally {
+            setIsSaving(false);
         }
     };
 
@@ -374,12 +381,27 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         <div className="pt-4">
                             <button
                                 onClick={handleSave}
-                                className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-md font-medium flex items-center justify-center gap-2"
+                                disabled={isSaving}
+                                className={`w-full py-2 ${showSaved ? 'bg-green-600 hover:bg-green-500' : 'bg-blue-600 hover:bg-blue-500'} text-white rounded-md font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50`}
                             >
-                                <Save className="w-4 h-4" /> Save Profile
+                                {isSaving ? (
+                                    <>
+                                        <RefreshCw className="w-4 h-4 animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : showSaved ? (
+                                    <>
+                                        <Check className="w-4 h-4" />
+                                        Saved!
+                                    </>
+                                ) : (
+                                    <>
+                                        <Save className="w-4 h-4" />
+                                        Save Profile
+                                    </>
+                                )}
                             </button>
                         </div>
-
                     </div>
                 ) : (
                     <div className="h-full flex items-center justify-center text-zinc-500">

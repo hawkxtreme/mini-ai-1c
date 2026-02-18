@@ -47,8 +47,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
     // Ensure pre-installed servers exist
     useEffect(() => {
-        const naparnikArgs = ['tsx', 'src/mcp-servers/1c-naparnik.ts'];
-        const metadataArgs = ['tsx', 'src/mcp-servers/1c-metadata.ts'];
+        // Use npx --yes to auto-install tsx without prompting (cached after first run)
+        const naparnikArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-naparnik.ts'];
+        const metadataArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-metadata.ts'];
 
         let updatedServers = [...servers];
         let needsUpdate = false;
@@ -66,9 +67,14 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                 env: { 'ONEC_AI_TOKEN': '' }
             });
             needsUpdate = true;
-        } else if (JSON.stringify(updatedServers[naparnikIndex].args) !== JSON.stringify(naparnikArgs)) {
-            updatedServers[naparnikIndex] = { ...updatedServers[naparnikIndex], args: naparnikArgs };
-            needsUpdate = true;
+        } else {
+            const srv = updatedServers[naparnikIndex];
+            // Migrate from node_modules/.bin/tsx to npx
+            const needsCommandFix = srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(naparnikArgs);
+            if (needsCommandFix) {
+                updatedServers[naparnikIndex] = { ...srv, command: 'npx', args: naparnikArgs };
+                needsUpdate = true;
+            }
         }
 
         // Check Metadata
@@ -84,9 +90,14 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                 env: { 'ONEC_METADATA_URL': 'http://localhost/base/hs/mcp', 'ONEC_USERNAME': '', 'ONEC_PASSWORD': '' }
             });
             needsUpdate = true;
-        } else if (JSON.stringify(updatedServers[metadataIndex].args) !== JSON.stringify(metadataArgs)) {
-            updatedServers[metadataIndex] = { ...updatedServers[metadataIndex], args: metadataArgs };
-            needsUpdate = true;
+        } else {
+            const srv = updatedServers[metadataIndex];
+            // Migrate from node_modules/.bin/tsx to npx
+            const needsCommandFix = srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(metadataArgs);
+            if (needsCommandFix) {
+                updatedServers[metadataIndex] = { ...srv, command: 'npx', args: metadataArgs };
+                needsUpdate = true;
+            }
         }
 
         // Check BSL LS

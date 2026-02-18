@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm_profiles::{self, LLMProfile, ProfileStore};
 use crate::settings::{self, AppSettings};
+use tokio_tungstenite::connect_async;
+use std::time::Duration;
 
 
 /// Chat message structure
@@ -17,7 +19,7 @@ pub struct ChatMessage {
 /// Get application settings
 #[tauri::command]
 pub fn get_settings() -> AppSettings {
-    println!("[DEBUG] get_settings called");
+    crate::app_log!("[DEBUG] get_settings called");
     settings::load_settings()
 }
 
@@ -491,6 +493,7 @@ pub async fn analyze_bsl(
     code: String,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<Vec<BSLDiagnostic>, String> {
+    crate::app_log!("[BSL] Requesting analysis of {} chars", code.len());
     let mut client = state.inner().lock().await;
     
     // Ensure connected
@@ -530,6 +533,7 @@ pub async fn format_bsl(
     code: String, 
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>
 ) -> Result<String, String> {
+    crate::app_log!("[BSL] Requesting format of {} chars", code.len());
     let mut client = state.inner().lock().await;
     
     // Ensure connected
@@ -587,6 +591,7 @@ pub fn check_selection_state(hwnd: isize) -> bool {
 /// Get code from 1C Configurator window
 #[tauri::command]
 pub fn get_code_from_configurator(hwnd: isize, use_select_all: Option<bool>) -> Result<String, String> {
+    crate::app_log!("[1C] get_code (HWND: {}, select_all: {:?})", hwnd, use_select_all);
     #[cfg(windows)]
     {
         use crate::configurator;
@@ -621,6 +626,7 @@ pub async fn paste_code_to_configurator(
     use_select_all: Option<bool>,
     original_content: Option<String>,
 ) -> Result<(), String> {
+    crate::app_log!("[1C] paste_code (HWND: {}, len: {})", hwnd, code.len());
     #[cfg(windows)]
     {
         use crate::configurator;
@@ -656,6 +662,7 @@ pub async fn paste_code_to_configurator(
 /// Undo last code change in 1C Configurator
 #[tauri::command]
 pub async fn undo_last_change(hwnd: isize) -> Result<(), String> {
+    crate::app_log!("[1C] undo_last_change (HWND: {})", hwnd);
     #[cfg(windows)]
     {
         use crate::configurator;
@@ -872,48 +879,244 @@ pub async fn reconnect_bsl_ls_cmd(
 }
 
 /// Diagnose BSL LS launch issues
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BslDiagnosticItem {
+    pub status: String, // "ok", "warn", "error"
+    pub title: String,
+    pub message: String,
+    pub suggestion: Option<String>,
+}
+
 #[tauri::command]
-pub async fn diagnose_bsl_ls_cmd() -> String {
+pub async fn diagnose_bsl_ls_cmd() -> Vec<BslDiagnosticItem> {
     let settings = settings::load_settings();
-    let mut report = String::new();
+    let mut report = Vec::new();
 
-    report.push_str(&format!("Java Path: {}\n", settings.bsl_server.java_path));
-    report.push_str(&format!("JAR Path: {}\n", settings.bsl_server.jar_path));
-
-    let jar_exists = std::path::Path::new(&settings.bsl_server.jar_path).exists();
-    report.push_str(&format!("JAR Exists: {}\n", jar_exists));
-
-    if !jar_exists {
-        return report;
-    }
-
-    report.push_str("Attempting to spawn process...\n");
-    
-    let mut cmd = std::process::Command::new(&settings.bsl_server.java_path);
-    cmd.args([
-        "-jar",
-        &settings.bsl_server.jar_path,
-        "--help"
-    ]);
-
+    // 1. Check Java version
+    let mut java_cmd = std::process::Command::new(&settings.bsl_server.java_path);
+    java_cmd.arg("-version");
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // NO_WINDOW
+        java_cmd.creation_flags(0x08000000);
     }
 
-    match cmd.output() {
+    match java_cmd.output() {
         Ok(output) => {
-            report.push_str(&format!("Exit Status: {}\n", output.status));
-            report.push_str(&format!("Stdout: {}\n", String::from_utf8_lossy(&output.stdout)));
-            report.push_str(&format!("Stderr: {}\n", String::from_utf8_lossy(&output.stderr)));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let version_line = stderr.lines().next().unwrap_or("unknown").to_string();
+            
+            // Parse Java major version
+            let java_version = parse_java_major_version(&stderr);
+            if let Some(ver) = java_version {
+                if ver < 17 {
+                    report.push(BslDiagnosticItem {
+                        status: "error".to_string(),
+                        title: "Несовместимая версия Java".to_string(),
+                        message: format!("Найдена Java {}, но требуется версия 17 или выше.", ver),
+                        suggestion: Some("Установите Java 17+ (например, Eclipse Temurin) или winget install EclipseAdoptium.Temurin.17.JDK".to_string()),
+                    });
+                } else {
+                    report.push(BslDiagnosticItem {
+                        status: "ok".to_string(),
+                        title: "Java Runtime".to_string(),
+                        message: format!("Найдена совместимая версия: {}", version_line),
+                        suggestion: None,
+                    });
+                }
+            } else {
+                report.push(BslDiagnosticItem {
+                    status: "warn".to_string(),
+                    title: "Версия Java".to_string(),
+                    message: format!("Java найдена ({}), но не удалось определить мажорную версию.", version_line),
+                    suggestion: Some("Убедитесь, что у вас установлена Java 17 или выше.".to_string()),
+                });
+            }
         }
         Err(e) => {
-            report.push_str(&format!("Failed to execute: {}\n", e));
+            report.push(BslDiagnosticItem {
+                status: "error".to_string(),
+                title: "Java не найдена".to_string(),
+                message: format!("Ошибка при поиске Java по пути '{}': {}", settings.bsl_server.java_path, e),
+                suggestion: Some("Установите Java 17+ и укажите корректный путь в настройках.".to_string()),
+            });
+        }
+    }
+
+    // 2. Check JAR
+    let jar_path_str = &settings.bsl_server.jar_path;
+    let jar_path = std::path::Path::new(jar_path_str);
+    if jar_path.exists() {
+        if let Ok(meta) = std::fs::metadata(jar_path) {
+            let size_mb = meta.len() as f64 / 1024.0 / 1024.0;
+            if size_mb < 1.0 {
+                report.push(BslDiagnosticItem {
+                    status: "error".to_string(),
+                    title: "JAR файл поврежден".to_string(),
+                    message: format!("Файл найден, но его размер ({:.2} МБ) слишком мал.", size_mb),
+                    suggestion: Some("Удалите файл и нажмите 'Download' в настройках BSL Server.".to_string()),
+                });
+            } else {
+                report.push(BslDiagnosticItem {
+                    status: "ok".to_string(),
+                    title: "BSL Server JAR".to_string(),
+                    message: format!("Файл найден и готов к работе ({:.1} МБ).", size_mb),
+                    suggestion: None,
+                });
+
+                // 3. Try to run JAR with --help to verify execution
+                let mut test_cmd = std::process::Command::new(&settings.bsl_server.java_path);
+                test_cmd.args(["-jar", jar_path_str, "--help"]);
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    test_cmd.creation_flags(0x08000000);
+                }
+
+                match test_cmd.output() {
+                    Ok(output) => {
+                        if output.status.success() {
+                            report.push(BslDiagnosticItem {
+                                status: "ok".to_string(),
+                                title: "Запуск сервера".to_string(),
+                                message: "Тестовый запуск JAR прошел успешно.".to_string(),
+                                suggestion: None,
+                            });
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let error_msg = if stderr.contains("UnsupportedClassVersionError") {
+                                "Несовместимая версия Java при попытке запуска JAR.".to_string()
+                            } else {
+                                format!("Сервер не запустился (код: {}).", output.status)
+                            };
+                            
+                            report.push(BslDiagnosticItem {
+                                status: "error".to_string(),
+                                title: "Ошибка запуска JAR".to_string(),
+                                message: error_msg,
+                                suggestion: Some("Проверьте версию Java (требуется 17+) или целостность JAR-файла.".to_string()),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        report.push(BslDiagnosticItem {
+                            status: "error".to_string(),
+                            title: "Ошибка выполнения".to_string(),
+                            message: format!("Не удалось запустить процесс: {}", e),
+                            suggestion: Some("Убедитесь, что Java установлена и путь к ней корректен.".to_string()),
+                        });
+                    }
+                }
+            }
+        }
+    } else {
+        report.push(BslDiagnosticItem {
+            status: "error".to_string(),
+            title: "JAR файл не найден".to_string(),
+            message: format!("По пути '{}' ничего не найдено.", jar_path_str),
+            suggestion: Some("Нажмите 'Download' в настройках BSL Server для загрузки.".to_string()),
+        });
+    }
+
+    // 4. Check port availability and respond
+    let port = settings.bsl_server.websocket_port;
+    let url = format!("http://127.0.0.1:{}", port);
+    
+    match std::net::TcpListener::bind(format!("127.0.0.1:{}", port)) {
+        Ok(_) => {
+            report.push(BslDiagnosticItem {
+                status: "warn".to_string(),
+                title: "Сетевой порт".to_string(),
+                message: format!("Порт {} свободен. Это значит, что сервер BSL сейчас НЕ запущен.", port),
+                suggestion: Some("Попробуйте нажать 'Reconnect' или 'Save Settings' для запуска сервера.".to_string()),
+            });
+        },
+        Err(_) => {
+            // Port is busy, let's check if it's our server
+            report.push(BslDiagnosticItem {
+                status: "ok".to_string(),
+                title: "Сетевой порт".to_string(),
+                message: format!("Порт {} занят (сервер запущен).", port),
+                suggestion: None,
+            });
+
+            // Try to connect via HTTP to check if it's alive
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap_or_default();
+            
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    report.push(BslDiagnosticItem {
+                        status: "ok".to_string(),
+                        title: "HTTP ответ".to_string(),
+                        message: format!("Сервер ответил по HTTP (статус: {}).", status),
+                        suggestion: None,
+                    });
+                },
+                Err(e) => {
+                    report.push(BslDiagnosticItem {
+                        status: "error".to_string(),
+                        title: "Ошибка HTTP".to_string(),
+                        message: format!("Порт занят, но сервер не отвечает на HTTP запрос: {}", e),
+                        suggestion: Some("Возможно, порт занят другим приложением или сервер завис.".to_string()),
+                    });
+                }
+            }
+
+            // Try WebSocket handshake
+            let ws_url = format!("ws://127.0.0.1:{}/lsp", port);
+            match tokio::time::timeout(Duration::from_secs(3), connect_async(&ws_url)).await {
+                Ok(Ok(_)) => {
+                    report.push(BslDiagnosticItem {
+                        status: "ok".to_string(),
+                        title: "WebSocket соединение".to_string(),
+                        message: "WebSocket рукопожатие прошло успешно.".to_string(),
+                        suggestion: None,
+                    });
+                },
+                Ok(Err(e)) => {
+                    report.push(BslDiagnosticItem {
+                        status: "error".to_string(),
+                        title: "Ошибка WebSocket".to_string(),
+                        message: format!("Не удалось установить WebSocket соединение: {}", e),
+                        suggestion: Some("Проверьте настройки брандмауэра или антивируса. Также убедитесь, что URL '/lsp' корректен.".to_string()),
+                    });
+                },
+                Err(_) => {
+                    report.push(BslDiagnosticItem {
+                        status: "error".to_string(),
+                        title: "Таймаут WebSocket".to_string(),
+                        message: "Превышено время ожидания WebSocket рукопожатия (3 сек).".to_string(),
+                        suggestion: Some("Это часто случается на перегруженных системах или при блокировке сетевого трафика. Попробуйте перезапустить приложение.".to_string()),
+                    });
+                }
+            }
         }
     }
 
     report
+}
+
+/// Parse major Java version from `java -version` output
+fn parse_java_major_version(version_output: &str) -> Option<u32> {
+    // Patterns: "11.0.20", "17.0.8", "1.8.0_381"
+    for line in version_output.lines() {
+        if let Some(start) = line.find('"') {
+            if let Some(end) = line[start+1..].find('"') {
+                let ver_str = &line[start+1..start+1+end];
+                // Handle "1.8.0_xxx" format (Java 8)
+                if ver_str.starts_with("1.") {
+                    return ver_str.split('.').nth(1)?.parse().ok();
+                }
+                // Handle "11.0.20", "17.0.8" format
+                return ver_str.split('.').next()?.parse().ok();
+            }
+        }
+    }
+    None
 }
 
 // scenario_test_cmd removed
@@ -958,6 +1161,28 @@ pub async fn get_mcp_server_statuses() -> Result<Vec<McpServerStatus>, String> {
 #[tauri::command]
 pub async fn get_mcp_server_logs(server_id: String) -> Result<Vec<String>, String> {
     Ok(crate::mcp_client::McpManager::get_logs(&server_id).await)
+}
+
+/// Save all debug logs to a file
+#[tauri::command]
+pub async fn save_debug_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+    
+    let logs = crate::logger::get_all_logs();
+    
+    let file_path = app_handle.dialog()
+        .file()
+        .add_filter("Text", &["txt"])
+        .set_file_name("mini-ai-1c-logs.txt")
+        .blocking_save_file();
+        
+    if let Some(path) = file_path {
+        std::fs::write(path.to_string(), logs)
+            .map_err(|e| format!("Failed to write logs: {}", e))?;
+        crate::app_log!("Logs saved successfully to {}", path.to_string());
+    }
+    
+    Ok(())
 }
 
 /// Call an MCP tool on a specific server

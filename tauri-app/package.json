@@ -8,8 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "mini-ai-1c": "tauri",
-    "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:dev": "npm run build:mcp && tauri dev",
+    "app:build": "npm run build:mcp && tauri build",
+    "build:mcp": "powershell -Command \"if (!(Test-Path src-tauri/mcp-servers)) { New-Item -ItemType Directory src-tauri/mcp-servers }; Copy-Item src/mcp-servers/*.ts src-tauri/mcp-servers/ -Force\" && npx esbuild src/mcp-servers/1c-naparnik.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-naparnik.js && npx esbuild src/mcp-servers/1c-metadata.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-metadata.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -44,6 +45,7 @@
     "autoprefixer": "^10.4.24",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
+    "tsx": "^4.21.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }

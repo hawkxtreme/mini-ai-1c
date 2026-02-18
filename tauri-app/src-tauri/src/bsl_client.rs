@@ -3,11 +3,13 @@
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::process::{Child, Command, Stdio};
+use tokio::process::{Child, Command as AsyncCommand};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use std::time::Duration;
 
 use crate::settings::load_settings;
 use crate::mcp_client::{InternalMcpHandler, McpTool};
@@ -128,9 +130,9 @@ impl BSLClient {
         let port = Self::find_available_port(preferred_port);
         self.actual_port = Some(port);
 
-        println!("[BSL LS] Starting on port {} (preferred was {})", port, preferred_port);
+        crate::app_log!("[BSL LS] Starting on port {} (preferred was {})", port, preferred_port);
         
-        let mut cmd = Command::new(&settings.bsl_server.java_path);
+        let mut cmd = AsyncCommand::new(&settings.bsl_server.java_path);
         cmd.args([
                 // Increase WebSocket message buffer from 8KB default to 1MB
                 "-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576",
@@ -142,19 +144,40 @@ impl BSLClient {
                 "websocket",
                 &format!("--server.port={}", port),
             ])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
 
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| format!("Failed to start BSL LS: {}", e))?;
         
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        // Task to read stdout
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                crate::app_log!("[BSL LS][STDOUT] {}", line);
+            }
+        });
+
+        // Task to read stderr
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                crate::app_log!("[BSL LS][STDERR] {}", line);
+            }
+        });
+        
         self.server_process = Some(child);
+        crate::app_log!("BSL LS process spawned");
         Ok(())
     }
 
@@ -165,29 +188,47 @@ impl BSLClient {
         });
         let url = format!("ws://127.0.0.1:{}/lsp", port);
         
+        crate::app_log!("[BSL LS] Attempting to connect to {}", url);
+        
         let mut retries = 0;
         let max_retries = 30; // 15 seconds total
         
         loop {
-            match connect_async(&url).await {
-                Ok((ws_stream, _)) => {
+            // Add timeout to connect_async to prevent hang during handshake (common in terminal servers)
+            let connect_timeout = tokio::time::timeout(
+                tokio::time::Duration::from_secs(3),
+                connect_async(&url)
+            ).await;
+
+            match connect_timeout {
+                Ok(Ok((ws_stream, _))) => {
+                    crate::app_log!("[BSL LS] WebSocket connected successfully to {}", url);
                     self.ws = Some(Mutex::new(ws_stream));
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     retries += 1;
                     if retries >= max_retries {
+                         crate::app_log!("[BSL LS] Connection FAILED after {} attempts. Last error: {}", max_retries, e);
                          return Err(format!("Failed to connect to BSL LS after {} attempts: {}", max_retries, e));
                     }
                     if retries % 5 == 0 {
-                        println!("BSL LS connection attempt {}/{}... (retrying in 500ms)", retries, max_retries);
+                        crate::app_log!("[BSL LS] connection attempt {}/{}... (error: {})", retries, max_retries, e);
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+                Err(_) => {
+                    retries += 1;
+                    crate::app_log!("[BSL LS] Connection HANDSHAKE TIMEOUT (3s) at {}/{}", retries, max_retries);
+                    if retries >= max_retries {
+                        return Err(format!("Failed to connect to BSL LS (Handshake Timeout) after {} attempts", max_retries));
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
             }
         }
         
-        // Initialize LSP with proper capabilities
+        crate::app_log!("[BSL LS] Initializing LSP handshake...");
         let client_capabilities = serde_json::json!({
             "workspace": {
                 "configuration": true,
@@ -247,7 +288,7 @@ impl BSLClient {
         
         // Store server capabilities
         self.capabilities = initialize_result.get("capabilities").cloned();
-        println!("[BSL LS] Initialized. Server capabilities: {:?}", self.capabilities.as_ref().map(|c| c.to_string()));
+        crate::app_log!("[BSL LS] Initialized. Server capabilities: {:?}", self.capabilities.as_ref().map(|c| c.to_string()));
 
         // Notify initialized and pump server messages for 1 second
         {
@@ -262,22 +303,24 @@ impl BSLClient {
             };
             if let Ok(msg) = serde_json::to_string(&init_notif) {
                 ws.send(Message::Text(msg)).await.map_err(|e| e.to_string())?;
-                println!("[BSL LS] Sent initialized notification");
+                crate::app_log!("[BSL LS] Sent 'initialized' notification");
             }
 
             // Quick drain for server-initiated requests (configuration, etc.)
-            let drain_timeout = tokio::time::sleep(tokio::time::Duration::from_millis(500));
+            let drain_duration = tokio::time::Duration::from_millis(800);
+            let drain_timeout = tokio::time::sleep(drain_duration);
             tokio::pin!(drain_timeout);
             loop {
                 tokio::select! {
                     msg = ws.next() => {
                         match msg {
                             Some(Ok(Message::Text(text))) => {
+                                crate::app_log!("[BSL LS] <<< Initial drain msg: {}", text);
                                 if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&text) {
                                     if resp.method.is_some() && resp.id.is_some() {
                                         let method = resp.method.as_ref().unwrap();
                                         let id = resp.id.unwrap();
-                                        println!("[BSL LS] <<< Server request: {} id={}", method, id);
+                                        crate::app_log!("[BSL LS] Handling server request during drain: {} id={}", method, id);
                                         Self::handle_server_request(&mut ws, method, id, &resp.params).await;
                                         continue;
                                     }
@@ -302,11 +345,13 @@ impl BSLClient {
             "result": result
         });
         let msg = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+        crate::app_log!("[BSL LS] >>> Sending response for id={}: {}", id, msg);
         ws.send(Message::Text(msg)).await.map_err(|e| e.to_string())
     }
 
     /// Handle server-initiated requests
     async fn handle_server_request(ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>, method: &str, id: i32, _params: &Option<serde_json::Value>) {
+        crate::app_log!("[BSL LS] Server requested: {} (id={})", method, id);
         match method {
             "workspace/configuration" => {
                 // Return default configuration
@@ -326,13 +371,13 @@ impl BSLClient {
                 let _ = Self::send_response_raw(ws, id, serde_json::json!({})).await;
             }
             _ => {
-                println!("[BSL LS] Warning: Unhandled server request: {}", method);
+                crate::app_log!("[BSL LS] Warning: Unhandled server request: {}", method);
                 let _ = Self::send_response_raw(ws, id, serde_json::Value::Null).await;
             }
         }
     }
 
-    /// Send JSON-RPC request
+    /// Send JSON-RPC request with timeout
     async fn send_request(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = self.ws.as_ref().ok_or("Not connected")?;
         let mut ws = ws.lock().await;
@@ -346,14 +391,21 @@ impl BSLClient {
         };
         
         let msg = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+        crate::app_log!("[BSL LS] >>> Request {}: {}", method, msg);
         ws.send(Message::Text(msg))
             .await
             .map_err(|e| e.to_string())?;
         
-        // Wait for response
-        while let Some(msg) = ws.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
+        // Wait for response with overall timeout
+        let request_timeout = Duration::from_secs(15);
+        let start = std::time::Instant::now();
+        
+        while start.elapsed() < request_timeout {
+            let next_msg_timeout = tokio::time::timeout(Duration::from_secs(5), ws.next());
+            
+            match next_msg_timeout.await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    crate::app_log!("[BSL LS] <<< Message: {}", text);
                     if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
                         // Server request
                         if response.method.is_some() && response.id.is_some() {
@@ -366,18 +418,31 @@ impl BSLClient {
                         // Response for our request
                         if response.id == Some(id) {
                             if let Some(error) = response.error {
+                                crate::app_log!("[BSL LS] LSP error response: {:?}", error);
                                 return Err(format!("LSP error {}: {}", error.code, error.message));
                             }
                             return Ok(response.result.unwrap_or(serde_json::Value::Null));
                         }
                     }
                 }
-                Err(e) => return Err(e.to_string()),
+                Ok(Some(Err(e))) => {
+                    crate::app_log!("[BSL LS] WebSocket error: {}", e);
+                    return Err(e.to_string());
+                }
+                Ok(None) => {
+                    crate::app_log!("[BSL LS] WebSocket closed while waiting for response");
+                    return Err("Connection closed".to_string());
+                }
+                Err(_) => {
+                    // next_msg_timeout triggered
+                    crate::app_log!("[BSL LS] No message for 5s (total elapsed: {:?})", start.elapsed());
+                }
                 _ => {}
             }
         }
         
-        Err("No response from BSL LS".to_string())
+        crate::app_log!("[BSL LS] TIMEOUT (15s) waiting for response to '{}' request", method);
+        Err(format!("Timeout waiting for BSL LS response to '{}'", method))
     }
 
     /// Send JSON-RPC notification
@@ -740,13 +805,31 @@ impl BSLClient {
     /// Stop the server
     pub fn stop(&mut self) {
         if let Some(mut child) = self.server_process.take() {
+             // Try to send exit notification if WS is still alive
+             if let Some(ws_mutex) = self.ws.take() {
+                 tokio::spawn(async move {
+                     let mut ws = ws_mutex.lock().await;
+                     let exit_notif = JsonRpcRequest {
+                         jsonrpc: "2.0".to_string(),
+                         id: None,
+                         method: "exit".to_string(),
+                         params: serde_json::json!({}),
+                     };
+                     if let Ok(msg) = serde_json::to_string(&exit_notif) {
+                         let _ = ws.send(Message::Text(msg)).await;
+                     }
+                     // Give it a tiny bit of time to breathe
+                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                 });
+             }
+
             let _ = child.kill();
         }
     }
 
     /// Check if Java is installed and retrieve version
     pub fn check_java(java_path: &str) -> String {
-        let mut cmd = Command::new(java_path);
+        let mut cmd = StdCommand::new(java_path);
         cmd.arg("-version");
         
         #[cfg(target_os = "windows")]

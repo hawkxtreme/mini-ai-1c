@@ -125,7 +125,9 @@ pub struct ModelSettings {
 
 /// Get the settings directory path
 pub fn get_settings_dir() -> PathBuf {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    // Use data_local_dir instead of config_dir to avoid UNC paths on terminal servers
+    // data_local_dir points to %LOCALAPPDATA% which is always local, not roaming
+    let config_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     config_dir.join("MiniAI1C")
 }
 
@@ -137,7 +139,7 @@ pub fn get_settings_file() -> PathBuf {
 /// Load settings from file
 pub fn load_settings() -> AppSettings {
     let path = get_settings_file();
-    if path.exists() {
+    let mut settings = if path.exists() {
         match fs::read_to_string(&path) {
             Ok(content) => {
                 serde_json::from_str(&content).unwrap_or_default()
@@ -146,7 +148,25 @@ pub fn load_settings() -> AppSettings {
         }
     } else {
         AppSettings::default()
+    };
+
+    // Migration: Cleanup stale node_modules paths in MCP servers
+    let mut modified = false;
+    for server in settings.mcp_servers.iter_mut() {
+        if let Some(cmd) = &server.command {
+            if cmd.contains("node_modules") {
+                crate::app_log!("[DEBUG] Migrating stale command '{}' to 'npx' for MCP server '{}'", cmd, server.id);
+                server.command = Some("npx".to_string());
+                modified = true;
+            }
+        }
     }
+
+    if modified {
+        let _ = save_settings(&settings);
+    }
+
+    settings
 }
 
 /// Save settings to file

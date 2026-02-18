@@ -189,7 +189,7 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
             Ok(client) => {
                 match client.list_tools().await {
                     Ok(tools) => {
-                        println!("[MCP][TOOLS] Server {} returned {} tools.", config.name, tools.len());
+                        crate::app_log!("[MCP][TOOLS] Server {} returned {} tools.", config.name, tools.len());
                         for tool in tools {
                             // 1. Sanitize Name (only alphanumeric, underscore, hyphen)
                             let name = tool.name.chars()
@@ -197,13 +197,13 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
                                 .collect::<String>();
                             
                             if name.is_empty() { 
-                                println!("[MCP][TOOLS][WARN] Tool name became empty after sanitization: {}", tool.name);
+                                crate::app_log!("[MCP][TOOLS][WARN] Tool name became empty after sanitization: {}", tool.name);
                                 continue; 
                             }
 
                             // 2. Ensure unique name
                             if seen_names.contains(&name) {
-                                println!("[MCP][TOOLS][WARN] Duplicate tool name '{}'. Skipping.", name);
+                                crate::app_log!("[MCP][TOOLS][WARN] Duplicate tool name '{}'. Skipping.", name);
                                 continue;
                             }
                             seen_names.insert(name.clone());
@@ -225,7 +225,7 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
                                 }
                             }
 
-                            println!("[MCP][TOOLS]   + Registered: {}", name);
+                            crate::app_log!("[MCP][TOOLS]   + Registered: {}", name);
                             all_tools.push(ToolInfo {
                                 server_id: config.id.clone(),
                                 tool: Tool {
@@ -240,17 +240,17 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
                         }
                     },
                     Err(e) => {
-                        println!("[MCP][TOOLS][ERROR] Failed to list tools for {}: {}", config.name, e);
+                        crate::app_log!("[MCP][TOOLS][ERROR] Failed to list tools for {}: {}", config.name, e);
                     }
                 }
             },
             Err(e) => {
-                 println!("[MCP][TOOLS][ERROR] Failed to connect to {}: {}", config.name, e);
+                 crate::app_log!("[MCP][TOOLS][ERROR] Failed to connect to {}: {}", config.name, e);
             }
         }
     }
     
-    println!("[MCP][TOOLS] Total: {}", all_tools.len());
+    crate::app_log!("[MCP][TOOLS] Total: {}", all_tools.len());
     all_tools
 }
 
@@ -315,7 +315,7 @@ pub async fn stream_chat_completion(
         headers.insert("X-Title", HeaderValue::from_static("Mini AI 1C Agent"));
     }
     
-    println!("[AI] Sending request to {} (Model: {})", url, request_body.model);
+    crate::app_log!("[AI] Sending request to {} (Model: {})", url, request_body.model);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -337,18 +337,18 @@ pub async fn stream_chat_completion(
         match res {
             Ok(r) if r.status().is_success() => break r,
             Ok(r) if r.status().as_u16() == 500 && attempt < max_retries => {
-                println!("[AI][RETRY] Attempt {} failed with 500. Retrying in 2s...", attempt);
+                crate::app_log!("[AI][RETRY] Attempt {} failed with 500. Retrying in 2s...", attempt);
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
             Ok(r) => {
                 let status = r.status();
                 let error_body = r.text().await.unwrap_or_default();
-                println!("[AI] API Error (Attempt {}): {} - {}", attempt, status, error_body);
+                crate::app_log!("[AI] API Error (Attempt {}): {} - {}", attempt, status, error_body);
                 return Err(format!("API error {}: {}", status, error_body));
             }
             Err(e) if attempt < max_retries => {
-                println!("[AI][RETRY] Request failed (Attempt {}): {}. Retrying in 2s...", attempt, e);
+                crate::app_log!("[AI][RETRY] Request failed (Attempt {}): {}. Retrying in 2s...", attempt, e);
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
@@ -356,7 +356,7 @@ pub async fn stream_chat_completion(
         }
     };
     
-    println!("[AI] Response received. Status: {}", response.status());
+    crate::app_log!("[AI] Response received. Status: {}", response.status());
     
     // Stream response
     let mut stream = response.bytes_stream();

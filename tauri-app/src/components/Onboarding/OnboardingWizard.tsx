@@ -140,7 +140,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                         enabled: true,
                         transport: 'stdio',
                         command: 'npx',
-                        args: ['tsx', 'src/mcp-servers/1c-naparnik.ts'],
+                        args: ['--yes', 'tsx', 'src/mcp-servers/1c-naparnik.ts'],
                         env: { 'ONEC_AI_TOKEN': naparnikToken }
                     } as any);
                 }
@@ -203,8 +203,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             id: 'onboarding-profile',
             provider: mappedProvider,
             name: selectedProvider === 'z.ai' ? 'Z.AI' : selectedProvider === 'ollama' ? 'Ollama' : 'Custom AI',
-            model: modelName || (selectedProvider === 'z.ai' ? 'glm-5' : selectedProvider === 'ollama' ? 'llama3:8b' : ''),
-            base_url: baseUrl || (selectedProvider === 'z.ai' ? 'https://api.z.ai/v1' : selectedProvider === 'ollama' ? 'http://localhost:11434' : null),
+            model: modelName || (selectedProvider === 'z.ai' ? 'glm-5' : selectedProvider === 'ollama' ? 'llama3' : ''),
+            base_url: baseUrl || (selectedProvider === 'z.ai' ? 'https://api.z.ai/api/coding/paas/v4' : selectedProvider === 'ollama' ? 'http://localhost:11434/v1' : null),
             api_key_encrypted: '',
             max_tokens: 4096,
             temperature: 0.7
@@ -405,7 +405,11 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             <div className="grid grid-cols-3 gap-4">
                 {/* z.ai */}
                 <div
-                    onClick={() => setSelectedProvider('z.ai')}
+                    onClick={() => {
+                        setSelectedProvider('z.ai');
+                        setBaseUrl('https://api.z.ai/api/coding/paas/v4');
+                        setModelName('glm-5');
+                    }}
                     className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedProvider === 'z.ai'
                         ? 'bg-blue-600/20 border-blue-500 ring-1 ring-blue-500'
                         : 'bg-zinc-800/50 border-zinc-700 hover:bg-zinc-800'
@@ -420,7 +424,11 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
 
                 {/* Ollama */}
                 <div
-                    onClick={() => setSelectedProvider('ollama')}
+                    onClick={() => {
+                        setSelectedProvider('ollama');
+                        setBaseUrl('http://localhost:11434/v1');
+                        setModelName('llama3');
+                    }}
                     className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedProvider === 'ollama'
                         ? 'bg-orange-600/20 border-orange-500 ring-1 ring-orange-500'
                         : 'bg-zinc-800/50 border-zinc-700 hover:bg-zinc-800'
@@ -435,7 +443,11 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
 
                 {/* Custom / OpenAI */}
                 <div
-                    onClick={() => setSelectedProvider('openai')}
+                    onClick={() => {
+                        setSelectedProvider('openai');
+                        setBaseUrl('https://api.openai.com/v1');
+                        setModelName('gpt-4o');
+                    }}
                     className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedProvider === 'openai'
                         ? 'bg-purple-600/20 border-purple-500 ring-1 ring-purple-500'
                         : 'bg-zinc-800/50 border-zinc-700 hover:bg-zinc-800'
@@ -466,12 +478,22 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-zinc-300 mb-1">Base URL (optional)</label>
+                                <label className="block text-sm font-medium text-zinc-300 mb-1">Base URL</label>
                                 <input
                                     type="text"
                                     value={baseUrl}
                                     onChange={(e) => setBaseUrl(e.target.value)}
-                                    placeholder="https://api.z.ai/v1"
+                                    placeholder="https://api.z.ai/api/coding/paas/v4"
+                                    className="w-full px-3 py-2 bg-zinc-800 rounded-md border border-zinc-700 text-white focus:border-blue-500 focus:outline-none"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-zinc-300 mb-1">Model Name</label>
+                                <input
+                                    type="text"
+                                    value={modelName}
+                                    onChange={(e) => setModelName(e.target.value)}
+                                    placeholder="glm-5"
                                     className="w-full px-3 py-2 bg-zinc-800 rounded-md border border-zinc-700 text-white focus:border-blue-500 focus:outline-none"
                                 />
                             </div>
@@ -479,15 +501,27 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                     )}
 
                     {selectedProvider === 'ollama' && (
-                        <div>
-                            <label className="block text-sm font-medium text-zinc-300 mb-1">Ollama URL</label>
-                            <input
-                                type="text"
-                                value={baseUrl}
-                                onChange={(e) => setBaseUrl(e.target.value)}
-                                placeholder="http://localhost:11434"
-                                className="w-full px-3 py-2 bg-zinc-800 rounded-md border border-zinc-700 text-white focus:border-orange-500 focus:outline-none"
-                            />
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-zinc-300 mb-1">Ollama URL</label>
+                                <input
+                                    type="text"
+                                    value={baseUrl}
+                                    onChange={(e) => setBaseUrl(e.target.value)}
+                                    placeholder="http://localhost:11434/v1"
+                                    className="w-full px-3 py-2 bg-zinc-800 rounded-md border border-zinc-700 text-white focus:border-orange-500 focus:outline-none"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-zinc-300 mb-1">Model Name</label>
+                                <input
+                                    type="text"
+                                    value={modelName}
+                                    onChange={(e) => setModelName(e.target.value)}
+                                    placeholder="llama3"
+                                    className="w-full px-3 py-2 bg-zinc-800 rounded-md border border-zinc-700 text-white focus:border-orange-500 focus:outline-none"
+                                />
+                            </div>
                         </div>
                     )}
 

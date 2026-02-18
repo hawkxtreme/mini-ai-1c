@@ -8,6 +8,7 @@ mod bsl_installer;
 mod chat_history;
 mod commands;
 mod history_manager;
+mod logger;
 #[cfg(windows)]
 mod configurator;
 mod crypto;
@@ -81,6 +82,7 @@ pub fn run() {
             test_mcp_connection,
             get_mcp_server_statuses,
             get_mcp_server_logs,
+            save_debug_logs,
         ])
         .setup(|app| {
             // Setup Tray Icon

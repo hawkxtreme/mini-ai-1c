@@ -68,6 +68,7 @@ pub struct McpManager {
     // Store both config and session to check for changes
     sessions: Arc<Mutex<HashMap<String, (McpServerConfig, Arc<McpSession>)>>>,
     internal_handlers: Arc<Mutex<HashMap<String, Arc<dyn InternalMcpHandler>>>>,
+    app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl McpManager {
@@ -75,6 +76,7 @@ impl McpManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             internal_handlers: Arc::new(Mutex::new(HashMap::new())),
+            app_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -88,7 +90,7 @@ impl McpManager {
 
         // For Internal transport, we look up the registered handler
         if config.transport == McpTransport::Internal {
-            println!("[DEBUG] get_client for Internal: {}", config.id);
+            crate::app_log!("[DEBUG] get_client for Internal: {}", config.id);
             if let Some((_, session)) = sessions.get(&config.id) {
                  if session.is_alive().await {
                      return Ok(session.clone());
@@ -256,6 +258,16 @@ impl McpManager {
 }
 
 pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
+    // Store app_handle in manager for path resolution
+    {
+        let handle_inner = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut h = MCP_MANAGER.app_handle.lock().await;
+            *h = Some(handle_inner);
+        });
+    }
+
+    let _app_handle_for_watcher = app_handle.clone();
     thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
         
@@ -310,7 +322,7 @@ impl McpClient {
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
-        match tokio::time::timeout(Duration::from_secs(10), self.session.list_tools()).await {
+        match tokio::time::timeout(Duration::from_secs(60), self.session.list_tools()).await {
             Ok(res) => res,
             Err(_) => Err("Timeout listing tools".to_string()),
         }
@@ -376,10 +388,71 @@ impl McpSession {
     }
 
     async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
+        let server_id_for_logs = config.id.clone();
         let command = config.command.ok_or("Command is missing")?;
-        let args = config.args.unwrap_or_default();
+        let mut args = config.args.unwrap_or_default();
 
-        let (command, args) = if cfg!(windows) {
+        // Path resolution for production (Tauri Resources)
+        // Only resolve as resources if we are NOT in debug mode,
+        // because in debug mode we want to use the local files via npx/tsx.
+        #[cfg(not(debug_assertions))]
+        {
+            let cmd_lower = command.to_lowercase();
+            let is_stdio_node_launcher = cmd_lower == "npx" || cmd_lower == "npx.cmd" || cmd_lower == "node" || cmd_lower.contains("tsx");
+            
+            if is_stdio_node_launcher {
+                let app_handle_opt = MCP_MANAGER.app_handle.lock().await;
+                if let Some(app_handle) = app_handle_opt.as_ref() {
+                    crate::app_log!("[MCP] Resolving resources for command '{}' with args {:?}", command, args);
+                    for arg in args.iter_mut() {
+                        if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js")) {
+                            let filename = std::path::Path::new(&*arg)
+                                .file_name()
+                                .and_then(|f| f.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| arg.to_string());
+                            
+                            // Priority 1: .js version (for production)
+                            let js_filename = filename.replace(".ts", ".js");
+                            let js_subpath = format!("mcp-servers/{}", js_filename);
+                            
+                            // Priority 2: original filename
+                            let orig_subpath = format!("mcp-servers/{}", filename);
+
+                            let mut resolved = false;
+                            
+                            // Try JS first in any case if it exists in resources
+                            if let Ok(path) = app_handle.path().resolve(&js_subpath, tauri::path::BaseDirectory::Resource) {
+                                if path.exists() {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    // Normalize for Node.js on Windows (remove \\?\ prefix)
+                                    *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                    crate::app_log!("[MCP] Resolved to JS resource: {}", arg);
+                                    resolved = true;
+                                }
+                            }
+                            
+                            if !resolved {
+                                if let Ok(path) = app_handle.path().resolve(&orig_subpath, tauri::path::BaseDirectory::Resource) {
+                                    if path.exists() {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                        crate::app_log!("[MCP] Resolved to original resource: {}", arg);
+                                        resolved = true;
+                                    }
+                                }
+                            }
+
+                            if !resolved {
+                                 crate::app_log!("[WARN] Could not resolve MCP resource '{}' in 'mcp-servers/' folder", filename);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let (mut command, mut args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
             let cmd_lower = command.to_lowercase();
@@ -392,6 +465,36 @@ impl McpSession {
             (command, args)
         };
 
+        #[cfg(not(debug_assertions))]
+        {
+            let cmd_lower = command.to_lowercase();
+            let is_tsx_launcher = cmd_lower.contains("npx") || cmd_lower.contains("tsx");
+            
+            if is_tsx_launcher {
+                 let has_ts_or_js = args.iter().any(|a| a.ends_with(".ts") || a.ends_with(".js"));
+                 if has_ts_or_js {
+                     crate::app_log!("[MCP] Production mode detected. Switching launcher to node for portability.");
+                     command = "node".to_string();
+                     // Filter out npx specific flags and switch .ts to .js
+                     let mut new_args = Vec::new();
+                     for arg in args {
+                         if arg == "--yes" || arg == "tsx" || arg.contains("node_modules") {
+                             continue;
+                         }
+                         // Since we already resolved absolute paths above, we just pass them to node
+                         if arg.ends_with(".ts") {
+                             new_args.push(arg.replace(".ts", ".js"));
+                         } else {
+                             new_args.push(arg);
+                         }
+                     }
+                     args = new_args;
+                 }
+            }
+        }
+
+        crate::app_log!("[MCP] Spawning server process: {} {:?}", command, args);
+
         let mut cmd = Command::new(&command);
         
         if let Some(env) = &config.env {
@@ -403,13 +506,19 @@ impl McpSession {
             cmd.env("ONEC_AI_DEBUG", "true");
         }
 
-        let mut child = cmd
-            .args(args)
+        cmd.args(args)
             .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+
+        // Hide console window on Windows
+        #[cfg(target_os = "windows")]
+        {
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        let mut child = cmd.spawn()
             .map_err(|e| format!("Failed to spawn {}: {}", command, e))?;
 
         let mut stdin = child.stdin.take().ok_or("Failed to open stdin")?;
@@ -473,7 +582,7 @@ impl McpSession {
                      stderr_res = stderr_reader.next_line() => {
                          // Consume stderr to prevent buffer fill
                          if let Ok(Some(line)) = stderr_res {
-                             println!("[MCP][STDERR] {}", line); // Print to stdout for debugging
+                             crate::app_log!("[MCP][{}][STDERR] {}", server_id_for_logs, line);
                              let mut logs = logs_writer.lock().await;
                              if logs.len() >= 100 {
                                  logs.pop_front();
@@ -581,10 +690,10 @@ impl McpSession {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
-        println!("[DEBUG] McpSession::call_tool: {}", name);
+        crate::app_log!("[DEBUG] McpSession::call_tool: {}", name);
         match &self.transport {
             TransportImpl::Internal { handler } => {
-                println!("[DEBUG] McpSession::call_tool handling Internal for {}", name);
+                crate::app_log!("[DEBUG] McpSession::call_tool handling Internal for {}", name);
                 handler.call_tool(name, arguments).await
             }
             _ => {
