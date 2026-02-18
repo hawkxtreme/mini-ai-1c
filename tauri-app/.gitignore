@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Build artifacts in src
+**/mcp-servers/*.js
+src/**/*.js
+!src/**/*.ts
