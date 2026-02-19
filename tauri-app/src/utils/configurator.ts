@@ -5,25 +5,44 @@
 export function parseConfiguratorTitle(title: string): string {
     if (!title) return "Конфигуратор";
 
-    // Split by " - " which is the standard separator in 1C windows
     const parts = title.split(' - ');
 
     if (parts.length >= 3) {
-        // Typical structure: [Object/File] - [Configurator] - [BaseName]
-        // We want the last part which is usually the database/configuration name
-        return parts[parts.length - 1].trim();
+        // Типичная структура: [Object/File] - [Configurator] - [BaseName]
+        const baseName = parts[parts.length - 1].trim();
+        
+        // Убираем лишние суффиксы типа " (1С:Предприятие)"
+        return baseName
+            .replace(/\s*\(.*?\)\s*$/, '')
+            .replace(/\s*\[.*?\]\s*$/, '')
+            .trim();
     }
 
-    // Fallback for other title formats (e.g. just "Configurator - BaseName")
     if (parts.length === 2) {
         return parts[1].trim();
     }
 
-    // Secondary fallback for file paths if parts split didn't yield much
+    // Для файловых путей берем последний сегмент
     if (title.includes('\\')) {
         const pathParts = title.split('\\');
-        return pathParts[pathParts.length - 1] || title;
+        const lastPart = pathParts[pathParts.length - 1] || title;
+        // Убираем расширение .1CD если есть
+        return lastPart.replace(/\.1CD$/i, '');
+    }
+
+    // Обрезаем если слишком длинное
+    if (title.length > 25) {
+        return title.substring(0, 22) + '...';
     }
 
     return title;
+}
+
+/**
+ * Возвращает сокращенное имя для UI с tooltip
+ */
+export function getShortConfigName(title: string, maxLength = 15): string {
+    const parsed = parseConfiguratorTitle(title);
+    if (parsed.length <= maxLength) return parsed;
+    return parsed.substring(0, maxLength - 2) + '..';
 }

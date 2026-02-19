@@ -46,3 +46,5 @@ scripts/
 # Antigravity Skills
 .agent/
 .claude/settings.local.json
+
+docs/

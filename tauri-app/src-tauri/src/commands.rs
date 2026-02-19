@@ -7,6 +7,7 @@ use crate::llm_profiles::{self, LLMProfile, ProfileStore};
 use crate::settings::{self, AppSettings};
 use tokio_tungstenite::connect_async;
 use std::time::Duration;
+use tauri::{Runtime, AppHandle, Manager, Emitter};
 
 
 /// Chat message structure
@@ -620,7 +621,8 @@ pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
 
 /// Paste code to 1C Configurator window with conflict detection
 #[tauri::command]
-pub async fn paste_code_to_configurator(
+pub async fn paste_code_to_configurator<R: Runtime>(
+    app_handle: AppHandle<R>,
     hwnd: isize,
     code: String,
     use_select_all: Option<bool>,
@@ -651,7 +653,14 @@ pub async fn paste_code_to_configurator(
         }
         
         // 4. Paste code (with selection restoration built into configurator::paste_code)
-        configurator::paste_code(hwnd, &code, select_all)
+        let result = configurator::paste_code(hwnd, &code, select_all);
+        
+        if result.is_ok() {
+            // Эмитим событие сброса диффа для всех слушателей (Problem #4)
+            let _ = app_handle.emit("RESET_DIFF", code);
+        }
+        
+        result
     }
     #[cfg(not(windows))]
     {

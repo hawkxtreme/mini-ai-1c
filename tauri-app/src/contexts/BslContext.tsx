@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import * as api from '../api';
+import { emit } from '@tauri-apps/api/event';
 
 export interface BslStatus {
     installed: boolean;
@@ -12,6 +13,7 @@ interface BslContextType {
     checkStatus: () => Promise<void>;
     analyzeCode: (code: string) => Promise<api.BslDiagnostic[]>;
     formatCode: (code: string) => Promise<string>;
+    resetDiffBase: (code: string) => Promise<void>;
 }
 
 const BslContext = createContext<BslContextType | undefined>(undefined);
@@ -42,12 +44,17 @@ export function BslProvider({ children }: { children: React.ReactNode }) {
         return await api.formatBsl(code);
     }, []);
 
+    const resetDiffBase = useCallback(async (code: string) => {
+        await emit('RESET_DIFF', code);
+    }, []);
+
     const contextValue = useMemo(() => ({
         status,
         checkStatus,
         analyzeCode,
-        formatCode
-    }), [status, analyzeCode, formatCode]);
+        formatCode,
+        resetDiffBase
+    }), [status, analyzeCode, formatCode, resetDiffBase]);
 
     return (
         <BslContext.Provider value={contextValue}>

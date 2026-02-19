@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { listen } from '@tauri-apps/api/event';
 import { PanelRight, Trash2, Settings, Minus, Square, X } from 'lucide-react';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useBsl } from '../../contexts/BslContext';
@@ -32,6 +33,17 @@ export function MainLayout() {
     const [selectionActive, setSelectionActive] = useState(true);
 
     const appWindow = getCurrentWindow();
+
+    // Problem #4: Listen for external diff reset events
+    useEffect(() => {
+        const unlisten = listen<string>('RESET_DIFF', (event) => {
+            console.log("Diff Reset Event received", event.payload.length);
+            setOriginalCode(event.payload);
+        });
+        return () => {
+            unlisten.then(fn => fn());
+        };
+    }, []);
 
     // Window resizing logic
     useEffect(() => {
@@ -80,6 +92,7 @@ export function MainLayout() {
             // If original is empty (new module), force select all for clean write
             const useSelectAll = !originalCode || originalCode.trim().length === 0;
             await pasteCode(modifiedCode, useSelectAll, originalCode || undefined);
+            // Сброс больше не нужен здесь, так как pasteCode вызовет событие RESET_DIFF
         } catch (e: any) {
             const errorMsg = typeof e === 'string' ? e : e?.message || String(e);
             if (errorMsg.includes('CONFLICT')) {
