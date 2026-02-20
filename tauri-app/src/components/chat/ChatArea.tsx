@@ -8,6 +8,8 @@ import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, Fi
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
+import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks } from '../../utils/diffViewer';
+import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 
 interface ChatAreaProps {
     modifiedCode: string;
@@ -15,13 +17,68 @@ interface ChatAreaProps {
     onCodeLoaded: (code: string, isSelection: boolean) => void;
     diagnostics: any[];
     onOpenSettings: (tab: string) => void;
+    onActiveDiffChange?: (content: string) => void;
 }
 
-export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics, onOpenSettings }: ChatAreaProps) {
+function DiffSummaryBanner({ content, onApply }: { content: string, onApply?: () => void }) {
+    const blocks = useMemo(() => parseDiffBlocks(content), [content]);
+    const stats = useMemo(() => {
+        let added = 0;
+        let removed = 0;
+        let modified = 0;
+
+        blocks.forEach(b => {
+            if (b.stats) {
+                added += b.stats.added;
+                removed += b.stats.removed;
+                modified += b.stats.modified;
+            }
+        });
+
+        return { added, removed, modified };
+    }, [blocks]);
+
+    return (
+        <div className="flex items-center justify-between bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 text-sm mt-4">
+            <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2 text-zinc-300 font-medium">
+                    <FileDiff className="w-5 h-5 text-blue-400" />
+                    <span>Применено блоков: {blocks.length}</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs font-mono bg-zinc-900/50 py-1.5 px-3 rounded-lg border border-zinc-800">
+                    <div className="flex items-center gap-1.5 text-emerald-400" title="Добавлено строк">
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{stats.added}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-blue-400" title="Изменено строк">
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span>{stats.modified}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-red-500" title="Удалено строк">
+                        <Minus className="w-3.5 h-3.5" />
+                        <span>{stats.removed}</span>
+                    </div>
+                </div>
+            </div>
+            {onApply && (
+                <button
+                    onClick={onApply}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all text-xs font-semibold shadow-lg shadow-blue-900/20"
+                >
+                    <PanelRight className="w-4 h-4" />
+                    В редактор
+                </button>
+            )}
+        </div>
+    );
+}
+
+export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics, onOpenSettings, onActiveDiffChange }: ChatAreaProps) {
     const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
 
+    const [appliedDiffMessages, setAppliedDiffMessages] = useState<Set<string>>(new Set());
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
     const [showConfigDropdown, setShowConfigDropdown] = useState(false);
@@ -50,7 +107,27 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages]);
+
+        // Автоматически применяем дифф-блоки последнего ответа ассистента
+        if (!isLoading && messages.length > 0) {
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)) {
+                if (onActiveDiffChange) {
+                    onActiveDiffChange(lastMsg.content);
+                }
+
+                const msgKey = lastMsg.id || String(messages.length - 1);
+                if (!appliedDiffMessages.has(msgKey)) {
+                    console.log("[ChatArea] Auto-applying diffs for message", msgKey);
+                    const newCode = applyDiff(contextCode || modifiedCode, lastMsg.content);
+                    if (newCode !== (contextCode || modifiedCode)) {
+                        onApplyCode(newCode);
+                    }
+                    setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+                }
+            }
+        }
+    }, [messages, isLoading, onActiveDiffChange, contextCode, modifiedCode, onApplyCode, appliedDiffMessages]);
 
     const handleSendMessage = () => {
         if (!input.trim() || isLoading) return;
@@ -78,6 +155,9 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
         setContextCode(code);
         setIsContextSelection(isSelection);
         onCodeLoaded(code, isSelection);
+        if (onActiveDiffChange) {
+            onActiveDiffChange('');
+        }
         setShowGetCodeDropdown(false);
     };
 
@@ -239,13 +319,26 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                                     {/* Content */}
                                     <div className="min-w-0">
                                         {msg.role === 'assistant' ? (
-                                            <MarkdownRenderer
-                                                content={msg.content}
-                                                isStreaming={isLoading && i === messages.length - 1}
-                                                onApplyCode={onApplyCode}
-                                                originalCode={contextCode || modifiedCode}
-                                            />
+                                            <>
+                                                <MarkdownRenderer
+                                                    content={msg.content}
+                                                    isStreaming={isLoading && i === messages.length - 1}
+                                                    onApplyCode={onApplyCode}
+                                                    originalCode={contextCode || modifiedCode}
+                                                />
+                                                {hasDiffBlocks(msg.content) && (
+                                                    <DiffSummaryBanner
+                                                        content={msg.content}
+                                                        onApply={() => {
+                                                            const newCode = applyDiff(contextCode || modifiedCode, msg.content);
+                                                            onApplyCode(newCode);
+                                                            if (onActiveDiffChange) onActiveDiffChange(msg.content);
+                                                        }}
+                                                    />
+                                                )}
+                                            </>
                                         ) : editingIndex === i ? (
+
                                             <div className="w-full">
                                                 <textarea
                                                     value={editText}

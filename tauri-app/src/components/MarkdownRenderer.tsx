@@ -13,6 +13,19 @@ interface MarkdownRendererProps {
     originalCode?: string; // Original code for diff view
 }
 
+// Утилита для очистки diff-артефактов (временно, пока не перенесли в diffViewer)
+function cleanDiffArtifacts(content: string): string {
+    // Hide completed blocks
+    let cleaned = content.replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
+
+    // Hide incomplete blocks during streaming (anything after the last <<<<<<< SEARCH)
+    if (cleaned.includes('<<<<<<< SEARCH')) {
+        cleaned = cleaned.split('<<<<<<< SEARCH')[0];
+    }
+
+    return cleaned.trim();
+}
+
 function ThoughtSection({ title, children }: { title: string, children: React.ReactNode }) {
     const [isCollapsed, setIsCollapsed] = useState(true);
 
@@ -90,7 +103,7 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
 
     if (isBsl) {
         const [isFullscreen, setIsFullscreen] = useState(false);
-        const [showDiff, setShowDiff] = useState(!!originalCode);
+        const [showDiff, setShowDiff] = useState(false); // Default to Code View to avoid "Red Wall" confusion
         const hasDiff = originalCode && originalCode.trim().length > 0;
 
         return (
@@ -111,8 +124,8 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                                 <button
                                     onClick={() => setShowDiff(!showDiff)}
                                     className={`p-1 px-2 text-[11px] font-medium transition-all rounded-md flex items-center gap-1 whitespace-nowrap ${showDiff
-                                            ? 'bg-blue-500/20 text-blue-400'
-                                            : 'text-zinc-400 hover:text-white hover:bg-zinc-700/50'
+                                        ? 'bg-blue-500/20 text-blue-400'
+                                        : 'text-zinc-400 hover:text-white hover:bg-zinc-700/50'
                                         }`}
                                     title={showDiff ? "Show code only" : "Show diff"}
                                 >
@@ -163,8 +176,8 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                                     <button
                                         onClick={() => setShowDiff(!showDiff)}
                                         className={`flex items-center gap-2 px-4 py-1.5 rounded-lg transition-all text-xs font-semibold ${showDiff
-                                                ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
                                             }`}
                                     >
                                         <GitCompare className="w-4 h-4" />
@@ -288,7 +301,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStre
             rehypePlugins={[rehypeRaw]}
             components={components as any}
         >
-            {content}
+            {cleanDiffArtifacts(content)}
         </ReactMarkdown>
     );
 });

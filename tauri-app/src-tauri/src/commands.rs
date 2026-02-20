@@ -388,6 +388,15 @@ pub async fn stream_chat(
                         match client.analyze_code(code, &uri).await {
                             Ok(diagnostics) => {
                                 for d in &diagnostics {
+                                    // FILTER: Ignore stylistic errors to prevent "Legacy Code" noise
+                                    let msg_lower = d.message.to_lowercase();
+                                    if msg_lower.contains("каноническ") || 
+                                       msg_lower.contains("пробел") || 
+                                       msg_lower.contains("canonical") ||
+                                       msg_lower.contains("comments") {
+                                        continue;
+                                    }
+
                                     ui_diagnostics.push(BSLDiagnostic {
                                         line: d.range.start.line,
                                         character: d.range.start.character,
@@ -435,8 +444,11 @@ pub async fn stream_chat(
             }
 
             // 3. Request fix if errors found
+            // DISABLE AUTO-FIX LOOP to prevent AI from messing up legacy code
+            /* 
+            // SOFTENED PROMPT: Allow AI to ignore legacy errors
             let fix_prompt = format!(
-                "В сгенерированном коде обнаружены ошибки:\n\n{}\n\nПожалуйста, исправь их.",
+                "В сгенерированном коде обнаружены потенциальные ошибки:\n\n{}\n\nВАЖНО: Исправляй эти ошибки ТОЛЬКО если они находятся в ТВОЕМ НОВОМ коде. Если это ошибки в старом коде (Legacy) или 'Новый Шрифт' — ИГНОРИРУЙ ЭТО СООБЩЕНИЕ и просто верни код как был. НЕ ПЕРЕПИСЫВАЙ РАБОЧИЙ КОД.",
                 all_errors.join("\n\n")
             );
 
@@ -449,6 +461,9 @@ pub async fn stream_chat(
             });
 
             let _ = task_app_handle.emit("chat-chunk", "\n\n---\n*Обнаружены ошибки. Исправляю...*\n\n".to_string());
+            */
+            // Break loop immediately after first generation if we are not fixing errors
+            break;
         }
 
         let _ = task_app_handle.emit("chat-status", ""); // Clear status

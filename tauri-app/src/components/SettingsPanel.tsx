@@ -2,13 +2,14 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Save, Cpu, Monitor, FileCode, Database, Bug } from 'lucide-react';
+import { X, Save, Cpu, Monitor, FileCode, Database, Bug, MessageSquare } from 'lucide-react';
 
 import { LLMSettings } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
 import { ConfiguratorTab } from './settings/ConfiguratorTab';
 import { BslTab } from './settings/BslTab';
 import { DebugTab } from './settings/DebugTab';
+import { PromptsTab } from './settings/PromptsTab';
 
 import { useProfiles } from '../contexts/ProfileContext';
 import { WindowInfo, BslStatus, AppSettings, BslDiagnosticItem } from '../types/settings';
@@ -16,11 +17,11 @@ import { WindowInfo, BslStatus, AppSettings, BslDiagnosticItem } from '../types/
 interface SettingsPanelProps {
     isOpen: boolean;
     onClose: () => void;
-    initialTab?: 'configurator' | 'llm' | 'bsl' | 'mcp' | 'debug';
+    initialTab?: 'configurator' | 'llm' | 'bsl' | 'mcp' | 'debug' | 'prompts';
 }
 
 export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProps) {
-    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug'>('llm');
+    const [tab, setTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug' | 'prompts'>('llm');
 
     useEffect(() => {
         if (isOpen && initialTab) {
@@ -180,6 +181,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                 <div className="flex border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto scrollbar-hide no-scrollbar">
                     {[
                         { id: 'llm' as const, label: 'LLM Profiles', icon: Cpu },
+                        { id: 'prompts' as const, label: 'Промпты', icon: MessageSquare },
                         { id: 'configurator' as const, label: 'Configurator', icon: Monitor },
                         { id: 'bsl' as const, label: 'BSL Server', icon: FileCode },
                         { id: 'mcp' as const, label: 'MCP Servers', icon: Database },
@@ -207,6 +209,19 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                                 profiles={{ profiles, active_profile_id: activeProfileId }}
                                 onUpdate={loadProfiles}
                             />
+                        </div>
+                    )}
+
+                    {tab === 'prompts' && settings && (
+                        <div className="p-4 sm:p-8 w-full h-full overflow-y-auto scrollbar-thin">
+                            <div className="max-w-2xl mx-auto">
+                                <PromptsTab
+                                    settings={settings}
+                                    onSettingsChange={setSettings}
+                                    onSave={handleSaveSettings}
+                                    saving={saving}
+                                />
+                            </div>
                         </div>
                     )}
 
@@ -268,7 +283,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
                 {/* Footer */}
                 <div className="p-4 border-t border-zinc-800 bg-zinc-900 flex justify-end gap-3 z-10 relative">
-                    {tab !== 'llm' && (
+                    {tab !== 'llm' && tab !== 'prompts' && (
                         <button
                             onClick={handleSaveSettings}
                             disabled={saving}

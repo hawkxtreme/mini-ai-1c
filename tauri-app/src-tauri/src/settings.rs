@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+// Helper functions for defaults
+fn default_true() -> bool { true }
+
+fn default_change_marker() -> String {
+    "// [ИЗМЕНЕНО AI] - {date}".to_string()
+}
+
 /// Settings for 1C Configurator integration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfiguratorSettings {
@@ -99,6 +106,12 @@ pub struct AppSettings {
     pub debug_mcp: bool,
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Настройки пользовательских промптов
+    #[serde(default)]
+    pub custom_prompts: CustomPromptsSettings,
+    /// Настройки генерации кода
+    #[serde(default)]
+    pub code_generation: CodeGenerationSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -121,6 +134,142 @@ pub struct ModelSettings {
     pub context_window: Option<u32>, // Override
     pub cost_in: Option<f64>,
     pub cost_out: Option<f64>,
+}
+
+/// Режим генерации кода
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodeGenerationMode {
+    /// Всегда полный код
+    Full,
+    /// Только изменения в формате Search/Replace
+    Diff,
+    /// Автовыбор по размеру модуля
+    Auto,
+}
+
+impl Default for CodeGenerationMode {
+    fn default() -> Self {
+        Self::Diff
+    }
+}
+
+/// Настройки генерации кода
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeGenerationSettings {
+    /// Режим генерации
+    #[serde(default)]
+    pub mode: CodeGenerationMode,
+    
+    /// Сохранять copyright-комментарии
+    #[serde(default = "default_true")]
+    pub preserve_copyright: bool,
+    
+    /// Маркировать изменения
+    #[serde(default = "default_true")]
+    pub mark_changes: bool,
+    
+    /// Шаблон маркера изменения
+    #[serde(default = "default_change_marker")]
+    pub change_marker_template: String,
+}
+
+impl Default for CodeGenerationSettings {
+    fn default() -> Self {
+        Self {
+            mode: CodeGenerationMode::Full,
+            preserve_copyright: true,
+            mark_changes: true,
+            change_marker_template: default_change_marker(),
+        }
+    }
+}
+
+/// Настройки маркеров изменений
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeMarkersSettings {
+    /// Добавлять маркер изменения
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    
+    /// Шаблон маркера (поддерживает {date}, {reason}, {author})
+    #[serde(default = "default_change_marker")]
+    pub template: String,
+}
+
+impl Default for ChangeMarkersSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            template: default_change_marker(),
+        }
+    }
+}
+
+/// Шаблон промпта
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Настройки пользовательских промптов
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPromptsSettings {
+    /// Префикс, добавляемый к system prompt
+    #[serde(default)]
+    pub system_prefix: String,
+    
+    /// Инструкции при изменении кода
+    #[serde(default)]
+    pub on_code_change: String,
+    
+    /// Инструкции при генерации нового кода
+    #[serde(default)]
+    pub on_code_generate: String,
+    
+    /// Шаблоны комментариев для изменений
+    #[serde(default)]
+    pub change_markers: ChangeMarkersSettings,
+    
+    /// Пользовательские шаблоны промптов
+    #[serde(default)]
+    pub templates: Vec<PromptTemplate>,
+}
+
+impl Default for CustomPromptsSettings {
+    fn default() -> Self {
+        Self {
+            system_prefix: String::new(),
+            on_code_change: String::new(),
+            on_code_generate: String::new(),
+            change_markers: ChangeMarkersSettings::default(),
+            templates: vec![
+                PromptTemplate {
+                    id: "bsl-standards".to_string(),
+                    name: "Стандарты 1С".to_string(),
+                    description: "Соблюдать стандарты разработки 1С и БСП".to_string(),
+                    content: "Соблюдай стандарты разработки 1С и Библиотеки Стандартных Подсистем (БСП).".to_string(),
+                    enabled: false,
+                },
+                PromptTemplate {
+                    id: "wrap-changes".to_string(),
+                    name: "Оборачивать изменения".to_string(),
+                    description: "Оборачивать изменения в комментарии доработки".to_string(),
+                    content: r#"Все изменения оборачивай в комментарии:
+// Доработка START
+// Дата: {date}
+<измененный код>
+// Доработка END"#.to_string(),
+                    enabled: false,
+                },
+            ],
+        }
+    }
 }
 
 /// Get the settings directory path
@@ -160,6 +309,13 @@ pub fn load_settings() -> AppSettings {
                 modified = true;
             }
         }
+    }
+
+    // Migration: Force 'Diff' mode over 'Full' if detected (to fix AI interaction issues)
+    if settings.code_generation.mode == CodeGenerationMode::Full {
+        crate::app_log!("[SETTINGS] Migrating deprecated 'Full' mode to 'Diff'");
+        settings.code_generation.mode = CodeGenerationMode::Diff;
+        modified = true;
     }
 
     if modified {

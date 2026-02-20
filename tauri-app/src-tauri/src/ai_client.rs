@@ -9,7 +9,7 @@ use tauri::Emitter;
 
 use crate::llm_profiles::{get_active_profile, LLMProvider};
 use crate::mcp_client::McpClient;
-use crate::settings::load_settings;
+use crate::settings::{load_settings, CodeGenerationMode};
 
 /// Chat message for API (OpenAI compatible)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,25 +104,173 @@ pub struct ToolInfo {
     pub server_id: String,
 }
 
+/// Константа с правилами сохранения кода
+const CODE_PRESERVATION_RULES: &str = r#"
+=== КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА СОХРАНЕНИЯ КОДА ===
+
+1. ПОЛНОЕ СОХРАНЕНИЕ: При редактировании кода ВСЕГДА возвращай ПОЛНЫЙ текст модуля.
+   - НИКОГДА не пропускай существующие процедуры и функции
+   - НИКОГДА не удаляй комментарии в начале модуля (включая copyright)
+   - НИКОГДА не обрезай код в конце модуля
+
+2. ФОРМАТ ОТВЕТА С КОДОМ:
+   Если пользователь просит изменить существующий код:
+   - Верни ВЕСЬ модуль целиком с внесенными изменениями
+   - Не пиши "... остальной код без изменений"
+   - Не используй сокращения вида "// ... предыдущий код"
+
+3. ИЗМЕНЕНИЯ ВЫДЕЛЯЙ КОММЕНТАРИЯМИ:
+   // [ИЗМЕНЕНО AI] - дата: <дата>
+   // Причина: <описание изменения>
+
+ПРИМЕР ПРАВИЛЬНОГО ОТВЕТА:
+```bsl
+// Copyright (c) Company... (сохранено!)
+#Область ОписаниеПеременных
+// ... весь код области (сохранено!)
+#КонецОбласти
+
+#Область ПрограммныйИнтерфейс
+// [ИЗМЕНЕНО] Добавлена новая функция
+Функция МояНоваяФункция()
+    // новый код
+КонецФункции
+
+// Существующая функция (сохранена без изменений!)
+Процедура СуществующаяПроцедура()
+    // ...
+КонецПроцедуры
+#КонецОбласти
+```
+"#;
+
+/// Константа с инструкциями для diff-формата (Search/Replace)
+/// Константа с инструкциями для diff-формата (Search/Replace)
+const DIFF_FORMAT_INSTRUCTIONS: &str = r#"
+IMPORTANT: You are a "Senior 1C Developer" working in a legacy codebase.
+Your goal is to make **Targeted Edits** using the SEARCH/REPLACE block format.
+
+# FORMAT RULES:
+1. Use the following block structure for EVERY change:
+<<<<<<< SEARCH
+[Exact content to be replaced, including indentation]
+=======
+[New content to replace with]
+>>>>>>> REPLACE
+
+2. **SEARCH BLOCK RULES (CRITICAL):**
+   - Must contain **COMPLETE LINES** of code. Do not start/end in the middle of a line.
+   - Must match the original file **EXACTLY** (character-for-character, space-for-space).
+   - Must include enough context (2-3 lines before/after) to be unique.
+   - If you want to *add* code, search for the line *before* insertion point, and include it in both SEARCH and REPLACE blocks.
+
+3. **STRICT MODIFICATION RULES:**
+   - **SCOPE**: Modify ONLY the lines you are actively requested to change.
+   - **FORBIDDEN**:
+     - Do NOT rewrite entire functions unless requested.
+     - Do NOT change logical flow, optimize algorithms, or replace working loops with queries unless asked.
+     - Do NOT fix typos in variable names (e.g. `Задолжность` -> `Задолженность`) unless explicitly requested, as this might break references elsewhere.
+     - Do NOT extract numbers into variables unless explicitly requested.
+
+4. **BLOCK SPLITTING RULES (CRITICAL):**
+   - Break large SEARCH/REPLACE blocks into a series of SMALLER blocks that each change a distinct small portion of the file.
+   - Include JUST the changing lines, and a few (2-3) surrounding lines if needed for uniqueness.
+   - **DO NOT include long runs (e.g. 5+ lines) of unchanging lines in SEARCH blocks**.
+   - If changing multiple areas, provide multiple SEARCH/REPLACE blocks in the order they appear in the file.
+
+5. **EXAMPLE (Adding a description):**
+<<<<<<< SEARCH
+Procedure MyFunction()
+    // some code
+=======
+// My new description
+Procedure MyFunction()
+    // some code
+>>>>>>> REPLACE
+"#;
+
 /// Get dynamic system prompt based on available tools
 pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
-    let mut prompt = r#"Ты - AI-ассистент для разработки на платформе 1С:Предприятие.
+    let settings = load_settings();
+    let custom = &settings.custom_prompts;
+    let code_gen = &settings.code_generation;
+    
+    let mut prompt = String::new();
+    
+    // 1. Пользовательский префикс
+    if !custom.system_prefix.is_empty() {
+        prompt.push_str(&custom.system_prefix);
+        prompt.push_str("\n\n");
+    }
+    
+    // 2. Базовый промпт - выбираем между Full и Diff режимом
+    // ВАЖНО: Auto пока работает как Diff для безопасности
+    let code_rules = match code_gen.mode {
+        CodeGenerationMode::Diff | CodeGenerationMode::Auto => {
+            // В Diff-режиме заменяем правила полного сохранения на diff-формат
+            DIFF_FORMAT_INSTRUCTIONS
+        }
+        CodeGenerationMode::Full => {
+            CODE_PRESERVATION_RULES
+        }
+    };
+    
+    prompt.push_str(&format!(
+        r#"Ты - AI-ассистент для разработки на платформе 1С:Предприятие.
 
-Твои возможности:
-- Анализ и рефакторинг кода на языке BSL (1С)
-- Объяснение логики кода
-- Поиск ошибок и предложение исправлений
-- Написание нового кода по описанию
-- Форматирование и улучшение читаемости кода
+{}
+Твоя ГЛАВНАЯ ЦЕЛЬ: Выполнять запросы пользователя МАКСИМАЛЬНО ТОЧНО, НЕ ВНОСЯ НИКАКИХ ЛИШНИХ ИЗМЕНЕНИЙ.
+
+Твои задачи:
+1. Выполнять конкретные запросы по коду (добавить комментарий, изменить условие и т.д.).
+2. Объяснять логику кода.
+3. Искать ошибки ТОЛЬКО если об этом просили.
+
+ГЛАВНАЯ ДИРЕКТИВА (STRICT COMPLIANCE):
+- Вноси изменения ТОЛЬКО в строгом соответствии с запросом пользователя.
+- ЗАПРЕЩАЕТСЯ любой самопроизвольный рефакторинг, оптимизация алгоритмов или удаление комментариев.
+- ЗАПРЕЩЕНО изменять код за пределами запрашиваемых модификаций.
+- НЕ исправляй опечатки в переменных, если об этом не просили, так как это нарушит ссылки в других модулях.
 
 Используй русский язык в ответах. Форматируй код в блоках ```bsl...```.
-При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL). 
-- Если исходный код пользователя использует русские ключевые слова (Если...Тогда), пиши на русском. 
-- Если исходный код использует английские ключевые слова (If...Then), пиши на английском.
-- По умолчанию (для нового кода) используй РУССКИЙ язык ключевых слов.
+При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL)."#,
+        code_rules
+    ));
 
-У тебя также есть доступ к базовым инструментам (файловая система, браузер), используй их по необходимости."#.to_string();
+    // 3. Инструкции для изменения кода и маркировки
+    if code_gen.mark_changes {
+        let marker = code_gen.change_marker_template.replace("{date}", &format!("{}", chrono::Local::now().format("%Y-%m-%d")));
+        prompt.push_str("\n\n=== ПРАВИЛА МАРКИРОВКИ ИЗМЕНЕНИЙ ===\n");
+        prompt.push_str(&format!(
+            "При внесении изменений ОБЯЗАТЕЛЬНО добавляй комментарий в формате: {}\n",
+            marker
+        ));
+    }
 
+    if !custom.on_code_change.is_empty() {
+        prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ИЗМЕНЕНИЯ КОДА ===\n");
+        prompt.push_str(&custom.on_code_change);
+    }
+    
+    // 4. Инструкции для генерации нового кода
+    if !custom.on_code_generate.is_empty() {
+        prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ГЕНЕРАЦИИ КОДА ===\n");
+        prompt.push_str(&custom.on_code_generate);
+    }
+    
+    // 5. Активные шаблоны
+    let active_templates: Vec<_> = custom.templates.iter()
+        .filter(|t| t.enabled)
+        .collect();
+    
+    if !active_templates.is_empty() {
+        prompt.push_str("\n\n=== АКТИВНЫЕ ШАБЛОНЫ ===\n");
+        for template in active_templates {
+            prompt.push_str(&format!("- {}\n{}\n", template.name, template.content));
+        }
+    }
+    
+    // 6. MCP инструменты
     if !available_tools.is_empty() {
         prompt.push_str("\n\nВАЖНО: Тебе доступны следующие специализированные инструменты MCP:\n");
         for info in available_tools {
@@ -138,10 +286,11 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
         prompt.push_str("\nКРИТИЧЕСКИЕ ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:\n");
         
         if available_tools.iter().any(|t| t.tool.function.name == "check_bsl_syntax") {
-            prompt.push_str("1. `check_bsl_syntax` (сервер bsl-ls): ТЫ ОБЯЗАН вызывать этот инструмент ПЕРЕД выдачей любого кода BSL пользователю. 
-   - Если инструмент вернул ошибки (severity: 1), ТЫ ОБЯЗАН исправить их и ВЫЗВАТЬ ИНСТРУМЕНТ СНОВА.
-   - НЕ выдавай ответ пользователю, пока не убедишься, что `check_bsl_syntax` не возвращает ошибок в твоем коде.
-   - Итерация «Вызов инструмента -> Исправление -> Вызов инструмента» должна продолжаться до полной чистоты кода.\n");
+            prompt.push_str("1. `check_bsl_syntax` (сервер bsl-ls): Используй для самопроверки.\n");
+            prompt.push_str("   - ВАЖНО: Твоя зона ответственности - ТОЛЬКО строки, которые ты добавил или изменил по запросу.\n");
+            prompt.push_str("   - ЗАПРЕТ: Не исправляй ошибки в окружающем коде (Legacy), даже если они находятся в той же функции.\n");
+            prompt.push_str("   - ЕСЛИ bsl-ls ругается на 'Cognitive Complexity', 'Magic Number' в старом коде -> ИГНОРИРУЙ ЭТО. Не пытайся это исправить.\n");
+            prompt.push_str("   - Исправляй ТОЛЬКО синтаксические ошибки, которые делают код нерабочим (например, забытая скобка).\n");
         }
         
         if available_tools.iter().any(|t| t.tool.function.name == "ask_1c_ai") {
@@ -149,10 +298,11 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
         }
 
         if available_tools.iter().any(|t| t.tool.function.name.contains("metadata")) {
-            prompt.push_str("3. Инструменты метаданных: ВСЕГДА проверяй структуру объектов перед написанием запросов или обращением к полям через точку, чтобы избежать ошибок 'Поле объекта не обнаружено'.\n");
+            prompt.push_str("3. Инструменты метаданных: ВСЕГДА проверяй структуру объектов перед написанием запросов или обращению к полям через точку, чтобы избежать ошибок 'Поле объекта не обнаружено'.\n");
         }
     }
 
+    println!("[DEBUG][PROMPT] Final System Prompt:\n{}", prompt);
     prompt
 }
 

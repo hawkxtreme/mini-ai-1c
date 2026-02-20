@@ -31,6 +31,7 @@ export function MainLayout() {
     const [diagnostics, setDiagnostics] = useState<any[]>([]);
     const [showConflictDialog, setShowConflictDialog] = useState(false);
     const [selectionActive, setSelectionActive] = useState(true);
+    const [activeDiffContent, setActiveDiffContent] = useState(''); // Стейт для диффов
 
     const appWindow = getCurrentWindow();
 
@@ -39,6 +40,7 @@ export function MainLayout() {
         const unlisten = listen<string>('RESET_DIFF', (event) => {
             console.log("Diff Reset Event received", event.payload.length);
             setOriginalCode(event.payload);
+            setActiveDiffContent(''); // Сбрасываем диффы при новом коде
         });
         return () => {
             unlisten.then(fn => fn());
@@ -137,6 +139,7 @@ export function MainLayout() {
     const handleCodeLoaded = useCallback((code: string, isSelection: boolean) => {
         setOriginalCode(code);
         setModifiedCode(code);
+        setActiveDiffContent(''); // Сброс при загрузке
         setShowSidePanel(true);
     }, []);
 
@@ -179,6 +182,7 @@ export function MainLayout() {
                         setOriginalCode('');
                         setModifiedCode('');
                         setDiagnostics([]);
+                        setActiveDiffContent('');
                     }}
                     onOpenSettings={() => setShowSettings(true)}
                     onCodeLoaded={handleCodeLoaded}
@@ -197,6 +201,10 @@ export function MainLayout() {
                             setSettingsTab(tab as any);
                             setShowSettings(true);
                         }}
+                        onActiveDiffChange={(content) => {
+                            setActiveDiffContent(content);
+                            if (content) setShowSidePanel(true); // Авто-открытие панели если пришли диффы
+                        }}
                     />
 
                     <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>
@@ -210,6 +218,8 @@ export function MainLayout() {
                             onApply={handleApply}
                             isApplying={isApplying}
                             isValidating={isValidating}
+                            activeDiffContent={activeDiffContent}
+                            onActiveDiffChange={setActiveDiffContent}
                         />
                     </div>
                 </div>
