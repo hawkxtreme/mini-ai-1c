@@ -163,10 +163,29 @@ export function CodeSidePanel({
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-[#27272a] bg-[#18181b]">
                 <div className="flex items-center gap-2">
-                    <Terminal className="w-4 h-4 text-blue-400" />
-                    <span className="font-semibold text-zinc-200 text-sm whitespace-nowrap">Code Editor</span>
+                    {/* Validation Summary or Loader - NOW FIRST */}
+                    {isValidating ? (
+                        <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-[#27272a]/50 text-zinc-500 text-[10px] animate-pulse">
+                            <span>Validating...</span>
+                        </div>
+                    ) : (errorCount > 0 || warningCount > 0) ? (
+                        <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700 flex-shrink-0">
+                            {errorCount > 0 && (
+                                <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold">
+                                    <AlertCircle className="w-3 h-3" />
+                                    <span>{errorCount}</span>
+                                </div>
+                            )}
+                            {warningCount > 0 && (
+                                <div className="flex items-center gap-1 text-[10px] text-yellow-500 font-medium">
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span>{warningCount}</span>
+                                </div>
+                            )}
+                        </div>
+                    ) : null}
 
-                    <div className="flex bg-[#27272a] rounded-lg p-0.5 ml-4 flex-shrink-0">
+                    <div className="flex bg-[#27272a] rounded-lg p-0.5 flex-shrink-0">
                         <button
                             onClick={() => setViewMode('editor')}
                             className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${viewMode === 'editor' ? 'bg-[#3f3f46] text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
@@ -200,43 +219,8 @@ export function CodeSidePanel({
                                 <Trash2 className="w-3 h-3" />
                                 <span>Сбросить непринятые</span>
                             </button>
-                            <button
-                                onClick={() => {
-                                    if (!diffEditorRef.current) return;
-                                    const currentModifiedCode = diffEditorRef.current.getModifiedEditor().getModel().getValue();
-                                    setLocalOriginalCode(currentModifiedCode);
-                                    if (onActiveDiffChange) onActiveDiffChange('');
-                                }}
-                                className="px-2 py-0.5 ml-1 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10"
-                                title="Принять все оставшиеся изменения"
-                            >
-                                <Check className="w-3 h-3" />
-                                <span>Принять все</span>
-                            </button>
                         </div>
                     )}
-
-                    {/* Validation Summary or Loader */}
-                    {isValidating ? (
-                        <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a]/50 text-zinc-500 text-[10px] animate-pulse">
-                            <span>Validating...</span>
-                        </div>
-                    ) : (errorCount > 0 || warningCount > 0) ? (
-                        <div className="flex items-center gap-2 ml-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700 flex-shrink-0">
-                            {errorCount > 0 && (
-                                <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold">
-                                    <AlertCircle className="w-3 h-3" />
-                                    <span>{errorCount}</span>
-                                </div>
-                            )}
-                            {warningCount > 0 && (
-                                <div className="flex items-center gap-1 text-[10px] text-yellow-500 font-medium">
-                                    <AlertTriangle className="w-3 h-3" />
-                                    <span>{warningCount}</span>
-                                </div>
-                            )}
-                        </div>
-                    ) : null}
                 </div>
                 <div className="flex items-center gap-1">
                     <button
@@ -407,16 +391,16 @@ export function CodeSidePanel({
 
                                         const domNode = document.createElement('div');
                                         domNode.className = 'flex items-center justify-end pr-8 gap-2 z-50 pointer-events-none';
-                                        domNode.style.height = '30px';
+                                        domNode.style.height = '18px';
 
                                         // Wrapper for buttons to look like a toolbar
                                         const toolbar = document.createElement('div');
-                                        toolbar.className = 'flex items-center gap-1 bg-[#18181b] border border-[#3f3f46] rounded-md shadow-2xl p-0.5 mt-[-15px] pointer-events-auto ring-1 ring-black/50';
+                                        toolbar.className = 'flex items-center gap-1 bg-[#18181b]/80 backdrop-blur-sm border border-[#3f3f46]/30 rounded-md shadow-sm p-0 pointer-events-auto leading-none';
 
                                         // Revert button
                                         const btnRevert = document.createElement('button');
-                                        btnRevert.innerHTML = '<span style="display:flex;align-items:center;gap:6px;padding: 2px 6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg> Отменить</span>';
-                                        btnRevert.className = 'px-1 py-1 text-[11px] font-bold text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-sm transition-all active:scale-95';
+                                        btnRevert.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg> Отменить</span>';
+                                        btnRevert.className = 'px-1 py-0.5 text-[9px] font-bold text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-sm transition-all active:scale-95';
                                         btnRevert.onclick = (e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
@@ -448,8 +432,8 @@ export function CodeSidePanel({
 
                                         // Accept button
                                         const btnAccept = document.createElement('button');
-                                        btnAccept.innerHTML = '<span style="display:flex;align-items:center;gap:6px;padding: 2px 6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg> Принять</span>';
-                                        btnAccept.className = 'px-1 py-1 text-[11px] font-bold text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1';
+                                        btnAccept.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg> Принять</span>';
+                                        btnAccept.className = 'px-1 py-0.5 text-[9px] font-bold text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1';
                                         btnAccept.onclick = (e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
@@ -488,7 +472,7 @@ export function CodeSidePanel({
 
                                         const id = accessor.addZone({
                                             afterLineNumber: change.modifiedEndLineNumber || change.modifiedStartLineNumber || 1,
-                                            heightInPx: 30,
+                                            heightInPx: 18,
                                             domNode: domNode,
                                             suppressMouseDown: false
                                         });
@@ -547,15 +531,16 @@ export function CodeSidePanel({
                                         key={i}
                                         onClick={() => {
                                             if (editorRef.current) {
-                                                editorRef.current.revealLineInCenter(d.line);
-                                                editorRef.current.setPosition({ lineNumber: d.line, column: 1 });
+                                                const targetLine = d.line + 1; // LSP to Monaco conversion
+                                                editorRef.current.revealLineInCenter(targetLine);
+                                                editorRef.current.setPosition({ lineNumber: targetLine, column: 1 });
                                                 editorRef.current.focus();
                                             }
                                         }}
                                         className="border-b border-[#27272a]/30 hover:bg-[#27272a]/50 transition-colors group cursor-pointer"
                                     >
                                         <td className={`px-3 py-1.5 text-[11px] font-mono whitespace-nowrap align-top ${d.severity === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>
-                                            {d.line}
+                                            {d.line + 1}
                                         </td>
                                         <td className="px-3 py-1.5 text-[11px] text-zinc-300 align-top">
                                             {d.message}
@@ -574,18 +559,6 @@ export function CodeSidePanel({
             {/* Footer Actions */}
             <div className="p-3 border-t border-[#27272a] bg-[#18181b] flex items-center justify-between">
                 <div className="text-[10px] text-zinc-500 flex items-center gap-2">
-                    {viewMode === 'diff' && (
-                        <>
-                            <div className="w-2 h-2 rounded-full bg-blue-500"></div>
-                            <span>Modified</span>
-                            <span className="text-zinc-600">|</span>
-                            <div className="w-2 h-2 rounded-full border border-zinc-600"></div>
-                            <span>Original</span>
-                        </>
-                    )}
-                    {viewMode === 'editor' && (
-                        <span>Standard Editor Mode</span>
-                    )}
                 </div>
 
                 <button
