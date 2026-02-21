@@ -58,10 +58,14 @@ export function CodeSidePanel({
         activeDiffContentRef.current = activeDiffContent;
         if (activeDiffContent && viewMode !== 'diff') {
             setViewMode('diff');
+        } else if (!activeDiffContent && viewMode === 'diff') {
+            // Если дифф очищен (например, при получении нового кода), возвращаемся в редактор
+            setViewMode('editor');
+            setDiffChanges([]);
         }
 
         // Принудительно вызываем обновление виджетов, когда пришел контент
-        if (diffEditorRef.current?.updateInlineWidgetsRef) {
+        if (diffEditorRef.current?.updateInlineWidgetsRef && activeDiffContent) {
             setTimeout(() => {
                 console.log('[CodeSidePanel] Forcing widget update after content change');
                 diffEditorRef.current.updateInlineWidgetsRef();
@@ -337,7 +341,10 @@ export function CodeSidePanel({
                                     const currentModified = modifiedEditor.getValue();
                                     const currentOriginal = diffEditorRef.current?.getOriginalEditor().getModel()?.getValue() || localOriginalCode;
 
-                                    if (currentModified === currentOriginal) {
+                                    // Нормализуем переносы для честного сравнения, иначе дифф может зависнуть
+                                    const normalizeNL = (s: string) => s.replace(/\r\n/g, '\n');
+
+                                    if (normalizeNL(currentModified) === normalizeNL(currentOriginal)) {
                                         console.log('[DiffUpdate] Code is identical. Clearing active diff.');
                                         if (onActiveDiffChange) {
                                             setTimeout(() => onActiveDiffChange(''), 0);
@@ -390,6 +397,9 @@ export function CodeSidePanel({
                                             targetLines.splice(insertIndex, removeCount, ...origBlock);
                                             const resultCode = targetLines.join('\n');
                                             onModifiedCodeChange(resultCode);
+
+                                            // Force re-calculation of diffs
+                                            setTimeout(updateInlineWidgets, 50);
                                         };
 
                                         // Accept button
