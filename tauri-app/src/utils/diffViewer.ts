@@ -30,13 +30,12 @@ function stripMarkdownCodeBlocks(content: string): string {
  * Парсит текст сообщения на блоки изменений
  */
 export function parseDiffBlocks(content: string): DiffBlock[] {
-    const cleanContent = stripMarkdownCodeBlocks(content);
     const blocks: DiffBlock[] = [];
     const regex = /<<<<<<< SEARCH\s*([\s\S]*?)=======\s*([\s\S]*?)>>>>>>> REPLACE/g;
 
     let match;
     let index = 0;
-    while ((match = regex.exec(cleanContent)) !== null) {
+    while ((match = regex.exec(content)) !== null) {
         let search = match[1];
         const replace = match[2];
 
@@ -140,8 +139,7 @@ export function applyDiff(originalCode: string, diffContent: string | DiffBlock[
  * Проверяет, содержит ли сообщение блоки diff
  */
 export function hasDiffBlocks(content: string): boolean {
-    const cleanContent = stripMarkdownCodeBlocks(content);
-    return /<<<<<<< SEARCH/.test(cleanContent);
+    return /<<<<<<< SEARCH/.test(content);
 }
 
 /**

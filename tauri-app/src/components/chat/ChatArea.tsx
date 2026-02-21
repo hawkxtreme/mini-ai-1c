@@ -350,31 +350,40 @@ export function ChatArea({
                                                     onApplyCode={onApplyCode}
                                                     originalCode={contextCode || modifiedCode || ""}
                                                 />
-                                                {hasDiffBlocks(msg.content) && hasApplicableDiffBlocks(contextCode || modifiedCode || "", msg.content) && parseDiffBlocks(msg.content).length > 0 && !dismissedDiffMessages.has(msg.id || String(i)) && (
-                                                    <DiffSummaryBanner
-                                                        content={msg.content}
-                                                        disabled={!activeDiffContent || (activeDiffContent !== msg.content && !msg.content.includes(activeDiffContent.substring(0, 50)))}
-                                                        onApply={() => {
-                                                            const newCode = applyDiff(contextCode || modifiedCode || "", msg.content);
-                                                            if (onCommitCode) {
-                                                                onCommitCode(newCode);
-                                                            } else if (onApplyCode) {
-                                                                onApplyCode(newCode);
-                                                            }
-                                                            if (onActiveDiffChange) onActiveDiffChange('');
-                                                        }}
-                                                        onReject={() => {
-                                                            if (originalCode) {
+                                                {(() => {
+                                                    const isDiffActive = activeDiffContent && (activeDiffContent === msg.content || msg.content.includes(activeDiffContent.substring(0, 50)));
+                                                    const shouldShowBanner = hasDiffBlocks(msg.content) &&
+                                                        parseDiffBlocks(msg.content).length > 0 &&
+                                                        !dismissedDiffMessages.has(msg.id || String(i)) &&
+                                                        isDiffActive;
+
+                                                    if (!shouldShowBanner) return null;
+
+                                                    return (
+                                                        <DiffSummaryBanner
+                                                            content={msg.content}
+                                                            onApply={() => {
+                                                                const newCode = applyDiff(contextCode || modifiedCode || "", msg.content);
                                                                 if (onCommitCode) {
-                                                                    onCommitCode(originalCode);
+                                                                    onCommitCode(newCode);
                                                                 } else if (onApplyCode) {
-                                                                    onApplyCode(originalCode);
+                                                                    onApplyCode(newCode);
                                                                 }
-                                                            }
-                                                            if (onActiveDiffChange) onActiveDiffChange('');
-                                                        }}
-                                                    />
-                                                )}
+                                                                if (onActiveDiffChange) onActiveDiffChange('');
+                                                            }}
+                                                            onReject={() => {
+                                                                if (originalCode) {
+                                                                    if (onCommitCode) {
+                                                                        onCommitCode(originalCode);
+                                                                    } else if (onApplyCode) {
+                                                                        onApplyCode(originalCode);
+                                                                    }
+                                                                }
+                                                                if (onActiveDiffChange) onActiveDiffChange('');
+                                                            }}
+                                                        />
+                                                    );
+                                                })()}
                                             </>
                                         ) : editingIndex === i ? (
 
