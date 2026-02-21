@@ -198,7 +198,8 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
     let mut prompt = String::new();
     
     // 1. Пользовательский префикс
-    if !custom.system_prefix.is_empty() {
+    // TEMPORARY DISABLED FOR RELEASE
+    if false /* !custom.system_prefix.is_empty() */ {
         prompt.push_str(&custom.system_prefix);
         prompt.push_str("\n\n");
     }
@@ -247,26 +248,29 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
         ));
     }
 
-    if !custom.on_code_change.is_empty() {
-        prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ИЗМЕНЕНИЯ КОДА ===\n");
-        prompt.push_str(&custom.on_code_change);
-    }
-    
-    // 4. Инструкции для генерации нового кода
-    if !custom.on_code_generate.is_empty() {
-        prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ГЕНЕРАЦИИ КОДА ===\n");
-        prompt.push_str(&custom.on_code_generate);
-    }
-    
-    // 5. Активные шаблоны
-    let active_templates: Vec<_> = custom.templates.iter()
-        .filter(|t| t.enabled)
-        .collect();
-    
-    if !active_templates.is_empty() {
-        prompt.push_str("\n\n=== АКТИВНЫЕ ШАБЛОНЫ ===\n");
-        for template in active_templates {
-            prompt.push_str(&format!("- {}\n{}\n", template.name, template.content));
+    // TEMPORARY DISABLED FOR RELEASE
+    if false {
+        if !custom.on_code_change.is_empty() {
+            prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ИЗМЕНЕНИЯ КОДА ===\n");
+            prompt.push_str(&custom.on_code_change);
+        }
+        
+        // 4. Инструкции для генерации нового кода
+        if !custom.on_code_generate.is_empty() {
+            prompt.push_str("\n\n=== ПОЛЬЗОВАТЕЛЬСКИЕ ИНСТРУКЦИИ ДЛЯ ГЕНЕРАЦИИ КОДА ===\n");
+            prompt.push_str(&custom.on_code_generate);
+        }
+        
+        // 5. Активные шаблоны
+        let active_templates: Vec<_> = custom.templates.iter()
+            .filter(|t| t.enabled)
+            .collect();
+        
+        if !active_templates.is_empty() {
+            prompt.push_str("\n\n=== АКТИВНЫЕ ШАБЛОНЫ ===\n");
+            for template in active_templates {
+                prompt.push_str(&format!("- {}\n{}\n", template.name, template.content));
+            }
         }
     }
     

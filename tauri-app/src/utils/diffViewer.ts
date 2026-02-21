@@ -19,31 +19,47 @@ interface DiffBlock {
 }
 
 /**
+ * Удаляет блоки кода Markdown (```...```), чтобы их содержимое не парсилось как Diff.
+ * Это необходимо для случаев, когда ИИ приводит SEARCH/REPLACE просто как пример кода.
+ */
+function stripMarkdownCodeBlocks(content: string): string {
+    return content.replace(/```[\s\S]*?```/g, '');
+}
+
+/**
  * Парсит текст сообщения на блоки изменений
  */
 export function parseDiffBlocks(content: string): DiffBlock[] {
+    const cleanContent = stripMarkdownCodeBlocks(content);
     const blocks: DiffBlock[] = [];
     const regex = /<<<<<<< SEARCH\s*([\s\S]*?)=======\s*([\s\S]*?)>>>>>>> REPLACE/g;
 
     let match;
     let index = 0;
-    while ((match = regex.exec(content)) !== null) {
+    while ((match = regex.exec(cleanContent)) !== null) {
         let search = match[1];
         const replace = match[2];
 
-        // Попытка извлечь метку строки из блока search (:строка:123)
+        // Попытка извлечь метку строки из блока search (:строка:123 или :line:123)
         let lineStart: number | undefined;
-        const lineMatch = search.match(/^:строка:(\d+|EOF)\s*-+\s*\n/);
+        const lineMatch = search.match(/^:(строка|line):(\d+|EOF)\s*-+\s*\n/i);
 
         if (lineMatch) {
             search = search.substring(lineMatch[0].length);
-            if (lineMatch[1] !== 'EOF') {
-                lineStart = parseInt(lineMatch[1], 10);
+            if (lineMatch[2] !== 'EOF') {
+                lineStart = parseInt(lineMatch[2], 10);
             }
         }
 
         const searchTrim = search.trim();
         const replaceTrim = replace.replace(/^\n/, '').replace(/\n$/, '');
+
+        // Если блок поиска пустой - это приведет к вставке в начало файла (дублированию кода). 
+        // Если ИИ не указал искомый код, мы не сможем его найти. Пропускаем.
+        if (!searchTrim) {
+            console.warn('Пустой блок SEARCH найден, игнорируем во избежание дублирования');
+            continue;
+        }
 
         // Расчет чистой статистики с использованием diffLines
         const dLines = diffLines(searchTrim, replaceTrim, { ignoreWhitespace: false });
@@ -90,7 +106,7 @@ export function applyDiff(originalCode: string, diffContent: string | DiffBlock[
     if (!originalCode) return typeof diffContent === 'string' ? diffContent : originalCode;
 
     const blocks = typeof diffContent === 'string' ? parseDiffBlocks(diffContent) : diffContent;
-    if (blocks.length === 0) return typeof diffContent === 'string' ? diffContent : originalCode;
+    if (blocks.length === 0) return originalCode;
 
     let result = originalCode;
 
@@ -124,7 +140,24 @@ export function applyDiff(originalCode: string, diffContent: string | DiffBlock[
  * Проверяет, содержит ли сообщение блоки diff
  */
 export function hasDiffBlocks(content: string): boolean {
-    return /<<<<<<< SEARCH/.test(content);
+    const cleanContent = stripMarkdownCodeBlocks(content);
+    return /<<<<<<< SEARCH/.test(cleanContent);
+}
+
+/**
+ * Проверяет, можно ли применить хотя бы один diff-блок к исходному коду.
+ * Полезно для фильтрации "примеров кода", которые ИИ пишет текстом.
+ */
+export function hasApplicableDiffBlocks(originalCode: string, content: string): boolean {
+    if (!originalCode) return false;
+    const blocks = parseDiffBlocks(content);
+    if (blocks.length === 0) return false;
+
+    const normalizedOriginal = originalCode.replace(/\r\n/g, '\n');
+    return blocks.some(block => {
+        const normalizedSearch = block.search.replace(/\r\n/g, '\n');
+        return normalizedSearch && normalizedOriginal.includes(normalizedSearch);
+    });
 }
 
 /**

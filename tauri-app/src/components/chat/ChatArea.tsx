@@ -8,7 +8,7 @@ import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, Fi
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
-import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks } from '../../utils/diffViewer';
+import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 
 interface ChatAreaProps {
@@ -121,7 +121,9 @@ export function ChatArea({
         // Автоматически применяем дифф-блоки последнего ответа ассистента
         if (!isLoading && messages.length > 0) {
             const lastMsg = messages[messages.length - 1];
-            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)) {
+            const currentOriginal = contextCode || modifiedCode || "";
+            // Проверяем: 1. Есть ли маркеры SEARCH. 2. Есть ли хотя бы один применимый блок.
+            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content) && hasApplicableDiffBlocks(currentOriginal, lastMsg.content)) {
                 const msgKey = lastMsg.id || String(messages.length - 1);
 
                 if (!appliedDiffMessages.has(msgKey)) {
@@ -131,8 +133,8 @@ export function ChatArea({
                     }
 
                     console.log("[ChatArea] Auto-applying diffs for message", msgKey);
-                    const newCode = applyDiff(contextCode || modifiedCode || "", lastMsg.content);
-                    if (newCode !== (contextCode || modifiedCode || "")) {
+                    const newCode = applyDiff(currentOriginal, lastMsg.content);
+                    if (newCode !== currentOriginal) {
                         if (onApplyCode) {
                             onApplyCode(newCode);
                         }
@@ -348,7 +350,7 @@ export function ChatArea({
                                                     onApplyCode={onApplyCode}
                                                     originalCode={contextCode || modifiedCode || ""}
                                                 />
-                                                {hasDiffBlocks(msg.content) && !dismissedDiffMessages.has(msg.id || String(i)) && (
+                                                {hasDiffBlocks(msg.content) && hasApplicableDiffBlocks(contextCode || modifiedCode || "", msg.content) && parseDiffBlocks(msg.content).length > 0 && !dismissedDiffMessages.has(msg.id || String(i)) && (
                                                     <DiffSummaryBanner
                                                         content={msg.content}
                                                         disabled={!activeDiffContent || (activeDiffContent !== msg.content && !msg.content.includes(activeDiffContent.substring(0, 50)))}
