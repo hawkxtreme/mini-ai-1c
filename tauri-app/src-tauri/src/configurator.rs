@@ -2,7 +2,10 @@
 //! Handles window detection, hotkeys, and clipboard operations
 
 use windows::{
-    Win32::Foundation::{HWND, MAX_PATH},
+    Win32::Foundation::{HWND, MAX_PATH, RECT},
+    Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    },
     Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     },
@@ -12,8 +15,9 @@ use windows::{
     },
     Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic,
-        SetForegroundWindow, ShowWindow, SW_RESTORE,
+        SetForegroundWindow, ShowWindow, SW_RESTORE, MoveWindow, GetWindowRect,
     },
+    Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
 };
 
 /// Calculate a simple hash of content for conflict detection
@@ -543,4 +547,107 @@ pub fn is_selection_active(hwnd: isize) -> bool {
         let _ = hwnd;
         false
     }
+}
+
+/// Get visual offsets caused by invisible window borders (DWM frames)
+#[cfg(windows)]
+unsafe fn get_window_visual_offsets(hwnd: HWND) -> (i32, i32, i32, i32) {
+    let mut window_rect = RECT::default();
+    if GetWindowRect(hwnd, &mut window_rect).is_err() {
+        return (0, 0, 0, 0);
+    }
+    
+    let mut extended_rect = RECT::default();
+    let res = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut extended_rect as *mut _ as *mut _,
+        std::mem::size_of::<RECT>() as u32,
+    );
+    
+    if res.is_err() {
+        return (0, 0, 0, 0);
+    }
+    
+    (
+        extended_rect.left - window_rect.left,     // Left offset
+        extended_rect.top - window_rect.top,       // Top offset
+        window_rect.right - extended_rect.right,   // Right offset
+        window_rect.bottom - extended_rect.bottom, // Bottom offset
+    )
+}
+/// Align AI window and Configurator window side by side
+#[cfg(windows)]
+pub fn align_windows(configurator_hwnd: isize, ai_hwnd: isize) -> Result<(), String> {
+    let conf_window = HWND(configurator_hwnd as *mut std::ffi::c_void);
+    let ai_window = HWND(ai_hwnd as *mut std::ffi::c_void);
+
+    unsafe {
+        // 1. Get monitor info for the AI window
+        let monitor = MonitorFromWindow(ai_window, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        
+        if !GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+            return Err("Failed to get monitor info".to_string());
+        }
+
+        let work_area = monitor_info.rcWork;
+        let screen_width = work_area.right - work_area.left;
+        let screen_height = work_area.bottom - work_area.top;
+
+        // 2. Define AI window width (minimum width)
+        // Let's assume minimum width is around 400 logical pixels. 
+        // We'll use 450 to be safe for chat UI.
+        let ai_width = 450; 
+        let conf_width = screen_width - ai_width;
+
+        // 3. Restore windows if minimized
+        if IsIconic(conf_window).as_bool() {
+            let _ = ShowWindow(conf_window, SW_RESTORE);
+        }
+        if IsIconic(ai_window).as_bool() {
+            let _ = ShowWindow(ai_window, SW_RESTORE);
+        }
+
+        // 4. Calculate visual offsets for both windows
+        let (c_l, c_t, c_r, c_b) = get_window_visual_offsets(conf_window);
+        let (a_l, a_t, a_r, a_b) = get_window_visual_offsets(ai_window);
+
+        // 5. Move Configurator to the left
+        // Goal: visual left at work_area.left, visual top at work_area.top
+        // actual X = work_area.left - visual_left_offset
+        // actual Width = target_visual_width + visual_left_offset + visual_right_offset
+        let _ = MoveWindow(
+            conf_window,
+            work_area.left - c_l,
+            work_area.top - c_t,
+            conf_width + c_l + c_r,
+            screen_height + c_t + c_b,
+            true,
+        );
+        
+        // 6. Move AI window to the right
+        // Goal: visual left at work_area.left + conf_width, visual top at work_area.top
+        let _ = MoveWindow(
+            ai_window,
+            (work_area.left + conf_width) - a_l,
+            work_area.top - a_t,
+            ai_width + a_l + a_r,
+            screen_height + a_t + a_b,
+            true,
+        );
+
+        // 6. Bring AI window to top
+        let _ = SetForegroundWindow(ai_window);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn align_windows(_configurator_hwnd: isize, _ai_hwnd: isize) -> Result<(), String> {
+    Err("Window alignment is only available on Windows".to_string())
 }

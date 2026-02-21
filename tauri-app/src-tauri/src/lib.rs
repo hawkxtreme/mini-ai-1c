@@ -83,6 +83,7 @@ pub fn run() {
             get_mcp_server_statuses,
             get_mcp_server_logs,
             save_debug_logs,
+            align_with_configurator,
         ])
         .setup(|app| {
             // Setup Tray Icon

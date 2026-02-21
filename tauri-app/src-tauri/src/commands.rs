@@ -683,6 +683,25 @@ pub async fn paste_code_to_configurator<R: Runtime>(
     }
 }
 
+/// Align AI window with Configurator
+#[tauri::command]
+pub fn align_with_configurator(app_handle: tauri::AppHandle, hwnd: isize) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        let ai_window = app_handle.get_webview_window("main").ok_or("Main window not found")?;
+        let ai_hwnd = ai_window.hwnd().map_err(|e| e.to_string())?;
+        
+        configurator::align_windows(hwnd, ai_hwnd.0 as isize)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app_handle;
+        let _ = hwnd;
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
 /// Undo last code change in 1C Configurator
 #[tauri::command]
 pub async fn undo_last_change(hwnd: isize) -> Result<(), String> {
