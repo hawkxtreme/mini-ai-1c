@@ -190,10 +190,19 @@ export function MainLayout() {
 
                 <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
                     <ChatArea
+                        originalCode={originalCode}
                         modifiedCode={modifiedCode}
                         onApplyCode={useCallback((code: string) => {
                             setModifiedCode(code);
                             setShowSidePanel(true);
+                        }, [])}
+                        onCommitCode={useCallback((code: string) => {
+                            // "Принять" из чата - значит сделать код новым бейзлайном
+                            setOriginalCode(code);
+                            setModifiedCode(code);
+                            setActiveDiffContent('');
+                            // Опционально: можно закрывать панель, но лучше оставить её для просмотра
+                            // setShowSidePanel(false); 
                         }, [])}
                         onCodeLoaded={handleCodeLoaded}
                         diagnostics={diagnostics}
@@ -205,6 +214,7 @@ export function MainLayout() {
                             setActiveDiffContent(content);
                             if (content) setShowSidePanel(true); // Авто-открытие панели если пришли диффы
                         }}
+                        activeDiffContent={activeDiffContent}
                     />
 
                     <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>

@@ -47,19 +47,27 @@ export function CodeSidePanel({
         setLocalOriginalCode(originalCode);
     }, [originalCode]);
 
-    useEffect(() => {
-        if (activeDiffContent && viewMode !== 'diff') {
-            setViewMode('diff');
-        }
-    }, [activeDiffContent]);
+
     const [width, setWidth] = useState(500);
     const [isResizing, setIsResizing] = useState(false);
 
     // Ref to hold the latest activeDiffContent to avoid stale closures in Monaco callbacks
     const activeDiffContentRef = useRef(activeDiffContent);
     useEffect(() => {
+        console.log('[CodeSidePanel] activeDiffContent prop changed:', activeDiffContent?.length);
         activeDiffContentRef.current = activeDiffContent;
-    }, [activeDiffContent]);
+        if (activeDiffContent && viewMode !== 'diff') {
+            setViewMode('diff');
+        }
+
+        // Принудительно вызываем обновление виджетов, когда пришел контент
+        if (diffEditorRef.current?.updateInlineWidgetsRef) {
+            setTimeout(() => {
+                console.log('[CodeSidePanel] Forcing widget update after content change');
+                diffEditorRef.current.updateInlineWidgetsRef();
+            }, 50);
+        }
+    }, [activeDiffContent, viewMode]);
 
     const panelRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<any>(null);
@@ -316,79 +324,33 @@ export function CodeSidePanel({
                                 const currentContent = activeDiffContentRef.current;
                                 console.log('[DiffUpdate] Triggered. Changes:', changes?.length, 'Content length:', currentContent?.length);
 
-                                if (!changes || changes.length === 0 || !currentContent) {
-                                    console.log('[DiffUpdate] Aborted. Reason: No changes or no activeDiffContent.');
+                                if (!currentContent) {
                                     return;
                                 }
 
-                                const aiBlocks = parseDiffBlocks(currentContent);
-                                console.log('[DiffUpdate] Parsed AI blocks:', aiBlocks.length);
+                                if (changes === null) {
+                                    console.log('[DiffUpdate] Aborted: changes === null (Monaco is computing diff).');
+                                    return;
+                                }
 
-                                // Add new zones
+                                if (changes.length === 0) {
+                                    const currentModified = modifiedEditor.getValue();
+                                    const currentOriginal = diffEditorRef.current?.getOriginalEditor().getModel()?.getValue() || localOriginalCode;
+
+                                    if (currentModified === currentOriginal) {
+                                        console.log('[DiffUpdate] Code is identical. Clearing active diff.');
+                                        if (onActiveDiffChange) {
+                                            setTimeout(() => onActiveDiffChange(''), 0);
+                                        }
+                                    } else {
+                                        console.log('[DiffUpdate] No changes detected by Monaco yet, but code differs. Waiting...');
+                                    }
+                                    return;
+                                }
+
+                                // Add new zones for ALL changes regardless of heuristic
                                 modifiedEditor.changeViewZones((accessor: any) => {
                                     changes.forEach((change: any) => {
-                                        // HEURISTIC: Match against AI blocks
-                                        const originalModel = editor.getOriginalEditor().getModel();
-                                        if (!originalModel) return;
-
-                                        // In Monaco, if lines are appended, End = 0.
-                                        // If lines are inserted in the middle, End < Start (e.g., Start=5, End=4).
-                                        // If inserted at the very beginning of the file, Start=1, End=0.
-                                        const isAddition = change.originalEndLineNumber === 0 ||
-                                            change.originalEndLineNumber < change.originalStartLineNumber ||
-                                            (change.originalStartLineNumber === 1 && change.originalEndLineNumber === 0);
-
-                                        const origText = isAddition ? "" : originalModel.getValueInRange({
-                                            startLineNumber: change.originalStartLineNumber,
-                                            startColumn: 1,
-                                            endLineNumber: change.originalEndLineNumber,
-                                            endColumn: originalModel.getLineMaxColumn(change.originalEndLineNumber)
-                                        });
-
-                                        // Normalize function for comparison (removes ALL whitespace for robust matching)
-                                        const stripWhitespace = (s: string) => s.replace(/\s+/g, '');
-                                        const normOrig = stripWhitespace(origText);
-
-                                        const matchedBlock = aiBlocks.find(b => {
-                                            const normSearch = stripWhitespace(b.search);
-                                            const normReplace = stripWhitespace(b.replace);
-
-                                            // 1. Exact or fuzzy match for SEARCH (context)
-                                            const searchMatches = normSearch === normOrig || (normSearch.length > 0 && normOrig.length > 0 && (normSearch.includes(normOrig) || normOrig.includes(normSearch)));
-
-                                            if (isAddition) {
-                                                // For additions, get the added text from the modified editor
-                                                const modifiedModel = editor.getModifiedEditor().getModel();
-                                                const modifiedText = modifiedModel ? stripWhitespace(modifiedModel.getValueInRange({
-                                                    startLineNumber: change.modifiedStartLineNumber,
-                                                    startColumn: 1,
-                                                    endLineNumber: change.modifiedEndLineNumber,
-                                                    endColumn: modifiedModel.getLineMaxColumn(change.modifiedEndLineNumber)
-                                                })) : "";
-
-                                                // Check if the newly added text is actually proposed in this REPLACE block
-                                                // For pure additions, original text reported by Monaco is empty, so we cannot match SEARCH context with it.
-                                                // It's safe to just check if the new text is part of AI's replacement block.
-                                                return modifiedText.length > 0 && normReplace.includes(modifiedText);
-                                            }
-
-                                            return searchMatches;
-                                        });
-
-                                        const isAiHunk = !!matchedBlock;
-
-                                        // Debug logging
-                                        if (changes.length > 0) {
-                                            console.log(`[DiffHeuristic] Hunk at L${change.modifiedStartLineNumber}: isAiHunk=${isAiHunk}`, {
-                                                isAddition,
-                                                origText: normOrig,
-                                                matchedSearch: matchedBlock ? stripWhitespace(matchedBlock.search) : 'NONE'
-                                            });
-                                        }
-
-                                        // If this hunk doesn't match any AI block, don't show buttons
-                                        if (!isAiHunk) return;
-
                                         const domNode = document.createElement('div');
                                         domNode.className = 'flex items-center justify-end pr-8 gap-2 z-50 pointer-events-none';
                                         domNode.style.height = '18px';
@@ -464,6 +426,10 @@ export function CodeSidePanel({
                                                 viewZoneIdsRef.current.forEach(id => acc.removeZone(id));
                                                 viewZoneIdsRef.current = [];
                                             });
+
+                                            // Force re-calculation of diffs since originalCode changed
+                                            // This is needed because modifiedEditor doesn't change, so onDidChangeModelContent won't fire
+                                            setTimeout(updateInlineWidgets, 50);
                                         };
 
                                         toolbar.appendChild(btnRevert);

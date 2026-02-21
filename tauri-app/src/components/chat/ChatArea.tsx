@@ -12,15 +12,18 @@ import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDif
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 
 interface ChatAreaProps {
-    modifiedCode: string;
-    onApplyCode: (code: string) => void;
-    onCodeLoaded: (code: string, isSelection: boolean) => void;
-    diagnostics: any[];
-    onOpenSettings: (tab: string) => void;
+    originalCode?: string;
+    modifiedCode?: string;
+    onApplyCode?: (code: string) => void;
+    onCommitCode?: (code: string) => void;
+    onCodeLoaded?: (code: string, isSelection: boolean) => void;
+    diagnostics?: any[];
+    onOpenSettings?: (tab?: string) => void;
     onActiveDiffChange?: (content: string) => void;
+    activeDiffContent?: string;
 }
 
-function DiffSummaryBanner({ content, onApply, onReject }: { content: string, onApply?: () => void, onReject?: () => void }) {
+function DiffSummaryBanner({ content, onApply, onReject, disabled }: { content: string, onApply?: () => void, onReject?: () => void, disabled?: boolean }) {
     const blocks = useMemo(() => parseDiffBlocks(content), [content]);
     const stats = useMemo(() => {
         let added = 0;
@@ -47,16 +50,18 @@ function DiffSummaryBanner({ content, onApply, onReject }: { content: string, on
             <div className="flex items-center gap-2">
                 {onApply && (
                     <button
-                        onClick={onApply}
-                        className="px-2 py-0.5 rounded text-[11px] font-semibold bg-zinc-700 text-zinc-200 hover:bg-zinc-600 hover:text-white transition-all active:scale-95"
+                        onClick={disabled ? undefined : onApply}
+                        disabled={disabled}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all ${disabled ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed' : 'bg-zinc-700 text-zinc-200 hover:bg-zinc-600 hover:text-white active:scale-95'}`}
                     >
                         Принять
                     </button>
                 )}
                 {onReject && (
                     <button
-                        onClick={onReject}
-                        className="px-2 py-0.5 rounded text-[11px] font-semibold text-zinc-500 hover:text-zinc-300 transition-all active:scale-95 border border-transparent hover:border-zinc-800"
+                        onClick={disabled ? undefined : onReject}
+                        disabled={disabled}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold transition-all border ${disabled ? 'text-zinc-600 border-transparent cursor-not-allowed' : 'text-zinc-500 hover:text-zinc-300 active:scale-95 border-transparent hover:border-zinc-800'}`}
                     >
                         Отменить
                     </button>
@@ -67,7 +72,17 @@ function DiffSummaryBanner({ content, onApply, onReject }: { content: string, on
     );
 }
 
-export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics, onOpenSettings, onActiveDiffChange }: ChatAreaProps) {
+export function ChatArea({
+    originalCode,
+    modifiedCode,
+    onApplyCode,
+    onCommitCode,
+    onCodeLoaded,
+    diagnostics,
+    onOpenSettings,
+    onActiveDiffChange,
+    activeDiffContent
+}: ChatAreaProps) {
     const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
@@ -107,26 +122,36 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
         if (!isLoading && messages.length > 0) {
             const lastMsg = messages[messages.length - 1];
             if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)) {
-                if (onActiveDiffChange) {
-                    onActiveDiffChange(lastMsg.content);
-                }
-
                 const msgKey = lastMsg.id || String(messages.length - 1);
+
                 if (!appliedDiffMessages.has(msgKey)) {
+                    // Устанавливаем активный дифф ТОЛЬКО при первой встрече этого сообщения
+                    if (onActiveDiffChange) {
+                        onActiveDiffChange(lastMsg.content);
+                    }
+
                     console.log("[ChatArea] Auto-applying diffs for message", msgKey);
-                    const newCode = applyDiff(contextCode || modifiedCode, lastMsg.content);
-                    if (newCode !== (contextCode || modifiedCode)) {
-                        onApplyCode(newCode);
+                    const newCode = applyDiff(contextCode || modifiedCode || "", lastMsg.content);
+                    if (newCode !== (contextCode || modifiedCode || "")) {
+                        if (onApplyCode) {
+                            onApplyCode(newCode);
+                        }
                     }
                     setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+                } else {
+                    // Синхронизируем activeDiffContent по мере докачки сообщения, 
+                    // если этот дифф-блок является текущим активным
+                    if (onActiveDiffChange && activeDiffContent && lastMsg.content.startsWith(activeDiffContent)) {
+                        onActiveDiffChange(lastMsg.content);
+                    }
                 }
             }
         }
-    }, [messages, isLoading, onActiveDiffChange, contextCode, modifiedCode, onApplyCode, appliedDiffMessages]);
+    }, [messages, isLoading, onActiveDiffChange, contextCode, modifiedCode, onApplyCode, appliedDiffMessages, activeDiffContent, onCodeLoaded]);
 
     const handleSendMessage = () => {
         if (!input.trim() || isLoading) return;
-        const diagStrings = diagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+        const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
         sendMessage(input, contextCode || modifiedCode, diagStrings);
         setInput('');
         // Clear context after sending
@@ -149,7 +174,9 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
         const code = await getCode(isSelection);
         setContextCode(code);
         setIsContextSelection(isSelection);
-        onCodeLoaded(code, isSelection);
+        if (onCodeLoaded) {
+            onCodeLoaded(code, isSelection);
+        }
         if (onActiveDiffChange) {
             onActiveDiffChange('');
         }
@@ -173,7 +200,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
 
     const handleSaveEdit = (index: number) => {
         if (editText.trim()) {
-            const diagStrings = diagnostics.map(d => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+            const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
             editAndRerun(index, editText, contextCode || modifiedCode, diagStrings);
             setEditingIndex(null);
             setEditText('');
@@ -227,13 +254,13 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                                     title: "Проверка BSL LS",
                                     desc: "Интеграция с BSL Language Server для поиска ошибок и предупреждений.",
                                     icon: <Monitor className="w-5 h-5 text-green-400" />,
-                                    onClick: () => onOpenSettings('bsl')
+                                    onClick: () => { if (onOpenSettings) onOpenSettings('bsl'); }
                                 },
                                 {
                                     title: "Серверы MCP",
                                     desc: "Предустановленные инструменты: 1C:Метаданные, 1C:Напарник.",
                                     icon: <Settings className="w-5 h-5 text-orange-400" />,
-                                    onClick: () => onOpenSettings('mcp')
+                                    onClick: () => { if (onOpenSettings) onOpenSettings('mcp'); }
                                 }
                             ].map((step, i) => (
                                 <div
@@ -319,20 +346,30 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                                                     content={msg.content}
                                                     isStreaming={isLoading && i === messages.length - 1}
                                                     onApplyCode={onApplyCode}
-                                                    originalCode={contextCode || modifiedCode}
+                                                    originalCode={contextCode || modifiedCode || ""}
                                                 />
                                                 {hasDiffBlocks(msg.content) && !dismissedDiffMessages.has(msg.id || String(i)) && (
                                                     <DiffSummaryBanner
                                                         content={msg.content}
+                                                        disabled={!activeDiffContent || (activeDiffContent !== msg.content && !msg.content.includes(activeDiffContent.substring(0, 50)))}
                                                         onApply={() => {
-                                                            const newCode = applyDiff(contextCode || modifiedCode, msg.content);
-                                                            onApplyCode(newCode);
+                                                            const newCode = applyDiff(contextCode || modifiedCode || "", msg.content);
+                                                            if (onCommitCode) {
+                                                                onCommitCode(newCode);
+                                                            } else if (onApplyCode) {
+                                                                onApplyCode(newCode);
+                                                            }
                                                             if (onActiveDiffChange) onActiveDiffChange('');
-                                                            setDismissedDiffMessages(prev => new Set(prev).add(msg.id || String(i)));
                                                         }}
                                                         onReject={() => {
+                                                            if (originalCode) {
+                                                                if (onCommitCode) {
+                                                                    onCommitCode(originalCode);
+                                                                } else if (onApplyCode) {
+                                                                    onApplyCode(originalCode);
+                                                                }
+                                                            }
                                                             if (onActiveDiffChange) onActiveDiffChange('');
-                                                            setDismissedDiffMessages(prev => new Set(prev).add(msg.id || String(i)));
                                                         }}
                                                     />
                                                 )}
@@ -370,19 +407,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                                         )}
                                     </div>
 
-                                    {/* BSL Diagnostics */}
-                                    {msg.diagnostics && msg.diagnostics.length > 0 && (
-                                        <div className="mt-2 p-2 rounded bg-red-500/10 border border-red-500/20">
-                                            <div className="flex items-center gap-2 text-[11px] font-bold text-red-400 uppercase mb-1">
-                                                <Terminal size={12} /> Ошибки проверки кода
-                                            </div>
-                                            {msg.diagnostics.map((d, di) => (
-                                                <div key={di} className="text-[11px] text-red-300/80 font-mono">
-                                                    Строка {d.line + 1}: {d.message}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
+
                                 </div>
                             </div>
                         </div>
@@ -422,7 +447,7 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                     )}
 
                     <div className="flex items-center gap-2 text-[10px] text-zinc-600 font-mono">
-                        {modifiedCode.length > 0 && `CONTEXT: ${modifiedCode.length} chars`}
+                        {modifiedCode && modifiedCode.length > 0 && `CONTEXT: ${modifiedCode.length} chars`}
                     </div>
                 </div>
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
@@ -475,8 +500,9 @@ export function ChatArea({ modifiedCode, onApplyCode, onCodeLoaded, diagnostics,
                                     setShowConfigDropdown(next);
                                     if (next) {
                                         setShowModelDropdown(false);
-                                        setShowGetCodeDropdown(false);
-                                        refreshWindows();
+                                        if (onCodeLoaded) {
+                                            onCodeLoaded(contextCode || modifiedCode || "", false); // Assuming this is meant to refresh the current code context
+                                        }
                                     }
                                 }}
                                     className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
