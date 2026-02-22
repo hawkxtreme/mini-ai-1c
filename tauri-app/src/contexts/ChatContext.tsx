@@ -194,8 +194,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (codeContext) {
             contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
             if (diagnostics && diagnostics.length > 0) {
-                contextPayload += `\n=== DETECTED ERRORS ===\n${diagnostics.join('\n')}\n`;
-                contextPayload += `\nPlease fix these errors in the code.`;
+                contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
             }
         }
 
@@ -255,8 +254,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (codeContext) {
             contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
             if (diagnostics && diagnostics.length > 0) {
-                contextPayload += `\n=== DETECTED ERRORS ===\n${diagnostics.join('\n')}\n`;
-                contextPayload += `\nPlease fix these errors in the code.`;
+                contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
             }
         }
 

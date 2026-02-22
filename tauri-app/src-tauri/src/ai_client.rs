@@ -86,7 +86,7 @@ struct StreamDelta {
 struct ToolCallDelta {
     index: Option<usize>,
     id: Option<String>,
-    r#type: Option<String>,
+    _type: Option<String>,
     function: Option<ToolCallFunctionDelta>,
 }
 
@@ -187,6 +187,12 @@ Procedure MyFunction()
 Procedure MyFunction()
     // some code
 >>>>>>> REPLACE
+
+6. **OUTPUT FORMAT (CRITICAL):**
+   - When using SEARCH/REPLACE blocks, do NOT add a separate ```bsl...``` code block with the full or partial file content.
+   - Your response must contain: text explanation (optional) + SEARCH/REPLACE blocks ONLY.
+   - **FORBIDDEN**: Adding an empty ```bsl``` block or a full file listing alongside SEARCH/REPLACE blocks.
+   - The SEARCH/REPLACE blocks ARE the code changes. No need to repeat the code in another format.
 "#;
 
 /// Get dynamic system prompt based on available tools
@@ -232,6 +238,12 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
 - ЗАПРЕЩАЕТСЯ любой самопроизвольный рефакторинг, оптимизация алгоритмов или удаление комментариев.
 - ЗАПРЕЩЕНО изменять код за пределами запрашиваемых модификаций.
 - НЕ исправляй опечатки в переменных, если об этом не просили, так как это нарушит ссылки в других модулях.
+
+РЕЖИМ ОТВЕТА НА ВОПРОСЫ (СТРОГИЙ ПРИОРИТЕТ):
+- Если запрос пользователя является ВОПРОСОМ (содержит слова: "что делает", "объясни", "как работает", "расскажи", "зачем", "почему", "что такое", "как используется") — ОТВЕЧАЙ ТОЛЬКО ТЕКСТОМ.
+- В режиме вопроса ЗАПРЕЩЕНО использовать блоки SEARCH/REPLACE.
+- В режиме вопроса ЗАПРЕЩЕНО вносить ЛЮБЫЕ изменения в код, даже "очевидные улучшения" или исправления.
+- Изменения кода (SEARCH/REPLACE) — ТОЛЬКО если запрос содержит явное действие: "исправь", "добавь", "измени", "перепиши", "удали", "создай", "реализуй", "оптимизируй".
 
 Используй русский язык в ответах. Форматируй код в блоках ```bsl...```.
 При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL)."#,
@@ -290,11 +302,19 @@ pub fn get_system_prompt(available_tools: &[ToolInfo]) -> String {
         prompt.push_str("\nКРИТИЧЕСКИЕ ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:\n");
         
         if available_tools.iter().any(|t| t.tool.function.name == "check_bsl_syntax") {
-            prompt.push_str("1. `check_bsl_syntax` (сервер bsl-ls): Используй для самопроверки.\n");
-            prompt.push_str("   - ВАЖНО: Твоя зона ответственности - ТОЛЬКО строки, которые ты добавил или изменил по запросу.\n");
-            prompt.push_str("   - ЗАПРЕТ: Не исправляй ошибки в окружающем коде (Legacy), даже если они находятся в той же функции.\n");
-            prompt.push_str("   - ЕСЛИ bsl-ls ругается на 'Cognitive Complexity', 'Magic Number' в старом коде -> ИГНОРИРУЙ ЭТО. Не пытайся это исправить.\n");
-            prompt.push_str("   - Исправляй ТОЛЬКО синтаксические ошибки, которые делают код нерабочим (например, забытая скобка).\n");
+            prompt.push_str("1. `check_bsl_syntax` (сервер bsl-ls): Используй для анализа и самопроверки.\n");
+            prompt.push_str("\n");
+            prompt.push_str("   РЕЖИМ А — Самопроверка (ИИ проверяет свои собственные изменения):\n");
+            prompt.push_str("   - Зона ответственности: ТОЛЬКО строки, которые ты сам добавил или изменил.\n");
+            prompt.push_str("   - ЗАПРЕТ: не трогай ошибки в окружающем Legacy-коде, даже в той же функции.\n");
+            prompt.push_str("   - 'Cognitive Complexity', 'Magic Number' в старом коде — ИГНОРИРУЙ.\n");
+            prompt.push_str("   - Исправляй ТОЛЬКО критические синтаксические ошибки (забытая скобка и т.п.).\n");
+            prompt.push_str("\n");
+            prompt.push_str("   РЕЖИМ Б — Выполнение явного запроса пользователя:\n");
+            prompt.push_str("   - Если пользователь ЯВНО просит исправить ошибки, добавить описание, устранить предупреждения — ВЫПОЛНЯЙ.\n");
+            prompt.push_str("   - Примеры явных запросов: 'исправь ошибки bsl', 'добавь описание параметров', 'устрани предупреждения'.\n");
+            prompt.push_str("   - В этом режиме исправляй ВСЕ указанные пользователем проблемы, включая Legacy-код.\n");
+            prompt.push_str("   - НЕ отказывайся со ссылкой на правила Legacy — пользователь осознанно просит изменения.\n");
         }
         
         if available_tools.iter().any(|t| t.tool.function.name == "ask_1c_ai") {
@@ -438,7 +458,7 @@ pub async fn stream_chat_completion(
     // Heuristic: If max_tokens (Context Window in UI) is very large (> 16k), 
     // it likely represents input capacity, not generation limit.
     // Most APIs reject huge max_tokens for generation. Clamp to safe default (4096).
-    let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
+    let _api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
 
     // Build request
     let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };

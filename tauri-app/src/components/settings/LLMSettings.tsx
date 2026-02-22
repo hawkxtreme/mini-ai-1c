@@ -168,7 +168,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     return (
         <div className="flex h-full w-full">
             {/* Sidebar List */}
-            <div className="w-32 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
+            <div className="w-24 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
                 <div className="space-y-1.5">
                     {profiles.profiles.map(p => (
                         <div

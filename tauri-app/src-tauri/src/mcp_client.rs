@@ -32,7 +32,7 @@ struct JsonRpcRequest {
 
 #[derive(Deserialize)]
 struct JsonRpcResponse {
-    jsonrpc: String,
+    _jsonrpc: String,
     result: Option<Value>,
     error: Option<JsonRpcError>,
     id: Option<u64>,

@@ -16,6 +16,7 @@ interface ConfiguratorContextType {
     getCode: (useSelectAll: boolean) => Promise<string>;
     pasteCode: (code: string, useSelectAll: boolean, originalContent?: string) => Promise<void>;
     checkSelection: () => Promise<boolean>;
+    snapToConfigurator: () => Promise<void>;
     activeConfigTitle: string;
 }
 
@@ -106,6 +107,25 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         return await api.checkSelectionState(targetHwnd);
     }, [selectedHwnd, pattern]);
 
+    const snapToConfigurator = useCallback(async () => {
+        let targetHwnd = selectedHwnd;
+        if (!targetHwnd) {
+            const windows = await api.findConfiguratorWindows(pattern);
+            if (windows.length > 0) targetHwnd = windows[0].hwnd;
+        }
+
+        if (!targetHwnd) {
+            console.warn("No Configurator window found for snapping");
+            return;
+        }
+
+        try {
+            await api.alignWithConfigurator(targetHwnd);
+        } catch (e) {
+            console.error("Failed to snap window", e);
+        }
+    }, [selectedHwnd, pattern]);
+
     const contextValue = useMemo(() => ({
         detectedWindows,
         selectedHwnd,
@@ -114,8 +134,9 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         getCode,
         pasteCode,
         checkSelection,
+        snapToConfigurator,
         activeConfigTitle
-    }), [detectedWindows, selectedHwnd, refreshWindows, selectWindow, getCode, pasteCode, checkSelection, activeConfigTitle]);
+    }), [detectedWindows, selectedHwnd, refreshWindows, selectWindow, getCode, pasteCode, checkSelection, snapToConfigurator, activeConfigTitle]);
 
     return (
         <ConfiguratorContext.Provider value={contextValue}>

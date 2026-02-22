@@ -194,7 +194,7 @@ pub async fn reject_tool(
 pub async fn stream_chat(
     messages: Vec<ChatMessage>,
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
+    _state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
     chat_state: tauri::State<'_, ChatState>,
 ) -> Result<(), String> {
     use crate::ai_client::{extract_bsl_code, stream_chat_completion, ApiMessage};
@@ -296,7 +296,7 @@ pub async fn stream_chat(
                     println!("[AI][TOOL] Executing: {} with args: {}", tool_name, arguments);
 
                     let mut tool_result = "Error: Tool not found".to_string();
-                    let mut found = false;
+                    let mut _found = false;
 
                     let mut all_configs = settings.mcp_servers.clone();
                     
@@ -343,7 +343,7 @@ pub async fn stream_chat(
                                             }));
                                         },
                                     }
-                                    found = true;
+                                    _found = true;
                                     break;
                                 }
                             }
@@ -679,6 +679,25 @@ pub async fn paste_code_to_configurator<R: Runtime>(
     }
     #[cfg(not(windows))]
     {
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Align AI window with Configurator
+#[tauri::command]
+pub fn align_with_configurator(app_handle: tauri::AppHandle, hwnd: isize) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        let ai_window = app_handle.get_webview_window("main").ok_or("Main window not found")?;
+        let ai_hwnd = ai_window.hwnd().map_err(|e| e.to_string())?;
+        
+        configurator::align_windows(hwnd, ai_hwnd.0 as isize)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app_handle;
+        let _ = hwnd;
         Err("Configurator integration is only available on Windows".to_string())
     }
 }
