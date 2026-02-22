@@ -231,6 +231,7 @@ const server = new McpServer({
 
 server.tool(
     "ask_1c_ai",
+    "Задать вопрос ИИ-консультанту по платформе 1С, стандартам разработки и БСП",
     {
         question: z.string().describe("Вопрос для модели 1С.ai"),
         programming_language: z.string().optional().describe("Язык программирования (опционально)"),
@@ -268,6 +269,7 @@ server.tool(
 
 server.tool(
     "explain_1c_syntax",
+    "Объяснить синтаксис конкретного метода, функции или встроенного объекта 1С",
     {
         syntax_element: z.string().describe("Элемент синтаксиса или объект 1С для объяснения"),
         context: z.string().optional().describe("Контекст использования"),
@@ -304,6 +306,7 @@ server.tool(
 
 server.tool(
     "check_1c_code",
+    "Проверить фрагмент кода 1С на наличие логических ошибок, проблем производительности или соответствие стандартам",
     {
         code: z.string().describe("Код 1С для проверки"),
         check_type: z.enum(["syntax", "logic", "performance"]).optional().default("syntax").describe("Тип проверки"),
