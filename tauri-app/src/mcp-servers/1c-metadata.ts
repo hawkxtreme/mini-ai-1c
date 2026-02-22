@@ -42,6 +42,7 @@ const server = new Server(
  * Helper to call 1C HTTP Service using JSON-RPC 2.0
  */
 async function call1C(method: string, params: any = {}) {
+    console.error(`[1C:Native] Calling method: ${method}`);
     const url = BASE_URL.endsWith("/") ? `${BASE_URL}rpc` : `${BASE_URL}/rpc`;
     const requestId = Math.floor(Math.random() * 1000000);
 
@@ -58,6 +59,9 @@ async function call1C(method: string, params: any = {}) {
         headers["Authorization"] = `Basic ${auth}`;
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
     try {
         const response = await fetch(url, {
             method: "POST",
@@ -68,7 +72,9 @@ async function call1C(method: string, params: any = {}) {
                 params: params,
                 id: requestId,
             }),
+            signal: controller.signal,
         });
+        clearTimeout(timeout);
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -76,6 +82,7 @@ async function call1C(method: string, params: any = {}) {
         }
 
         const json: any = await response.json();
+        console.error(`[1C:Native] Method ${method} returned result`);
 
         if (json.error) {
             throw new Error(`1C Error [${json.error.code}]: ${json.error.message}`);
@@ -93,8 +100,12 @@ async function call1C(method: string, params: any = {}) {
 // Forward Tools Listing
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
-        return await call1C("tools/list");
+        console.error("[1C:Metadata] Handling tools/list request...");
+        const result = await call1C("tools/list");
+        console.error(`[1C:Metadata] tools/list success, found ${result.tools.length} tools`);
+        return result;
     } catch (error: any) {
+        console.error(`[1C:Metadata] tools/list error: ${error.message}`);
         return { tools: [] };
     }
 });

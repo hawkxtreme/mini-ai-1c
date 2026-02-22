@@ -299,14 +299,44 @@ pub fn load_settings() -> AppSettings {
         AppSettings::default()
     };
 
-    // Migration: Cleanup stale node_modules paths in MCP servers
+    // Migration: Force high-performance node launcher for built-in MCP servers
     let mut modified = false;
     for server in settings.mcp_servers.iter_mut() {
-        if let Some(cmd) = &server.command {
-            if cmd.contains("node_modules") {
-                crate::app_log!("[DEBUG] Migrating stale command '{}' to 'npx' for MCP server '{}'", cmd, server.id);
-                server.command = Some("npx".to_string());
+        if server.id == "builtin-1c-naparnik" || server.id == "builtin-1c-metadata" {
+            let current_cmd = server.command.as_deref().unwrap_or("");
+            if current_cmd != "node" {
+                crate::app_log!("[SETTINGS] Migrating builtin server '{}' from '{}' to 'node' launcher", server.id, current_cmd);
+                server.command = Some("node".to_string());
                 modified = true;
+            }
+            
+            if let Some(args) = &mut server.args {
+                let original_args = args.clone();
+                // Filter out tsx/npx specific artifacts
+                args.retain(|a| a != "tsx" && a != "--yes" && !a.contains("node_modules"));
+                
+                for arg in args.iter_mut() {
+                    // Fix paths: we want 'mcp-servers/name.cjs' relative to src-tauri
+                    if arg.contains("mcp-servers") {
+                        *arg = arg.replace("src-tauri/", "").replace("src/mcp-servers/", "mcp-servers/");
+                    }
+                    if arg.ends_with(".ts") || arg.ends_with(".js") {
+                        *arg = arg.replace(".ts", ".cjs").replace(".js", ".cjs");
+                    }
+                }
+                if args != &original_args {
+                    crate::app_log!("[SETTINGS] Migrated builtin server '{}' args to: {:?}", server.id, args);
+                    modified = true; 
+                }
+            }
+        } else {
+            // Generic migration for other servers if they have node_modules in command
+            if let Some(cmd) = &server.command {
+                if cmd.contains("node_modules") {
+                    crate::app_log!("[DEBUG] Migrating stale command '{}' to 'npx' for MCP server '{}'", cmd, server.id);
+                    server.command = Some("npx".to_string());
+                    modified = true;
+                }
             }
         }
     }
