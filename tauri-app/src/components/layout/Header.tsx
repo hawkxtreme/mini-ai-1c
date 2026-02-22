@@ -95,9 +95,27 @@ export function Header({ bslStatus, viewMode, onViewModeChange, onClearChat, onO
             >
                 {/* Track Background Icons */}
                 <div className="absolute inset-x-1 inset-y-0 flex items-center justify-between text-zinc-600">
-                    <div className="w-[36px] flex justify-center"><MessageSquare className="w-3.5 h-3.5" /></div>
-                    <div className="w-[36px] flex justify-center"><Columns className="w-3.5 h-3.5" /></div>
-                    <div className="w-[36px] flex justify-center"><Code2 className="w-3.5 h-3.5" /></div>
+                    <div
+                        id="tour-mode-assistant"
+                        onClick={() => onViewModeChange('assistant')}
+                        className="w-[36px] flex justify-center hover:text-zinc-400 transition-colors cursor-pointer"
+                    >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                    </div>
+                    <div
+                        id="tour-mode-split"
+                        onClick={() => onViewModeChange('split')}
+                        className="w-[36px] flex justify-center hover:text-zinc-400 transition-colors cursor-pointer"
+                    >
+                        <Columns className="w-3.5 h-3.5" />
+                    </div>
+                    <div
+                        id="tour-mode-code"
+                        onClick={() => onViewModeChange('code')}
+                        className="w-[36px] flex justify-center hover:text-zinc-400 transition-colors cursor-pointer"
+                    >
+                        <Code2 className="w-3.5 h-3.5" />
+                    </div>
                 </div>
 
                 {/* Sliding Indicator */}
