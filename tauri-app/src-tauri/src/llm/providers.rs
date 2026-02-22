@@ -31,7 +31,7 @@ pub struct RegistryProviderData {
 }
 
 const REGISTRY_URL: &str = "https://raw.githubusercontent.com/hawkxtreme/mini-ai-1c/main/registry/models.json"; // Placeholder
-const OPENAI_MODELS_ENDPOINT: &str = "/v1/models";
+// const OPENAI_MODELS_ENDPOINT: &str = "/v1/models";
 
 pub async fn fetch_models_from_api(_provider_id: &str, base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
     let client = Client::new();
@@ -128,7 +128,7 @@ pub fn merge_models(api_models: Vec<Model>, registry: &RegistryData, provider_id
             for (p_id, p_data) in &registry.providers {
                 if let Some(reg_model) = p_data.models.iter().find(|m| m.id == model.id) {
                     enrich_model(&mut model, reg_model);
-                    found_in_registry = true;
+                    let _ = true; // flag was found_in_registry
                     source = "registry_global";
                     println!("  Model '{}' found in global registry under '{}'", model.id, p_id);
                     break;

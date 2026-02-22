@@ -32,7 +32,7 @@ struct JsonRpcRequest {
 
 #[derive(Deserialize)]
 struct JsonRpcResponse {
-    jsonrpc: String,
+    _jsonrpc: String,
     result: Option<Value>,
     error: Option<JsonRpcError>,
     id: Option<u64>,
@@ -388,7 +388,7 @@ impl McpSession {
     async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
         let server_id_for_logs = config.id.clone();
         let command = config.command.ok_or("Command is missing")?;
-        let mut args = config.args.unwrap_or_default();
+        let args = config.args.unwrap_or_default();
 
         // Path resolution for production (Tauri Resources)
         // Only resolve as resources if we are NOT in debug mode,
@@ -450,7 +450,7 @@ impl McpSession {
             }
         }
 
-        let (mut command, mut args) = if cfg!(windows) {
+        let (command, args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
             let cmd_lower = command.to_lowercase();

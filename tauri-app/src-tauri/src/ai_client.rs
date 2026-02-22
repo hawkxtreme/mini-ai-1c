@@ -86,7 +86,7 @@ struct StreamDelta {
 struct ToolCallDelta {
     index: Option<usize>,
     id: Option<String>,
-    r#type: Option<String>,
+    _type: Option<String>,
     function: Option<ToolCallFunctionDelta>,
 }
 
@@ -438,7 +438,7 @@ pub async fn stream_chat_completion(
     // Heuristic: If max_tokens (Context Window in UI) is very large (> 16k), 
     // it likely represents input capacity, not generation limit.
     // Most APIs reject huge max_tokens for generation. Clamp to safe default (4096).
-    let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
+    let _api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
 
     // Build request
     let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };

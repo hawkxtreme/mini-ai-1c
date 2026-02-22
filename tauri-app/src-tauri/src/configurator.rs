@@ -14,7 +14,7 @@ use windows::{
         SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU, VK_SHIFT, VK_UP,
     },
     Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic, IsZoomed,
         SetForegroundWindow, ShowWindow, SW_RESTORE, MoveWindow, GetWindowRect,
     },
     Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
@@ -241,7 +241,7 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
         
         // Restore window if minimized
         if IsIconic(window).as_bool() {
-            ShowWindow(window, SW_RESTORE);
+            let _ = ShowWindow(window, SW_RESTORE);
         }
         
         // "Alt-key" trick to bypass SetForegroundWindow restrictions
@@ -277,11 +277,11 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
             attached = AttachThreadInput(current_thread_id, target_thread_id, true).as_bool();
         }
         
-        SetForegroundWindow(window);
-        SetFocus(window);
+        let _ = SetForegroundWindow(window);
+        let _ = SetFocus(window);
         
         if attached {
-            AttachThreadInput(current_thread_id, target_thread_id, false);
+            let _ = AttachThreadInput(current_thread_id, target_thread_id, false);
         }
         
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -401,7 +401,7 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
         let _ = SetFocus(window);
         
         if attached {
-            AttachThreadInput(current_thread_id, target_thread_id, false);
+            let _ = AttachThreadInput(current_thread_id, target_thread_id, false);
         }
         
         std::thread::sleep(std::time::Duration::from_millis(100)); // Wait for focus
@@ -500,9 +500,9 @@ pub fn is_selection_active(hwnd: isize) -> bool {
             
             // 2. Focus window
             if windows::Win32::UI::WindowsAndMessaging::IsIconic(window).as_bool() {
-                windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
             }
-            windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
             std::thread::sleep(std::time::Duration::from_millis(150));
             
             // 3. Send Ctrl+C
@@ -583,13 +583,34 @@ pub fn align_windows(configurator_hwnd: isize, ai_hwnd: isize) -> Result<(), Str
     let ai_window = HWND(ai_hwnd as *mut std::ffi::c_void);
 
     unsafe {
-        // 1. Get monitor info for the AI window
-        let monitor = MonitorFromWindow(ai_window, MONITOR_DEFAULTTONEAREST);
+        println!("[Configurator] Aligning windows (PIXEL-PERFECT V2): CONF={} AI={}", configurator_hwnd, ai_hwnd);
+
+        // 1. PHASE ONE: Preparation (Restore and wait)
+        let mut needs_delay = false;
+        if IsIconic(conf_window).as_bool() || IsZoomed(conf_window).as_bool() {
+            println!("[Configurator] Restoring Configurator");
+            let _ = ShowWindow(conf_window, SW_RESTORE);
+            needs_delay = true;
+        }
+        if IsIconic(ai_window).as_bool() || IsZoomed(ai_window).as_bool() {
+            println!("[Configurator] Restoring AI window");
+            let _ = ShowWindow(ai_window, SW_RESTORE);
+            needs_delay = true;
+        }
+
+        if needs_delay {
+            // Wait for OS to finish animations and update window state
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
+        // 2. PHASE TWO: Measurement (Post-restore)
+        
+        // Use Configurator's monitor as primary work screen
+        let monitor = MonitorFromWindow(conf_window, MONITOR_DEFAULTTONEAREST);
         let mut monitor_info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        
         if !GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
             return Err("Failed to get monitor info".to_string());
         }
@@ -598,50 +619,53 @@ pub fn align_windows(configurator_hwnd: isize, ai_hwnd: isize) -> Result<(), Str
         let screen_width = work_area.right - work_area.left;
         let screen_height = work_area.bottom - work_area.top;
 
-        // 2. Define AI window width (minimum width)
-        // Let's assume minimum width is around 400 logical pixels. 
-        // We'll use 450 to be safe for chat UI.
-        let ai_width = 450; 
-        let conf_width = screen_width - ai_width;
-
-        // 3. Restore windows if minimized
-        if IsIconic(conf_window).as_bool() {
-            let _ = ShowWindow(conf_window, SW_RESTORE);
-        }
-        if IsIconic(ai_window).as_bool() {
-            let _ = ShowWindow(ai_window, SW_RESTORE);
-        }
-
-        // 4. Calculate visual offsets for both windows
+        // Get visual offsets for correct border alignment
         let (c_l, c_t, c_r, c_b) = get_window_visual_offsets(conf_window);
         let (a_l, a_t, a_r, a_b) = get_window_visual_offsets(ai_window);
 
-        // 5. Move Configurator to the left
-        // Goal: visual left at work_area.left, visual top at work_area.top
-        // actual X = work_area.left - visual_left_offset
-        // actual Width = target_visual_width + visual_left_offset + visual_right_offset
-        let _ = MoveWindow(
-            conf_window,
-            work_area.left - c_l,
-            work_area.top - c_t,
-            conf_width + c_l + c_r,
-            screen_height + c_t + c_b,
-            true,
-        );
+        // Get CURRENT AI window width instead of assumption
+        let mut ai_rect = RECT::default();
+        let _ = GetWindowRect(ai_window, &mut ai_rect);
+        let current_ai_logical_width = ai_rect.right - ai_rect.left;
+        let ai_visual_width = current_ai_logical_width - a_l - a_r;
         
-        // 6. Move AI window to the right
-        // Goal: visual left at work_area.left + conf_width, visual top at work_area.top
-        let _ = MoveWindow(
-            ai_window,
-            (work_area.left + conf_width) - a_l,
-            work_area.top - a_t,
-            ai_width + a_l + a_r,
-            screen_height + a_t + a_b,
-            true,
-        );
+        // Use current width but clamp it to reasonable range (400 to 650)
+        let ai_width = ai_visual_width.clamp(400, 650);
+        
+        // --- SAFETY MARGIN STRATEGY ---
+        let margin = 7; // Pixels from edges and between windows
+        
+        // Available width for both windows minus margins (left, middle, right)
+        let available_width = screen_width - (margin * 3);
+        let conf_width = available_width - ai_width;
 
-        // 6. Bring AI window to top
+        println!("[Configurator] Screen {}x{}, Target AI: {}, Conf: {}, Margin: {}", 
+            screen_width, screen_height, ai_width, conf_width, margin);
+
+        // 3. PHASE THREE: Movement
+        
+        // Move Configurator to the left side with margin
+        let conf_x = work_area.left + margin - c_l;
+        let conf_y = work_area.top + margin - c_t;
+        let conf_w = conf_width + c_l + c_r;
+        let conf_h = screen_height - (margin * 2) + c_t + c_b;
+        
+        println!("[Configurator] Move CONF: X={}, Y={}, W={}, H={}", conf_x, conf_y, conf_w, conf_h);
+        let _ = MoveWindow(conf_window, conf_x, conf_y, conf_w, conf_h, true);
+        
+        // Move AI window to the right side with margin
+        let visual_ai_x = work_area.left + conf_width + (margin * 2);
+        let ai_x = visual_ai_x - a_l;
+        let ai_y = work_area.top + margin - a_t;
+        let ai_w = ai_width + a_l + a_r;
+        let ai_h = screen_height - (margin * 2) + a_t + a_b;
+
+        println!("[Configurator] Move AI: X={}, Y={}, W={}, H={}", ai_x, ai_y, ai_w, ai_h);
+        let _ = MoveWindow(ai_window, ai_x, ai_y, ai_w, ai_h, true);
+
+        // Final focus
         let _ = SetForegroundWindow(ai_window);
+        let _ = SetFocus(ai_window);
     }
 
     Ok(())

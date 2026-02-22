@@ -167,10 +167,10 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-2 sm:p-4 animate-in fade-in duration-200">
+        <div className="fixed inset-0 bg-black/60 flex items-start justify-center z-50 pt-12 pb-4 px-4 sm:pt-16 sm:pb-6 sm:px-6 animate-in fade-in duration-200 overflow-y-auto">
             <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-4xl h-full sm:h-[85vh] overflow-hidden flex flex-col shadow-2xl">
                 {/* Header */}
-                <div data-tauri-drag-region className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-zinc-800 bg-zinc-900 select-none">
+                <div data-tauri-drag-region className="flex items-center justify-between px-6 sm:px-8 py-3 sm:py-4 border-b border-zinc-800 bg-zinc-900 select-none">
                     <h2 className="text-lg sm:text-xl font-bold text-zinc-100 pointer-events-none">Settings</h2>
                     <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200">
                         <X className="w-5 h-5" />
@@ -190,13 +190,14 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                         <button
                             key={t.id}
                             onClick={() => setTab(t.id)}
-                            className={`flex items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 text-xs sm:text-sm font-medium transition-colors border-b-2 whitespace-nowrap ${tab === t.id
+                            title={t.label}
+                            className={`flex items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 text-xs sm:text-sm font-medium transition-colors border-b-2 whitespace-nowrap flex-shrink-0 ${tab === t.id
                                 ? 'border-blue-500 text-blue-400 bg-zinc-800/50'
                                 : 'border-transparent text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/30'
                                 }`}
                         >
                             <t.icon className="w-4 h-4" />
-                            {t.label}
+                            <span className="hidden min-[500px]:inline">{t.label}</span>
                         </button>
                     ))}
                 </div>

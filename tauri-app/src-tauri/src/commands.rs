@@ -194,7 +194,7 @@ pub async fn reject_tool(
 pub async fn stream_chat(
     messages: Vec<ChatMessage>,
     app_handle: tauri::AppHandle,
-    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
+    _state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
     chat_state: tauri::State<'_, ChatState>,
 ) -> Result<(), String> {
     use crate::ai_client::{extract_bsl_code, stream_chat_completion, ApiMessage};
@@ -296,7 +296,7 @@ pub async fn stream_chat(
                     println!("[AI][TOOL] Executing: {} with args: {}", tool_name, arguments);
 
                     let mut tool_result = "Error: Tool not found".to_string();
-                    let mut found = false;
+                    let mut _found = false;
 
                     let mut all_configs = settings.mcp_servers.clone();
                     
@@ -343,7 +343,7 @@ pub async fn stream_chat(
                                             }));
                                         },
                                     }
-                                    found = true;
+                                    _found = true;
                                     break;
                                 }
                             }
