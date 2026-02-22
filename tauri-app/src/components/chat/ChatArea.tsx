@@ -286,7 +286,7 @@ export function ChatArea({
                                 <div className="p-1.5 rounded-lg bg-blue-500/10 group-hover:bg-blue-500/20 transition-colors">
                                     <Send className="w-3.5 h-3.5 text-blue-400" />
                                 </div>
-                                <div className="flex flex-col items-start leading-tight">
+                                <div className="flex flex-col items-center leading-tight">
                                     <span className="text-[10px] text-zinc-600 uppercase tracking-wider font-semibold">Feedback & Support</span>
                                     <span className="text-xs text-zinc-400 group-hover:text-blue-400 transition-colors">@hawkxtreme</span>
                                 </div>
@@ -511,9 +511,7 @@ export function ChatArea({
                                     setShowConfigDropdown(next);
                                     if (next) {
                                         setShowModelDropdown(false);
-                                        if (onCodeLoaded) {
-                                            onCodeLoaded(contextCode || modifiedCode || "", false); // Assuming this is meant to refresh the current code context
-                                        }
+                                        refreshWindows();
                                     }
                                 }}
                                     className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
@@ -572,6 +570,6 @@ export function ChatArea({
                     </div>
                 </div>
             </div>
-        </div>
+        </div >
     );
 }

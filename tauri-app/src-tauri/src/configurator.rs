@@ -2,7 +2,10 @@
 //! Handles window detection, hotkeys, and clipboard operations
 
 use windows::{
-    Win32::Foundation::{HWND, MAX_PATH},
+    Win32::Foundation::{HWND, MAX_PATH, RECT},
+    Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    },
     Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     },
@@ -11,9 +14,10 @@ use windows::{
         SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU, VK_SHIFT, VK_UP,
     },
     Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic,
-        SetForegroundWindow, ShowWindow, SW_RESTORE,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic, IsZoomed,
+        SetForegroundWindow, ShowWindow, SW_RESTORE, MoveWindow, GetWindowRect,
     },
+    Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
 };
 
 /// Calculate a simple hash of content for conflict detection
@@ -237,7 +241,7 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
         
         // Restore window if minimized
         if IsIconic(window).as_bool() {
-            ShowWindow(window, SW_RESTORE);
+            let _ = ShowWindow(window, SW_RESTORE);
         }
         
         // "Alt-key" trick to bypass SetForegroundWindow restrictions
@@ -273,11 +277,11 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
             attached = AttachThreadInput(current_thread_id, target_thread_id, true).as_bool();
         }
         
-        SetForegroundWindow(window);
-        SetFocus(window);
+        let _ = SetForegroundWindow(window);
+        let _ = SetFocus(window);
         
         if attached {
-            AttachThreadInput(current_thread_id, target_thread_id, false);
+            let _ = AttachThreadInput(current_thread_id, target_thread_id, false);
         }
         
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -397,7 +401,7 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
         let _ = SetFocus(window);
         
         if attached {
-            AttachThreadInput(current_thread_id, target_thread_id, false);
+            let _ = AttachThreadInput(current_thread_id, target_thread_id, false);
         }
         
         std::thread::sleep(std::time::Duration::from_millis(100)); // Wait for focus
@@ -496,9 +500,9 @@ pub fn is_selection_active(hwnd: isize) -> bool {
             
             // 2. Focus window
             if windows::Win32::UI::WindowsAndMessaging::IsIconic(window).as_bool() {
-                windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
             }
-            windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
             std::thread::sleep(std::time::Duration::from_millis(150));
             
             // 3. Send Ctrl+C
@@ -543,4 +547,131 @@ pub fn is_selection_active(hwnd: isize) -> bool {
         let _ = hwnd;
         false
     }
+}
+
+/// Get visual offsets caused by invisible window borders (DWM frames)
+#[cfg(windows)]
+unsafe fn get_window_visual_offsets(hwnd: HWND) -> (i32, i32, i32, i32) {
+    let mut window_rect = RECT::default();
+    if GetWindowRect(hwnd, &mut window_rect).is_err() {
+        return (0, 0, 0, 0);
+    }
+    
+    let mut extended_rect = RECT::default();
+    let res = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut extended_rect as *mut _ as *mut _,
+        std::mem::size_of::<RECT>() as u32,
+    );
+    
+    if res.is_err() {
+        return (0, 0, 0, 0);
+    }
+    
+    (
+        extended_rect.left - window_rect.left,     // Left offset
+        extended_rect.top - window_rect.top,       // Top offset
+        window_rect.right - extended_rect.right,   // Right offset
+        window_rect.bottom - extended_rect.bottom, // Bottom offset
+    )
+}
+/// Align AI window and Configurator window side by side
+#[cfg(windows)]
+pub fn align_windows(configurator_hwnd: isize, ai_hwnd: isize) -> Result<(), String> {
+    let conf_window = HWND(configurator_hwnd as *mut std::ffi::c_void);
+    let ai_window = HWND(ai_hwnd as *mut std::ffi::c_void);
+
+    unsafe {
+        println!("[Configurator] Aligning windows (PIXEL-PERFECT V2): CONF={} AI={}", configurator_hwnd, ai_hwnd);
+
+        // 1. PHASE ONE: Preparation (Restore and wait)
+        let mut needs_delay = false;
+        if IsIconic(conf_window).as_bool() || IsZoomed(conf_window).as_bool() {
+            println!("[Configurator] Restoring Configurator");
+            let _ = ShowWindow(conf_window, SW_RESTORE);
+            needs_delay = true;
+        }
+        if IsIconic(ai_window).as_bool() || IsZoomed(ai_window).as_bool() {
+            println!("[Configurator] Restoring AI window");
+            let _ = ShowWindow(ai_window, SW_RESTORE);
+            needs_delay = true;
+        }
+
+        if needs_delay {
+            // Wait for OS to finish animations and update window state
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+
+        // 2. PHASE TWO: Measurement (Post-restore)
+        
+        // Use Configurator's monitor as primary work screen
+        let monitor = MonitorFromWindow(conf_window, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+            return Err("Failed to get monitor info".to_string());
+        }
+
+        let work_area = monitor_info.rcWork;
+        let screen_width = work_area.right - work_area.left;
+        let screen_height = work_area.bottom - work_area.top;
+
+        // Get visual offsets for correct border alignment
+        let (c_l, c_t, c_r, c_b) = get_window_visual_offsets(conf_window);
+        let (a_l, a_t, a_r, a_b) = get_window_visual_offsets(ai_window);
+
+        // Get CURRENT AI window width instead of assumption
+        let mut ai_rect = RECT::default();
+        let _ = GetWindowRect(ai_window, &mut ai_rect);
+        let current_ai_logical_width = ai_rect.right - ai_rect.left;
+        let ai_visual_width = current_ai_logical_width - a_l - a_r;
+        
+        // Use current width but clamp it to reasonable range (400 to 650)
+        let ai_width = ai_visual_width.clamp(400, 650);
+        
+        // --- SAFETY MARGIN STRATEGY ---
+        let margin = 7; // Pixels from edges and between windows
+        
+        // Available width for both windows minus margins (left, middle, right)
+        let available_width = screen_width - (margin * 3);
+        let conf_width = available_width - ai_width;
+
+        println!("[Configurator] Screen {}x{}, Target AI: {}, Conf: {}, Margin: {}", 
+            screen_width, screen_height, ai_width, conf_width, margin);
+
+        // 3. PHASE THREE: Movement
+        
+        // Move Configurator to the left side with margin
+        let conf_x = work_area.left + margin - c_l;
+        let conf_y = work_area.top + margin - c_t;
+        let conf_w = conf_width + c_l + c_r;
+        let conf_h = screen_height - (margin * 2) + c_t + c_b;
+        
+        println!("[Configurator] Move CONF: X={}, Y={}, W={}, H={}", conf_x, conf_y, conf_w, conf_h);
+        let _ = MoveWindow(conf_window, conf_x, conf_y, conf_w, conf_h, true);
+        
+        // Move AI window to the right side with margin
+        let visual_ai_x = work_area.left + conf_width + (margin * 2);
+        let ai_x = visual_ai_x - a_l;
+        let ai_y = work_area.top + margin - a_t;
+        let ai_w = ai_width + a_l + a_r;
+        let ai_h = screen_height - (margin * 2) + a_t + a_b;
+
+        println!("[Configurator] Move AI: X={}, Y={}, W={}, H={}", ai_x, ai_y, ai_w, ai_h);
+        let _ = MoveWindow(ai_window, ai_x, ai_y, ai_w, ai_h, true);
+
+        // Final focus
+        let _ = SetForegroundWindow(ai_window);
+        let _ = SetFocus(ai_window);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn align_windows(_configurator_hwnd: isize, _ai_hwnd: isize) -> Result<(), String> {
+    Err("Window alignment is only available on Windows".to_string())
 }

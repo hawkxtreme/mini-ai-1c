@@ -23,6 +23,7 @@ interface CodeSidePanelProps {
     isValidating: boolean;
     activeDiffContent?: string;
     onActiveDiffChange?: (content: string) => void;
+    isFullWidth?: boolean;
 }
 
 export function CodeSidePanel({
@@ -36,7 +37,8 @@ export function CodeSidePanel({
     isApplying,
     isValidating,
     activeDiffContent,
-    onActiveDiffChange
+    onActiveDiffChange,
+    isFullWidth
 }: CodeSidePanelProps) {
     const [isExpanded, setIsExpanded] = useState(true);
     const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
@@ -161,8 +163,8 @@ export function CodeSidePanel({
         <div
             id="code-side-panel"
             ref={panelRef}
-            style={{ width: isExpanded ? `${width}px` : '280px' }}
-            className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out flex-shrink-0 relative ${isResizing ? 'transition-none' : ''}`}
+            style={{ width: isFullWidth ? '100%' : (isExpanded ? `${width}px` : '280px') }}
+            className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out relative ${isResizing || isFullWidth ? 'transition-none' : ''} ${isFullWidth ? 'w-full' : 'flex-shrink-0'}`}
         >
             {/* Resize Handle */}
             <div

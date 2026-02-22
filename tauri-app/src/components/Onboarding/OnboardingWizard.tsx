@@ -244,10 +244,12 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                     <Brain className="w-10 h-10 text-white" />
                 </div>
             </div>
-            <h1 className="text-3xl font-bold text-white">Mini AI 1C</h1>
-            <p className="text-zinc-400 text-lg">
-                Ваш умный напарник для разработки в 1С:Предприятие.<br />
-                Давайте настроим всё за пару минут.
+            <h1 className="text-3xl font-bold text-white">Добро пожаловать в Mini AI 1C</h1>
+            <p className="text-zinc-400 text-lg leading-relaxed">
+                Ваш интеллектуальный помощник для глубокого анализа и разработки в 1С:Предприятие.<br />
+                <span className="text-blue-400/80 text-sm font-medium mt-2 block">
+                    Smart Snap • MCP Tools • BSL Analysis • AI Refactoring
+                </span>
             </p>
             <div className="flex items-center gap-3">
                 <button
@@ -646,10 +648,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             targetId: 'chat-area'
         },
         {
-            title: "Боковая Панель",
-            desc: "Управляйте редактором кода для детального просмотра и применения изменений.",
+            title: "Режимы просмотра",
+            desc: "Используйте тумблер в шапке для переключения между чатом, разделенным экраном и редактором.",
             icon: <PanelRight className="w-10 h-10 text-orange-400" />,
-            targetId: 'code-side-panel'
+            targetId: 'tour-mode-split'
         },
         {
             title: "Умный Редактор",
@@ -690,9 +692,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             interval = setInterval(updateRect, 100);
 
             // Авто-открытие боковой панели
-            if (tourSteps[tourStep].targetId === 'code-side-panel') {
-                const btn = document.getElementById('tour-side-panel');
-                // Открываем, если еще не открыта (проверяем наличие самой панели)
+            if (tourSteps[tourStep].targetId === 'tour-mode-split') {
+                const btn = document.getElementById('tour-mode-split');
+                // Переключаемся в split, если панель еще не видна
                 if (btn && !document.getElementById('code-side-panel')) {
                     btn.click();
                 }
@@ -712,7 +714,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                 parentRect = wizardRef.current.getBoundingClientRect();
             }
 
-            // Исходные координаты с отступами
+            // Координаты относительно родителя
             let targetTop = rect.top - pad - parentRect.top;
             let targetLeft = rect.left - pad - parentRect.left;
             let targetWidth = rect.width + pad * 2;
@@ -721,10 +723,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             // Clamp к границам родителя
             const top = Math.max(0, targetTop);
             const left = Math.max(0, targetLeft);
-
-            // Если элемент + отступ выходит за экран справа/снизу, уменьшаем размер
-            const width = Math.min(targetWidth, parentRect.width - left - 1);
-            const height = Math.min(targetHeight, parentRect.height - top - 1);
+            const width = Math.min(targetWidth, parentRect.width - left);
+            const height = Math.min(targetHeight, parentRect.height - top);
 
             return { top, left, width, height };
         };
@@ -735,18 +735,17 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             <div className="absolute inset-0 z-[200] pointer-events-none">
                 {/* Spotlight Overlay */}
                 {spotlightStyles && (
-                    <div className="absolute inset-0 z-[201]">
-                        {/* Spotlight with Shadow Hole - Reduced opacity for better context visibility */}
+                    <div className="absolute inset-0 z-[201] pointer-events-none">
+                        {/* Spotlight with Shadow Hole */}
                         <div
-                            className="absolute rounded-lg transition-all duration-500 shadow-[0_0_0_9999px_rgba(0,0,0,0.3)] border border-white/5"
+                            className="absolute rounded-lg transition-all duration-300 shadow-[0_0_0_9999px_rgba(0,0,0,0.5)] border border-white/10"
                             style={{
                                 ...spotlightStyles,
-                                pointerEvents: 'none'
                             }}
                         ></div>
-                        {/* Pulsing Border - More intense with glow and contrast */}
+                        {/* Pulsing Border */}
                         <div
-                            className="absolute border-[3px] border-blue-400 shadow-[0_0_15px_rgba(96,165,250,0.5)] ring-1 ring-white/30 rounded-lg animate-pulse transition-all duration-500"
+                            className="absolute border-2 border-blue-400 shadow-[0_0_15px_rgba(96,165,250,0.4)] rounded-lg animate-pulse transition-all duration-300"
                             style={spotlightStyles}
                         ></div>
                     </div>

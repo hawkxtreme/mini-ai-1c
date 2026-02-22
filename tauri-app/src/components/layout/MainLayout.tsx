@@ -20,7 +20,7 @@ export function MainLayout() {
     const { clearChat } = useChat();
     const { pasteCode, checkSelection } = useConfigurator();
 
-    const [showSidePanel, setShowSidePanel] = useState(false);
+    const [viewMode, setViewMode] = useState<'assistant' | 'split' | 'code'>('assistant');
     const [showSettings, setShowSettings] = useState(false);
     const [settingsTab, setSettingsTab] = useState<'llm' | 'configurator' | 'bsl' | 'mcp' | 'debug' | undefined>(undefined);
     const [isApplying, setIsApplying] = useState(false);
@@ -47,30 +47,10 @@ export function MainLayout() {
         };
     }, []);
 
-    // Window resizing logic
-    useEffect(() => {
-        if (showSidePanel) {
-            const ensureWidth = async () => {
-                try {
-                    const factor = await appWindow.scaleFactor();
-                    const innerSize = await appWindow.innerSize();
-                    const logicalWidth = innerSize.width / factor;
-                    const logicalHeight = innerSize.height / factor;
-                    const minWidthRequired = 950;
-                    if (logicalWidth < minWidthRequired) {
-                        await appWindow.setSize(new LogicalSize(minWidthRequired, logicalHeight));
-                    }
-                } catch (error) {
-                    console.error('Failed to resize window:', error);
-                }
-            };
-            ensureWidth();
-        }
-    }, [showSidePanel]);
 
     // Analysis effect
     useEffect(() => {
-        if (showSidePanel && modifiedCode) {
+        if (viewMode !== 'assistant' && modifiedCode) {
             const runAnalysis = async () => {
                 setIsValidating(true);
                 try {
@@ -86,7 +66,7 @@ export function MainLayout() {
             const timer = setTimeout(runAnalysis, 1000);
             return () => clearTimeout(timer);
         }
-    }, [modifiedCode, showSidePanel]);
+    }, [modifiedCode, viewMode]);
 
     const handleApply = useCallback(async () => {
         setIsApplying(true);
@@ -140,8 +120,8 @@ export function MainLayout() {
         setOriginalCode(code);
         setModifiedCode(code);
         setActiveDiffContent(''); // Сброс при загрузке
-        setShowSidePanel(true);
-    }, []);
+        if (viewMode === 'assistant') setViewMode('split');
+    }, [viewMode]);
 
     const minimize = () => appWindow.minimize();
     const maximize = async () => {
@@ -175,8 +155,8 @@ export function MainLayout() {
 
                 <Header
                     bslStatus={bslStatus}
-                    showSidePanel={showSidePanel}
-                    toggleSidePanel={() => setShowSidePanel(!showSidePanel)}
+                    viewMode={viewMode}
+                    onViewModeChange={setViewMode}
                     onClearChat={() => {
                         clearChat();
                         setOriginalCode('');
@@ -189,38 +169,41 @@ export function MainLayout() {
                 />
 
                 <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
-                    <ChatArea
-                        originalCode={originalCode}
-                        modifiedCode={modifiedCode}
-                        onApplyCode={useCallback((code: string) => {
-                            setModifiedCode(code);
-                            setShowSidePanel(true);
-                        }, [])}
-                        onCommitCode={useCallback((code: string) => {
-                            // "Принять" из чата - значит сделать код новым бейзлайном
-                            setOriginalCode(code);
-                            setModifiedCode(code);
-                            setActiveDiffContent('');
-                            // Опционально: можно закрывать панель, но лучше оставить её для просмотра
-                            // setShowSidePanel(false); 
-                        }, [])}
-                        onCodeLoaded={handleCodeLoaded}
-                        diagnostics={diagnostics}
-                        onOpenSettings={(tab) => {
-                            setSettingsTab(tab as any);
-                            setShowSettings(true);
-                        }}
-                        onActiveDiffChange={(content) => {
-                            setActiveDiffContent(content);
-                            if (content) setShowSidePanel(true); // Авто-открытие панели если пришли диффы
-                        }}
-                        activeDiffContent={activeDiffContent}
-                    />
+                    <div className={`flex flex-1 overflow-hidden transition-all duration-300 ${viewMode === 'code' ? 'hidden' : 'opacity-100 w-full'}`}>
+                        <ChatArea
+                            originalCode={originalCode}
+                            modifiedCode={modifiedCode}
+                            onApplyCode={useCallback((code: string) => {
+                                setModifiedCode(code);
+                                if (viewMode === 'assistant') setViewMode('split');
+                            }, [viewMode])}
+                            onCommitCode={useCallback((code: string) => {
+                                // "Принять" из чата - значит сделать код новым бейзлайном
+                                setOriginalCode(code);
+                                setModifiedCode(code);
+                                setActiveDiffContent('');
+                                // Опционально: можно закрывать панель, но лучше оставить её для просмотра
+                                // setShowSidePanel(false); 
+                            }, [])}
+                            onCodeLoaded={handleCodeLoaded}
+                            diagnostics={diagnostics}
+                            onOpenSettings={(tab) => {
+                                setSettingsTab(tab as any);
+                                setShowSettings(true);
+                            }}
+                            onActiveDiffChange={(content) => {
+                                setActiveDiffContent(content);
+                                if (content && viewMode === 'assistant') setViewMode('split'); // Авто-открытие панели если пришли диффы
+                            }}
+                            activeDiffContent={activeDiffContent}
+                        />
+                    </div>
 
-                    <div className={`z-40 h-full border-l border-[#27272a] transition-all duration-300 ${showSidePanel ? 'flex' : 'hidden'}`}>
+                    <div className={`${viewMode === 'assistant' ? 'hidden' : 'flex'} ${viewMode === 'code' ? 'flex-1 w-full' : ''} z-40 h-full transition-all duration-300`}>
                         <CodeSidePanel
-                            isOpen={showSidePanel}
-                            onClose={() => setShowSidePanel(false)}
+                            isOpen={viewMode !== 'assistant'}
+                            isFullWidth={viewMode === 'code'}
+                            onClose={() => setViewMode('assistant')}
                             originalCode={originalCode}
                             modifiedCode={modifiedCode}
                             onModifiedCodeChange={setModifiedCode}

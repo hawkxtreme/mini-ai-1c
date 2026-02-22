@@ -62,3 +62,10 @@ export async function undoLastChange(hwnd: number): Promise<void> {
 export async function checkSelectionState(hwnd: number): Promise<boolean> {
     return await invoke<boolean>('check_selection_state', { hwnd });
 }
+
+/**
+ * Align active Configurator window and AI window
+ */
+export async function alignWithConfigurator(hwnd: number): Promise<void> {
+    return await invoke('align_with_configurator', { hwnd });
+}

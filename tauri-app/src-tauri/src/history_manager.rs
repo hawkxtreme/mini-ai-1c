@@ -4,9 +4,9 @@ use lazy_static::lazy_static;
 
 #[derive(Debug, Clone)]
 pub struct CodeSnapshot {
-    pub hwnd: isize,
+    pub _hwnd: isize,
     pub original_code: String,
-    pub timestamp: std::time::SystemTime,
+    pub _timestamp: std::time::SystemTime,
 }
 
 lazy_static! {
@@ -17,9 +17,9 @@ pub async fn save_snapshot(hwnd: isize, code: String) {
     let mut guard = SNAPSHOTS.lock().await;
     let list = guard.entry(hwnd).or_insert_with(Vec::new);
     list.push(CodeSnapshot {
-        hwnd,
+        _hwnd: hwnd,
         original_code: code,
-        timestamp: std::time::SystemTime::now(),
+        _timestamp: std::time::SystemTime::now(),
     });
     
     // Keep only last 10 snapshots per window
