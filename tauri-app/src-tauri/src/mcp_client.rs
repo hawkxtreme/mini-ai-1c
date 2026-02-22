@@ -32,6 +32,7 @@ struct JsonRpcRequest {
 
 #[derive(Deserialize)]
 struct JsonRpcResponse {
+    #[serde(rename = "jsonrpc")]
     _jsonrpc: String,
     result: Option<Value>,
     error: Option<JsonRpcError>,
@@ -118,6 +119,7 @@ impl McpManager {
     }
 
     pub async fn reconfigure(new_settings: AppSettings, app_handle: &tauri::AppHandle) {
+        crate::ai_client::clear_mcp_cache();
         println!("Reconfiguring MCP servers...");
         let mut sessions = MCP_MANAGER.sessions.lock().await;
 
@@ -353,6 +355,7 @@ enum TransportImpl {
 }
 
 pub struct McpSession {
+    pub config: McpServerConfig,
     transport: TransportImpl,
     next_id: std::sync::atomic::AtomicU64,
     logs: Arc<Mutex<VecDeque<String>>>,
@@ -361,6 +364,7 @@ pub struct McpSession {
 impl McpSession {
     fn new_http(config: McpServerConfig) -> Self {
         Self {
+            config: config.clone(),
             transport: TransportImpl::Http {
                 client: Client::builder()
                     .timeout(Duration::from_secs(30))
@@ -375,8 +379,9 @@ impl McpSession {
         }
     }
 
-    fn new_internal(_config: McpServerConfig, handler: Arc<dyn InternalMcpHandler>) -> Self {
+    fn new_internal(config: McpServerConfig, handler: Arc<dyn InternalMcpHandler>) -> Self {
         Self {
+            config,
             transport: TransportImpl::Internal {
                 handler,
             },
@@ -387,8 +392,8 @@ impl McpSession {
 
     async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
         let server_id_for_logs = config.id.clone();
-        let command = config.command.ok_or("Command is missing")?;
-        let mut args = config.args.unwrap_or_default();
+        let command = config.command.clone().ok_or("Command is missing")?;
+        let args = config.args.clone().unwrap_or_default();
 
         // Path resolution for production (Tauri Resources)
         // Only resolve as resources if we are NOT in debug mode,
@@ -403,15 +408,15 @@ impl McpSession {
                 if let Some(app_handle) = app_handle_opt.as_ref() {
                     crate::app_log!("[MCP] Resolving resources for command '{}' with args {:?}", command, args);
                     for arg in args.iter_mut() {
-                        if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js")) {
+                        if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js") || arg.ends_with(".cjs")) {
                             let filename = std::path::Path::new(&*arg)
                                 .file_name()
                                 .and_then(|f| f.to_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| arg.to_string());
                             
-                            // Priority 1: .js version (for production)
-                            let js_filename = filename.replace(".ts", ".js");
+                            // Priority 1: .cjs version (for production with type: module)
+                            let js_filename = filename.replace(".ts", ".cjs").replace(".js", ".cjs");
                             let js_subpath = format!("mcp-servers/{}", js_filename);
                             
                             // Priority 2: original filename
@@ -450,7 +455,7 @@ impl McpSession {
             }
         }
 
-        let (mut command, mut args) = if cfg!(windows) {
+        let (command, args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
             let cmd_lower = command.to_lowercase();
@@ -469,7 +474,7 @@ impl McpSession {
             let is_tsx_launcher = cmd_lower.contains("npx") || cmd_lower.contains("tsx");
             
             if is_tsx_launcher {
-                 let has_ts_or_js = args.iter().any(|a| a.ends_with(".ts") || a.ends_with(".js"));
+                 let has_ts_or_js = args.iter().any(|a| a.ends_with(".ts") || a.ends_with(".js") || a.ends_with(".cjs"));
                  if has_ts_or_js {
                      crate::app_log!("[MCP] Production mode detected. Switching launcher to node for portability.");
                      command = "node".to_string();
@@ -480,8 +485,8 @@ impl McpSession {
                              continue;
                          }
                          // Since we already resolved absolute paths above, we just pass them to node
-                         if arg.ends_with(".ts") {
-                             new_args.push(arg.replace(".ts", ".js"));
+                         if arg.ends_with(".ts") || arg.ends_with(".js") {
+                             new_args.push(arg.replace(".ts", ".cjs").replace(".js", ".cjs"));
                          } else {
                              new_args.push(arg);
                          }
@@ -552,31 +557,43 @@ impl McpSession {
 
             loop {
                 tokio::select! {
-                     line_res = reader.next_line() => {
-                        match line_res {
-                            Ok(Some(line)) => {
-                                if !line.trim().starts_with('{') {
-                                    // println!("MCP Stderr/Log: {}", line);
-                                    continue; 
-                                }
-                                
-                                if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                                    if let Some(id) = response.id {
-                                        let mut pending = pending_requests_reader.lock().await;
-                                        if let Some(sender) = pending.remove(&id) {
-                                            let result = if let Some(err) = response.error {
-                                                Err(format!("MCP Error {}: {}", err.code, err.message))
-                                            } else {
-                                                Ok(response.result.unwrap_or(Value::Null))
-                                            };
-                                            let _ = sender.send(result);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => break, // Exit loop on EOF or error
-                        }
-                     }
+                      line_res = reader.next_line() => {
+                         match line_res {
+                             Ok(Some(line)) => {
+                                 crate::app_log!("[MCP][{}] STDOUT RAW: {}", server_id_for_logs, line);
+                                 let trimmed = line.trim();
+                                 if !trimmed.starts_with('{') {
+                                     continue; 
+                                 }
+                                 
+                                 match serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                                     Ok(response) => {
+                                         if let Some(id) = response.id {
+                                             crate::app_log!("[MCP][{}] Parsed response for id: {}", server_id_for_logs, id);
+                                             let mut pending = pending_requests_reader.lock().await;
+                                             if let Some(sender) = pending.remove(&id) {
+                                                 let result = if let Some(err) = response.error {
+                                                     Err(format!("MCP Error {}: {}", err.code, err.message))
+                                                 } else {
+                                                     Ok(response.result.unwrap_or(Value::Null))
+                                                 };
+                                                 let _ = sender.send(result);
+                                             }
+                                         } else {
+                                              crate::app_log!("[MCP][{}] Received notification or response without ID: {}", server_id_for_logs, trimmed);
+                                         }
+                                     },
+                                     Err(e) => {
+                                         crate::app_log!("[MCP][{}] Failed to parse JSON-RPC: {}. Line: {}", server_id_for_logs, e, trimmed);
+                                     }
+                                 }
+                             }
+                             _ => {
+                                 crate::app_log!("[MCP][{}] STDOUT EOF or Error", server_id_for_logs);
+                                 break;
+                             }
+                         }
+                      }
                      stderr_res = stderr_reader.next_line() => {
                          // Consume stderr to prevent buffer fill
                          if let Ok(Some(line)) = stderr_res {
@@ -595,6 +612,7 @@ impl McpSession {
         });
 
         Ok(Self {
+            config,
             transport: TransportImpl::Stdio {
                 tx,
                 pending_requests,
@@ -649,13 +667,22 @@ impl McpSession {
                     pending.insert(id, auth_tx);
                 }
 
+                crate::app_log!("[MCP][{}] >>> Sending: {}", self.config.id, serde_json::to_string(&req).unwrap_or_default());
                 tx.send(req).await.map_err(|_| "Failed to send request to MCP process".to_string())?;
 
                 match tokio::time::timeout(Duration::from_secs(30), auth_rx).await {
-                    Ok(res) => res.map_err(|_| "Channel closed".to_string())?,
+                    Ok(Ok(result)) => {
+                        crate::app_log!("[MCP][{}] <<< Received result for id {}", self.config.id, id);
+                        result
+                    },
+                    Ok(Err(_)) => {
+                        crate::app_log!("[MCP][{}][ERROR] Response channel closed for id {}", self.config.id, id);
+                        Err("Channel closed".to_string())
+                    },
                     Err(_) => {
                         let mut pending = pending_requests.lock().await;
                         pending.remove(&id);
+                        crate::app_log!("[MCP][{}][ERROR] Request timed out for id {}", self.config.id, id);
                         Err("Timeout waiting for MCP response".to_string())
                     }
                 }

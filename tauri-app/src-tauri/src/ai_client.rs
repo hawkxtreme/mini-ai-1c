@@ -10,6 +10,12 @@ use tauri::Emitter;
 use crate::llm_profiles::{get_active_profile, LLMProvider};
 use crate::mcp_client::McpClient;
 use crate::settings::{load_settings, CodeGenerationMode};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref TOOLS_CACHE: Mutex<Option<(std::time::Instant, Vec<ToolInfo>)>> = Mutex::new(None);
+}
 
 /// Chat message for API (OpenAI compatible)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +343,21 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
     let mut seen_names = std::collections::HashSet::new();
 
     println!("[MCP][TOOLS] Collecting tools...");
+    
+    // Check cache first
+    {
+        if let Ok(cache) = TOOLS_CACHE.lock() {
+            if let Some((time, tools)) = &*cache {
+                if time.elapsed().as_secs() < 120 { // 2 minute cache
+                    let duration = time.elapsed().as_millis();
+                    crate::app_log!("[MCP][CACHE] Using cached tools ({} items, {} ms ago)", tools.len(), duration);
+                    return tools.clone();
+                }
+            }
+        }
+    }
+
+    let start_time = std::time::Instant::now();
 
     let mut all_configs = settings.mcp_servers.clone();
     
@@ -351,20 +372,43 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
         });
     }
 
-    for config in all_configs {
-        if !config.enabled { 
-            println!("[MCP][TOOLS] Skipping disabled server: {}", config.name);
-            continue; 
-        }
-        
-        println!("[MCP][TOOLS] Connecting to server: {} (ID: {})", config.name, config.id);
-        
-        match McpClient::new(config.clone()).await {
-            Ok(client) => {
-                match client.list_tools().await {
-                    Ok(tools) => {
-                        crate::app_log!("[MCP][TOOLS] Server {} returned {} tools.", config.name, tools.len());
-                        for tool in tools {
+    let enabled_configs: Vec<_> = all_configs.into_iter().filter(|c| c.enabled).collect();
+    let mut futures = Vec::new();
+
+    for config in enabled_configs {
+        futures.push(async move {
+            let server_name = config.name.clone();
+            let server_id = config.id.clone();
+            let start = std::time::Instant::now();
+            println!("[MCP][TOOLS] Connecting to server: {} (ID: {})", server_name, server_id);
+            
+            match McpClient::new(config).await {
+                Ok(client) => {
+                    match client.list_tools().await {
+                        Ok(tools) => {
+                            let duration = start.elapsed().as_millis();
+                            crate::app_log!("[MCP][TOOLS] Server {} returned {} tools in {} ms.", server_name, tools.len(), duration);
+                            Ok((server_id, tools))
+                        },
+                        Err(e) => {
+                            crate::app_log!("[MCP][TOOLS][ERROR] Failed to list tools for {}: {}", server_name, e);
+                            Err(e)
+                        }
+                    }
+                },
+                Err(e) => {
+                    crate::app_log!("[MCP][TOOLS][ERROR] Failed to connect to {}: {}", server_name, e);
+                    Err(e)
+                }
+            }
+        });
+    }
+
+    let results = futures::future::join_all(futures).await;
+
+    for res in results {
+        if let Ok((server_id, tools)) = res {
+            for tool in tools {
                             // 1. Sanitize Name (only alphanumeric, underscore, hyphen)
                             let name = tool.name.chars()
                                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
@@ -401,7 +445,7 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
 
                             crate::app_log!("[MCP][TOOLS]   + Registered: {}", name);
                             all_tools.push(ToolInfo {
-                                server_id: config.id.clone(),
+                                server_id: server_id.clone(),
                                 tool: Tool {
                                     r#type: "function".to_string(),
                                     function: ToolFunction {
@@ -412,20 +456,26 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
                                 },
                             });
                         }
-                    },
-                    Err(e) => {
-                        crate::app_log!("[MCP][TOOLS][ERROR] Failed to list tools for {}: {}", config.name, e);
                     }
                 }
-            },
-            Err(e) => {
-                 crate::app_log!("[MCP][TOOLS][ERROR] Failed to connect to {}: {}", config.name, e);
-            }
-        }
-    }
     
-    crate::app_log!("[MCP][TOOLS] Total: {}", all_tools.len());
+    let total_duration = start_time.elapsed().as_millis();
+    crate::app_log!("[MCP][TOOLS] Total collection time: {} ms. Total tools: {}", total_duration, all_tools.len());
+    
+    // Update cache
+    if let Ok(mut cache) = TOOLS_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), all_tools.clone()));
+    }
+
     all_tools
+}
+
+/// Force clear the MCP tools cache
+pub fn clear_mcp_cache() {
+    if let Ok(mut cache) = TOOLS_CACHE.lock() {
+        *cache = None;
+        println!("[MCP][CACHE] Cache cleared.");
+    }
 }
 
 /// Stream chat completion from OpenAI-compatible API
@@ -539,8 +589,15 @@ pub async fn stream_chat_completion(
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
     let mut announced_tool_calls = std::collections::HashSet::new();
     let mut is_thinking = false;
+    let mut first_token_received = false;
+    let start_gen_time = std::time::Instant::now();
     
     while let Some(chunk_result) = stream.next().await {
+        if !first_token_received {
+            first_token_received = true;
+            let ttft = start_gen_time.elapsed().as_millis();
+            crate::app_log!("[AI][TIMER] TTFT (Time to First Token): {} ms", ttft);
+        }
         let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
@@ -649,6 +706,9 @@ pub async fn stream_chat_completion(
             }
         }
     }
+    
+    let total_gen_duration = start_gen_time.elapsed().as_millis();
+    crate::app_log!("[AI][TIMER] Total generation time: {} ms", total_gen_duration);
     
     Ok(ApiMessage {
         role: "assistant".to_string(),

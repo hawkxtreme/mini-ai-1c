@@ -27,3 +27,6 @@ dist-ssr
 **/mcp-servers/*.js
 src/**/*.js
 !src/**/*.ts
+
+# MCP build artifacts
+src-tauri/mcp-servers/
