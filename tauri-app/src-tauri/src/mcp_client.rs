@@ -58,6 +58,10 @@ pub struct McpServerStatus {
     pub name: String,
     pub status: String,
     pub transport: String,
+    // 1С:Справка — прогресс индексации
+    pub index_progress: u32,       // 0-100 (%)
+    pub index_message: String,     // Текущее сообщение прогресса
+    pub help_status: String,       // "unavailable" | "indexing" | "ready" | ""
 }
 
 // Global manager to hold persistent sessions
@@ -235,11 +239,29 @@ impl McpManager {
              };
 
              println!("[DEBUG] MCP Server status for {}: {}", config.id, status);
+             
+             // Извлекаем прогресс индексации для 1С:Справка
+             let (index_progress, index_message, help_status_str) = if config.id == "builtin-1c-help" {
+                 if let Some((_, session)) = sessions.get(&config.id) {
+                     let progress = *session.help_progress.lock().await;
+                     let message = session.help_message.lock().await.clone();
+                     let hs = session.help_status.lock().await.clone();
+                     (progress, message, hs)
+                 } else {
+                     (0, String::new(), String::new())
+                 }
+             } else {
+                 (0, String::new(), String::new())
+             };
+             
              statuses.push(McpServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
                 status: status.to_string(),
                 transport: format!("{:?}", config.transport).to_lowercase(),
+                index_progress,
+                index_message,
+                help_status: help_status_str,
             });
         }
         
@@ -359,6 +381,10 @@ pub struct McpSession {
     transport: TransportImpl,
     next_id: std::sync::atomic::AtomicU64,
     logs: Arc<Mutex<VecDeque<String>>>,
+    // Для 1С:Справка — статус индексации из stderr
+    pub help_status: Arc<tokio::sync::Mutex<String>>,
+    pub help_progress: Arc<tokio::sync::Mutex<u32>>,
+    pub help_message: Arc<tokio::sync::Mutex<String>>,
 }
 
 impl McpSession {
@@ -376,6 +402,9 @@ impl McpSession {
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
+            help_status: Arc::new(tokio::sync::Mutex::new(String::new())),
+            help_progress: Arc::new(tokio::sync::Mutex::new(0)),
+            help_message: Arc::new(tokio::sync::Mutex::new(String::new())),
         }
     }
 
@@ -387,6 +416,9 @@ impl McpSession {
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
+            help_status: Arc::new(tokio::sync::Mutex::new(String::new())),
+            help_progress: Arc::new(tokio::sync::Mutex::new(0)),
+            help_message: Arc::new(tokio::sync::Mutex::new(String::new())),
         }
     }
 
@@ -534,6 +566,13 @@ impl McpSession {
 
         let logs = Arc::new(Mutex::new(VecDeque::with_capacity(100)));
         let logs_writer = logs.clone();
+        let help_status = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let help_progress = Arc::new(tokio::sync::Mutex::new(0u32));
+        let help_message = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let help_status_writer = help_status.clone();
+        let help_progress_writer = help_progress.clone();
+        let help_message_writer = help_message.clone();
+        let is_help_server = config.id == "builtin-1c-help";
 
         // Writer task
         tokio::spawn(async move {
@@ -598,13 +637,44 @@ impl McpSession {
                          // Consume stderr to prevent buffer fill
                          if let Ok(Some(line)) = stderr_res {
                              crate::app_log!("[MCP][{}][STDERR] {}", server_id_for_logs, line);
+                             // Парсим HELP_STATUS строки от 1С:Справка сервера
+                             if is_help_server && line.starts_with("HELP_STATUS:") {
+                                 let parts: Vec<&str> = line.trim_start_matches("HELP_STATUS:").splitn(4, ':').collect();
+                                 if !parts.is_empty() {
+                                     let state = parts[0];
+                                     *help_status_writer.lock().await = state.to_string();
+                                     match state {
+                                         "indexing" => {
+                                             if parts.len() >= 3 {
+                                                 let progress: u32 = parts[1].parse().unwrap_or(0);
+                                                 *help_progress_writer.lock().await = progress;
+                                                 let msg = parts.get(3).unwrap_or(&"").to_string();
+                                                 *help_message_writer.lock().await = msg;
+                                             }
+                                         }
+                                         "ready" => {
+                                             *help_progress_writer.lock().await = 100;
+                                             let version = parts.get(1).unwrap_or(&"");
+                                             let count = parts.get(2).unwrap_or(&"0");
+                                             *help_message_writer.lock().await = 
+                                                 format!("Готово: {} тем (платформа {})", count, version);
+                                         }
+                                         "unavailable" => {
+                                             *help_progress_writer.lock().await = 0;
+                                             let reason = parts.get(1).unwrap_or(&"Платформа 1С не найдена");
+                                             *help_message_writer.lock().await = reason.to_string();
+                                         }
+                                         _ => {}
+                                     }
+                                 }
+                             }
                              let mut logs = logs_writer.lock().await;
                              if logs.len() >= 100 {
                                  logs.pop_front();
                              }
                              logs.push_back(line);
                          } else {
-                             // logs?
+                             // EOF on stderr
                          }
                      }
                 }
@@ -620,6 +690,9 @@ impl McpSession {
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs,
+            help_status,
+            help_progress,
+            help_message,
         })
     }
 

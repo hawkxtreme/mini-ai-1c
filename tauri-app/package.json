@@ -10,7 +10,7 @@
     "mini-ai-1c": "tauri",
     "app:dev": "npm run build:mcp && tauri dev",
     "app:build": "npm run build:mcp && tauri build",
-    "build:mcp": "powershell -Command \"if (!(Test-Path src-tauri/mcp-servers)) { New-Item -ItemType Directory src-tauri/mcp-servers }\" && npx esbuild src/mcp-servers/1c-naparnik.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-naparnik.cjs && npx esbuild src/mcp-servers/1c-metadata.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-metadata.cjs"
+    "build:mcp": "powershell -Command \"if (!(Test-Path src-tauri/mcp-servers)) { New-Item -ItemType Directory src-tauri/mcp-servers }\" && npx esbuild src/mcp-servers/1c-naparnik.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-naparnik.cjs && npx esbuild src/mcp-servers/1c-metadata.ts --bundle --platform=node --outfile=src-tauri/mcp-servers/1c-metadata.cjs && npx esbuild src/mcp-servers/1c-help.ts --bundle --platform=node --external:better-sqlite3 --outfile=src-tauri/mcp-servers/1c-help.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -22,6 +22,8 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-window-state": "^2",
     "@types/diff": "^7.0.2",
+    "better-sqlite3": "^12.6.2",
+    "cheerio": "^1.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "diff": "^8.0.3",
@@ -39,6 +41,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",
     "@tauri-apps/cli": "^2",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.2.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

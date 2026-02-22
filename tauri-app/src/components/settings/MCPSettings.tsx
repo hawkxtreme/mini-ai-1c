@@ -24,6 +24,10 @@ export interface McpServerStatus {
     name: string;
     status: string;
     transport: string;
+    // 1С:Справка — поля прогресса индексации
+    index_progress?: number;     // 0-100 (%)
+    index_message?: string;      // Сообщение прогресса
+    help_status?: string;        // 'unavailable' | 'indexing' | 'ready' | ''
 }
 
 interface MCPSettingsProps {
@@ -34,6 +38,7 @@ interface MCPSettingsProps {
 const BUILTIN_1C_SERVER_ID = 'builtin-1c-naparnik';
 const BUILTIN_1C_METADATA_ID = 'builtin-1c-metadata';
 const BUILTIN_BSL_LS_ID = 'bsl-ls';
+const BUILTIN_1C_HELP_ID = 'builtin-1c-help';
 
 export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
@@ -111,6 +116,41 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             });
             needsUpdate = true;
         }
+
+        // Check 1С:Справка
+        const helpIndex = updatedServers.findIndex(s => s.id === BUILTIN_1C_HELP_ID);
+        if (helpIndex === -1) {
+            updatedServers.push({
+                id: BUILTIN_1C_HELP_ID,
+                name: '1С:Справка',
+                enabled: false,
+                transport: 'stdio',
+                command: 'npx',
+                args: ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'],
+            });
+            needsUpdate = true;
+        } else {
+            const srv = updatedServers[helpIndex];
+            const expectedArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'];
+            if (srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(expectedArgs)) {
+                updatedServers[helpIndex] = { ...srv, command: 'npx', args: expectedArgs };
+                needsUpdate = true;
+            }
+        }
+
+        // Сортируем серверы по нужному порядку карточек
+        const ORDER: Record<string, number> = {
+            [BUILTIN_BSL_LS_ID]: 0,
+            [BUILTIN_1C_HELP_ID]: 1,
+            [BUILTIN_1C_SERVER_ID]: 2,
+            [BUILTIN_1C_METADATA_ID]: 3,
+        };
+        updatedServers.sort((a, b) => {
+            const oa = ORDER[a.id] ?? 99;
+            const ob = ORDER[b.id] ?? 99;
+            return oa - ob;
+        });
+        needsUpdate = true; // всегда сохраняем порядок
 
         if (needsUpdate) {
             onUpdate(updatedServers);
@@ -212,7 +252,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     };
 
     const sortedServers = [...servers].sort((a, b) => {
-        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
+        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_HELP_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
         const aIdx = builtinIds.indexOf(a.id);
         const bIdx = builtinIds.indexOf(b.id);
 
@@ -252,7 +292,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                         const isStopped = status?.status === 'stopped';
                         const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
                         const isBslLs = server.id === BUILTIN_BSL_LS_ID;
-                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs;
+                        const isHelp = server.id === BUILTIN_1C_HELP_ID;
+                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs || isHelp;
 
                         return (
                             <div
@@ -278,7 +319,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2 min-w-0">
-                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500 shrink-0" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500 shrink-0" /> : <Sparkles className="w-4 h-4 text-yellow-500 shrink-0" />}
+                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500 shrink-0" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500 shrink-0" /> : isHelp ? <FileText className="w-4 h-4 text-yellow-500 shrink-0" /> : <Sparkles className="w-4 h-4 text-yellow-500 shrink-0" />}
                                                 <span className="text-zinc-100 font-medium text-sm truncate">{server.name}</span>
                                                 <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20 whitespace-nowrap shrink-0">
                                                     PRE-INSTALLED
@@ -375,6 +416,86 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                     Этот сервер интегрирован как внутренний инструмент анализа кода.
                                                     Основные настройки (путь к Java, JAR и порт) находятся во вкладке <b>"BSL Server"</b> выше.
                                                 </div>
+                                            ) : isHelp ? (
+                                                (() => {
+                                                    const helpSt = status?.help_status || '';
+                                                    const prog = status?.index_progress || 0;
+                                                    const msg = status?.index_message || '';
+                                                    // Парсим index_message: "Готово: 52064 тем (платформа 8.3.27.1989)"
+                                                    let helpVersion = ''; let helpCount = '';
+                                                    if (helpSt === 'ready') {
+                                                        const countMatch = msg.match(/Готово: ([\d\s]+) тем/);
+                                                        const versionMatch = msg.match(/платформа ([^\)]+)/);
+                                                        helpCount = countMatch?.[1]?.trim() || '';
+                                                        helpVersion = versionMatch?.[1]?.trim() || '';
+                                                    }
+                                                    const handleReindex = async () => {
+                                                        try {
+                                                            await invoke('call_mcp_tool', { serverId: server.id, toolName: 'reindex_1c_help', args: {} });
+                                                        } catch { /* UI обновится через статус */ }
+                                                    };
+                                                    if (helpSt === 'unavailable') {
+                                                        return (
+                                                            <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3">
+                                                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                                <div>
+                                                                    <p className="text-xs text-amber-300 font-medium">Платформа 1С:Предприятие не найдена</p>
+                                                                    <p className="text-[10px] text-zinc-500 mt-1">Установите 1С:Предприятие 8.3 для использования справки.</p>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    } else if (helpSt === 'indexing') {
+                                                        return (
+                                                            <div className="space-y-2">
+                                                                <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                                                                    <span className="flex items-center gap-1">
+                                                                        <Activity className="w-3 h-3 animate-pulse text-blue-400" />
+                                                                        Подготовка базы данных справки...
+                                                                    </span>
+                                                                    <span className="font-mono text-blue-400">{prog}%</span>
+                                                                </div>
+                                                                <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                                                                    <div
+                                                                        className="bg-gradient-to-r from-blue-600 to-blue-400 h-1.5 rounded-full transition-all duration-500"
+                                                                        style={{ width: `${Math.max(2, prog)}%` }}
+                                                                    />
+                                                                </div>
+                                                                {msg && <p className="text-[10px] text-zinc-500 truncate">{msg}</p>}
+                                                            </div>
+                                                        );
+                                                    } else if (helpSt === 'ready') {
+                                                        return (
+                                                            <div className="space-y-2">
+                                                                <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center justify-between">
+                                                                    <div className="flex items-start gap-3">
+                                                                        <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0 mt-0.5" />
+                                                                        <div>
+                                                                            <p className="text-xs text-green-300 font-medium">Справка готова к использованию</p>
+                                                                            <p className="text-[10px] text-zinc-500 mt-0.5">
+                                                                                {helpCount ? `${Number(helpCount).toLocaleString('ru')} тем` : 'тем: —'}
+                                                                                {helpVersion ? ` · платформа ${helpVersion}` : ''}
+                                                                            </p>
+                                                                        </div>
+                                                                    </div>
+                                                                    <button
+                                                                        onClick={handleReindex}
+                                                                        className="flex items-center gap-1 px-2 py-1 bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-400 hover:text-zinc-200 rounded text-[10px] font-medium transition shrink-0"
+                                                                        title="Переиндексировать справку"
+                                                                    >
+                                                                        <Activity className="w-3 h-3" /> Обновить
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    } else {
+                                                        return (
+                                                            <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
+                                                                Поиск по официальной справке платформы 1С:Предприятие 8.3.
+                                                                При первом включении индексация займёт 1-3 минуты.
+                                                            </div>
+                                                        );
+                                                    }
+                                                })()
                                             ) : (
                                                 <>
                                                     <div className="flex items-center justify-between mb-4">
