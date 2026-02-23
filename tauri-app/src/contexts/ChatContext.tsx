@@ -150,9 +150,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         setCurrentIteration(0);
                         setMessages(prev => {
                             const last = prev[prev.length - 1];
-                            if (last && last.role === 'assistant') {
-                                api.saveMessage('assistant', last.content);
-                            }
                             return prev;
                         });
                     })
@@ -186,9 +183,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setMessages(prev => [...prev, userMessage]);
         setIsLoading(true);
 
-        // Save clean message to history
-        await api.saveMessage('user', content);
-
         // 2. Backend: Prepare payload
         let contextPayload = content;
         if (codeContext) {
@@ -208,9 +202,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
             await api.streamChat(payloadMessages);
         } catch (err) {
-            const errorMsg = `❌ Ошибка: ${err} `;
-            setMessages(prev => [...prev, { id: generateId(), role: 'assistant', content: errorMsg, timestamp: Date.now() }]);
-            await api.saveMessage('assistant', errorMsg);
+            setMessages(prev => [...prev, { id: generateId(), role: 'assistant', content: `❌ Ошибка: ${err}`, timestamp: Date.now() }]);
             setIsLoading(false);
         }
     }, [isLoading, messages]);

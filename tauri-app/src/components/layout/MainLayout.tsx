@@ -26,7 +26,8 @@ export function MainLayout() {
     const [isApplying, setIsApplying] = useState(false);
     const [isValidating, setIsValidating] = useState(false);
 
-    const [originalCode, setOriginalCode] = useState('');
+    const [lastConfiguratorCode, setLastConfiguratorCode] = useState(''); // Базовый код для проверки хэша (синхрон с 1С)
+    const [uiBaselineCode, setUiBaselineCode] = useState(''); // Базовый код для отображения диффа в UI
     const [modifiedCode, setModifiedCode] = useState('');
     const [diagnostics, setDiagnostics] = useState<any[]>([]);
     const [showConflictDialog, setShowConflictDialog] = useState(false);
@@ -39,7 +40,8 @@ export function MainLayout() {
     useEffect(() => {
         const unlisten = listen<string>('RESET_DIFF', (event) => {
             console.log("Diff Reset Event received", event.payload.length);
-            setOriginalCode(event.payload);
+            setLastConfiguratorCode(event.payload);
+            setUiBaselineCode(event.payload);
             setActiveDiffContent(''); // Сбрасываем диффы при новом коде
         });
         return () => {
@@ -72,8 +74,11 @@ export function MainLayout() {
         setIsApplying(true);
         try {
             // If original is empty (new module), force select all for clean write
-            const useSelectAll = !originalCode || originalCode.trim().length === 0;
-            await pasteCode(modifiedCode, useSelectAll, originalCode || undefined);
+            const useSelectAll = !lastConfiguratorCode || lastConfiguratorCode.trim().length === 0;
+            await pasteCode(modifiedCode, useSelectAll, lastConfiguratorCode || undefined);
+            // При успешном применении - 1С теперь содержит modifiedCode
+            setLastConfiguratorCode(modifiedCode);
+            setUiBaselineCode(modifiedCode);
             // Сброс больше не нужен здесь, так как pasteCode вызовет событие RESET_DIFF
         } catch (e: any) {
             const errorMsg = typeof e === 'string' ? e : e?.message || String(e);
@@ -88,7 +93,7 @@ export function MainLayout() {
         } finally {
             setIsApplying(false);
         }
-    }, [modifiedCode, originalCode, pasteCode]);
+    }, [modifiedCode, lastConfiguratorCode, pasteCode]);
 
     const handleConflictApplyToAll = useCallback(async () => {
         setShowConflictDialog(false);
@@ -117,7 +122,8 @@ export function MainLayout() {
     }, [modifiedCode, pasteCode]);
 
     const handleCodeLoaded = useCallback((code: string, isSelection: boolean) => {
-        setOriginalCode(code);
+        setLastConfiguratorCode(code);
+        setUiBaselineCode(code);
         setModifiedCode(code);
         setActiveDiffContent(''); // Сброс при загрузке
         if (viewMode === 'assistant') setViewMode('split');
@@ -159,7 +165,8 @@ export function MainLayout() {
                     onViewModeChange={setViewMode}
                     onClearChat={() => {
                         clearChat();
-                        setOriginalCode('');
+                        setLastConfiguratorCode('');
+                        setUiBaselineCode('');
                         setModifiedCode('');
                         setDiagnostics([]);
                         setActiveDiffContent('');
@@ -171,19 +178,18 @@ export function MainLayout() {
                 <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
                     <div className={`flex flex-1 overflow-hidden transition-all duration-300 ${viewMode === 'code' ? 'hidden' : 'opacity-100 w-full'}`}>
                         <ChatArea
-                            originalCode={originalCode}
+                            originalCode={uiBaselineCode}
                             modifiedCode={modifiedCode}
                             onApplyCode={useCallback((code: string) => {
                                 setModifiedCode(code);
                                 if (viewMode === 'assistant') setViewMode('split');
                             }, [viewMode])}
                             onCommitCode={useCallback((code: string) => {
-                                // "Принять" из чата - значит сделать код новым бейзлайном
-                                setOriginalCode(code);
+                                // "Принять" из чата - значит сделать код НОВЫМ визуальным бейзлайном
+                                // Но НЕ обновлять lastConfiguratorCode, так как в 1С код еще старый
+                                setUiBaselineCode(code);
                                 setModifiedCode(code);
                                 setActiveDiffContent('');
-                                // Опционально: можно закрывать панель, но лучше оставить её для просмотра
-                                // setShowSidePanel(false); 
                             }, [])}
                             onCodeLoaded={handleCodeLoaded}
                             diagnostics={diagnostics}
@@ -204,7 +210,7 @@ export function MainLayout() {
                             isOpen={viewMode !== 'assistant'}
                             isFullWidth={viewMode === 'code'}
                             onClose={() => setViewMode('assistant')}
-                            originalCode={originalCode}
+                            originalCode={uiBaselineCode}
                             modifiedCode={modifiedCode}
                             onModifiedCodeChange={setModifiedCode}
                             diagnostics={diagnostics}

@@ -117,8 +117,52 @@ export function ChatArea({
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const wasAtBottom = useRef(true);
+
+    // Обработчик скролла для отслеживания ручной прокрутки вверх
+    const handleScroll = () => {
+        if (scrollRef.current) {
+            const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+            // Проверяем, находится ли пользователь внизу (с допуском 100px для надежности)
+            const isAtBottom = scrollHeight - scrollTop <= clientHeight + 100;
+            wasAtBottom.current = isAtBottom;
+        }
+    };
+
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        // Автопрокрутка только во время стриминга или при получении нового сообщения
+        if (!isLoading && messages.length > 0 && messages[messages.length - 1].role !== 'user') return;
+
+        const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+            if (wasAtBottom.current && scrollRef.current) {
+                scrollRef.current.scrollTo({
+                    top: scrollRef.current.scrollHeight,
+                    behavior
+                });
+            }
+        };
+
+        // При стриминге используем smooth, но для первого скролла можно auto
+        scrollToBottom('smooth');
+
+        // Дополнительный скролл для компенсации динамического контента (Markdown)
+        const timer = setTimeout(() => scrollToBottom('smooth'), 100);
+        return () => clearTimeout(timer);
+    }, [messages, isLoading]);
+
+    // Прокрутка вниз при отправке нового сообщения пользователем (всегда плавно)
+    useEffect(() => {
+        if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+            wasAtBottom.current = true;
+            scrollRef.current?.scrollTo({
+                top: scrollRef.current.scrollHeight,
+                behavior: 'smooth'
+            });
+        }
+    }, [messages.length]);
+
+    useEffect(() => {
 
         // Автоматически применяем дифф-блоки последнего ответа ассистента
         if (!isLoading && messages.length > 0) {
@@ -222,7 +266,11 @@ export function ChatArea({
     return (
         <div id="chat-area" className="flex flex-col flex-1 min-w-[400px] transition-all duration-300">
             {/* Messages List */}
-            <div className={`flex-1 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin scrollbar-thumb-white/10'} bg-[#09090b]`}>
+            <div
+                ref={scrollRef}
+                onScroll={handleScroll}
+                className={`flex-1 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin scrollbar-thumb-white/10'} bg-[#09090b]`}
+            >
                 {messages.length === 0 && (
                     <div className="flex-1 flex flex-col items-center justify-center p-4 max-w-3xl mx-auto w-full h-full">
                         <div className="relative mb-10 group">

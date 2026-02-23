@@ -155,7 +155,6 @@ pub async fn stop_chat(
     let mut handle_guard = state.abort_handle.lock().await;
     if let Some(handle) = handle_guard.take() {
         handle.abort();
-        use tauri::Emitter;
         let _ = app_handle.emit("chat-status", "Generation stopped by user");
     }
     Ok(())
@@ -722,46 +721,6 @@ pub async fn undo_last_change(hwnd: isize) -> Result<(), String> {
     {
         Err("Configurator integration is only available on Windows".to_string())
     }
-}
-
-// ============== Chat History ==============
-
-use crate::chat_history::{self, ChatSession};
-
-/// Get all chat sessions
-#[tauri::command]
-pub fn get_chat_sessions() -> Vec<ChatSession> {
-    chat_history::get_sessions()
-}
-
-/// Get active chat session
-#[tauri::command]
-pub fn get_active_chat() -> ChatSession {
-    chat_history::get_active_session()
-}
-
-/// Create new chat
-#[tauri::command]
-pub fn create_chat() -> ChatSession {
-    chat_history::create_new_session()
-}
-
-/// Switch to chat session
-#[tauri::command]
-pub fn switch_chat(session_id: String) -> Result<ChatSession, String> {
-    chat_history::set_active_session(&session_id)
-}
-
-/// Delete chat session
-#[tauri::command]
-pub fn delete_chat(session_id: String) -> Result<(), String> {
-    chat_history::delete_session(&session_id)
-}
-
-/// Save message to active chat
-#[tauri::command]
-pub fn save_chat_message(role: String, content: String) -> Result<(), String> {
-    chat_history::save_message(&role, &content)
 }
 
 // Hotkeys removed

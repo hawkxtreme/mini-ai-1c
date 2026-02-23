@@ -450,16 +450,27 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
         // Wait for paste to complete
         std::thread::sleep(std::time::Duration::from_millis(300));
         
-        // Restore selection
+        // Restore selection and scroll to top
         if use_select_all {
-            // For full module: re-select all
-            println!("[Configurator] Re-selecting all after paste");
+            // For full module: re-select all and scroll to top
+            println!("[Configurator] Re-selecting all and scrolling to top");
             send_ctrl_a();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Send Ctrl+Home to scroll to top (note: this might clear selection in some 1C versions, 
+            // but usually it's better to see the start than the end)
+            let inputs = vec![
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() } } },
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, ..Default::default() } } },
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP, ..Default::default() } } },
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: VK_CONTROL, dwFlags: KEYEVENTF_KEYUP, ..Default::default() } } },
+            ];
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
         } else {
-            // For fragment: try to re-select pasted lines using Shift+Up
+            // For fragment: re-select lines using Shift+Up. 
+            // Since we re-select UPWARD, the cursor (and thus the view) should move to the beginning of the block.
             let line_count = code.lines().count();
             if line_count > 1 {
-                println!("[Configurator] Re-selecting {} lines after paste", line_count - 1);
+                println!("[Configurator] Re-selecting {} lines and scrolling view", line_count - 1);
                 send_shift_up(line_count - 1);
             }
         }

@@ -5,7 +5,6 @@
 mod ai_client;
 mod bsl_client;
 mod bsl_installer;
-mod chat_history;
 mod commands;
 mod history_manager;
 mod logger;
@@ -53,13 +52,6 @@ pub fn run() {
             get_active_fragment_cmd,
             check_selection_state,
             paste_code_to_configurator,
-            // Chat history
-            get_chat_sessions,
-            get_active_chat,
-            create_chat,
-            switch_chat,
-            delete_chat,
-            save_chat_message,
             // Hotkeys
             // Hotkeys removed
             // LLM Utilities
@@ -97,7 +89,13 @@ pub fn run() {
 
             // Start BSL Language Server using managed state
             let app_handle = app.handle().clone();
-             
+            
+            // Clean up old history file if exists (Issue #11)
+            let app_dir = app.path().app_data_dir().unwrap_or_default();
+            let history_path = app_dir.join("chat_history.json");
+            if history_path.exists() {
+                let _ = std::fs::remove_file(history_path);
+            }
             // Start settings watcher for reactive MCP
             crate::mcp_client::start_settings_watcher(app.handle().clone());
 
