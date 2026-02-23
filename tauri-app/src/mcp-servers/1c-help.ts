@@ -16,7 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { existsSync, mkdirSync, statSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { load as parseHtml } from 'cheerio';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { parseHbk } from './lib/hbk-parser.js';
 import { tmpdir, homedir } from 'os';
 
@@ -113,10 +113,10 @@ function getDbPath(): string {
 
 // ---------- Инициализация SQLite ----------
 
-function initDatabase(dbPath: string): Database.Database {
-    const db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
+function initDatabase(dbPath: string): any {
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
 
     db.exec(`
     CREATE TABLE IF NOT EXISTS meta (
@@ -169,7 +169,7 @@ function extractText(html: string): { title: string; text: string } {
 /**
  * Запускает полную индексацию всех HBK файлов в фоне.
  */
-async function runIndexing(platform: PlatformInfo, db: Database.Database): Promise<void> {
+async function runIndexing(platform: PlatformInfo, db: any): Promise<void> {
     const version = platform.version;
 
     // Удаляем старые данные этой версии
@@ -199,11 +199,18 @@ async function runIndexing(platform: PlatformInfo, db: Database.Database): Promi
 
         log(`Индексируется: ${hbkDef.file}`);
 
-        const insertMany = db.transaction((pages: Array<[string, string, string, string, string]>) => {
-            for (const page of pages) {
-                insertStmt.run(...page);
+        const insertMany = (pages: Array<[string, string, string, string, string]>) => {
+            db.exec('BEGIN');
+            try {
+                for (const page of pages) {
+                    insertStmt.run(...page);
+                }
+                db.exec('COMMIT');
+            } catch (e) {
+                db.exec('ROLLBACK');
+                throw e;
             }
-        });
+        };
 
         let batch: Array<[string, string, string, string, string]> = [];
 
@@ -312,7 +319,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 // ---------- Обработчики инструментов ----------
 
-let db: Database.Database | null = null;
+let db: any = null;
 let isIndexing = false;
 let currentPlatform: ReturnType<typeof findPlatform> = null;
 
@@ -343,19 +350,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             // FTS5 запрос с учётом категории
-            let sql = 'SELECT topic_id, title, snippet(topics, 2, ">>", "<<", "...", 30) as excerpt FROM topics WHERE topics MATCH ? ORDER BY rank LIMIT ?';
+            let sql = "SELECT topic_id, title, snippet(topics, 2, '>>', '<<', '...', 30) as excerpt FROM topics WHERE topics MATCH ? ORDER BY rank LIMIT ?";
             let params: any[] = [query, limit];
 
             if (category !== 'all') {
-                sql = 'SELECT topic_id, title, snippet(topics, 2, ">>", "<<", "...", 30) as excerpt FROM topics WHERE topics MATCH ? AND category = ? ORDER BY rank LIMIT ?';
+                sql = "SELECT topic_id, title, snippet(topics, 2, '>>', '<<', '...', 30) as excerpt FROM topics WHERE topics MATCH ? AND category = ? ORDER BY rank LIMIT ?";
                 params = [query, category, limit];
             }
 
             let results: any[] = [];
             try {
                 results = db.prepare(sql).all(...params) as any[];
-            } catch {
+            } catch (e: any) {
                 // Если FTS запрос упал — пробуем LIKE (более толерантный)
+                log(`FTS error: ${e.message}, falling back to LIKE`);
                 results = db.prepare(
                     `SELECT topic_id, title, substr(content, 1, 300) as excerpt FROM topics WHERE title LIKE ? OR content LIKE ? LIMIT ?`
                 ).all(`%${query}%`, `%${query}%`, limit) as any[];
@@ -468,9 +476,12 @@ async function main() {
 
     if (dbExists) {
         try {
-            const tempDb = new Database(dbPath, { readonly: true });
-            const indexedVersion = (tempDb.prepare("SELECT value FROM meta WHERE key = 'indexed_version'").get() as any)?.value;
-            const topicCount = parseInt((tempDb.prepare("SELECT value FROM meta WHERE key = 'topic_count'").get() as any)?.value || '0', 10);
+            const tempDb = new DatabaseSync(dbPath, { open: true });
+            const indexedVersionRow = tempDb.prepare("SELECT value FROM meta WHERE key = 'indexed_version'").get() as any;
+            const indexedVersion = indexedVersionRow?.value;
+
+            const topicCountRow = tempDb.prepare("SELECT value FROM meta WHERE key = 'topic_count'").get() as any;
+            const topicCount = parseInt(topicCountRow?.value || '0', 10);
             tempDb.close();
 
             // Переиндексируем если версия изменилась ИЛИ база пустая (сломанная прошлая индексация)

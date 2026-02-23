@@ -264,17 +264,6 @@ impl Default for CustomPromptsSettings {
                     content: "Соблюдай стандарты разработки 1С и Библиотеки Стандартных Подсистем (БСП).".to_string(),
                     enabled: false,
                 },
-                PromptTemplate {
-                    id: "wrap-changes".to_string(),
-                    name: "Оборачивать изменения".to_string(),
-                    description: "Оборачивать изменения в комментарии доработки".to_string(),
-                    content: r#"Все изменения оборачивай в комментарии:
-// Доработка START
-// Дата: {datetime}
-<измененный код>
-// Доработка END"#.to_string(),
-                    enabled: false,
-                },
             ],
         }
     }

@@ -101,16 +101,6 @@ export const DEFAULT_CUSTOM_PROMPTS: CustomPromptsSettings = {
             description: "Соблюдать стандарты разработки 1С и БСП",
             content: "Соблюдай стандарты разработки 1С и Библиотеки Стандартных Подсистем (БСП).",
             enabled: false
-        },
-        {
-            id: "wrap-changes",
-            name: "Оборачивать изменения",
-            description: "Оборачивать изменения в комментарии доработки",
-            content: `Все изменения оборачивай в комментарии:
-${DEFAULT_MODIFICATION_MARKER_TEMPLATE}
-<измененный код>
-// Доработка END`,
-            enabled: false
         }
     ]
 };

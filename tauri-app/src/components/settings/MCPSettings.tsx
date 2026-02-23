@@ -74,9 +74,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             needsUpdate = true;
         } else {
             const srv = updatedServers[naparnikIndex];
-            // Migrate from node_modules/.bin/tsx to npx
-            const needsCommandFix = srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(naparnikArgs);
-            if (needsCommandFix) {
+            // Allow both npx and node (backend might migrate to node)
+            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
+            if (!isSupportedCmd) {
                 updatedServers[naparnikIndex] = { ...srv, command: 'npx', args: naparnikArgs };
                 needsUpdate = true;
             }
@@ -97,9 +97,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             needsUpdate = true;
         } else {
             const srv = updatedServers[metadataIndex];
-            // Migrate from node_modules/.bin/tsx to npx
-            const needsCommandFix = srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(metadataArgs);
-            if (needsCommandFix) {
+            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
+            if (!isSupportedCmd) {
                 updatedServers[metadataIndex] = { ...srv, command: 'npx', args: metadataArgs };
                 needsUpdate = true;
             }
@@ -131,9 +130,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             needsUpdate = true;
         } else {
             const srv = updatedServers[helpIndex];
-            const expectedArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'];
-            if (srv.command !== 'npx' || JSON.stringify(srv.args) !== JSON.stringify(expectedArgs)) {
-                updatedServers[helpIndex] = { ...srv, command: 'npx', args: expectedArgs };
+            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
+            if (!isSupportedCmd) {
+                updatedServers[helpIndex] = { ...srv, command: 'npx', args: ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'] };
                 needsUpdate = true;
             }
         }
@@ -145,12 +144,18 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             [BUILTIN_1C_SERVER_ID]: 2,
             [BUILTIN_1C_METADATA_ID]: 3,
         };
+
+        const originalIds = servers.map(s => s.id).join(',');
         updatedServers.sort((a, b) => {
             const oa = ORDER[a.id] ?? 99;
             const ob = ORDER[b.id] ?? 99;
             return oa - ob;
         });
-        needsUpdate = true; // всегда сохраняем порядок
+        const sortedIds = updatedServers.map(s => s.id).join(',');
+
+        if (originalIds !== sortedIds) {
+            needsUpdate = true;
+        }
 
         if (needsUpdate) {
             onUpdate(updatedServers);
