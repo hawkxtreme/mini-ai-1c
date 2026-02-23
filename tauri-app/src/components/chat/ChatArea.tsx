@@ -219,7 +219,14 @@ export function ChatArea({
     };
 
     const handleLoadCode = async (isSelection: boolean) => {
-        const code = await getCode(isSelection);
+        let code = await getCode(isSelection);
+
+        // Safeguard: Filter out any internal markers that might have leaked
+        if (code.includes('___1C_AI_MARKER_')) {
+            console.warn("[ChatArea] Clipboard marker detected in loaded code. Filtering.");
+            code = code.replace(/___1C_AI_MARKER_.*?___/g, '').trim();
+        }
+
         setContextCode(code);
         setIsContextSelection(isSelection);
         if (onCodeLoaded) {

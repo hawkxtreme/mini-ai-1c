@@ -232,7 +232,7 @@ unsafe extern "system" fn enum_windows_callback(
 /// Get selected code from configurator window using Ctrl+C
 #[cfg(windows)]
 pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, String> {
-    use clipboard_win::{formats, get_clipboard};
+    use clipboard_win::{formats, get_clipboard, set_clipboard, empty};
     
     let window = HWND(hwnd as *mut std::ffi::c_void);
     
@@ -285,36 +285,35 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
         }
         
         std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // 1. Set marker to definitively detect if Ctrl+C updated the clipboard
+        let marker = format!("___1C_AI_MARKER_{}___", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        let _ = set_clipboard(formats::Unicode, &marker);
         
         if use_select_all {
-            // Send Ctrl+A
             send_ctrl_a();
         }
     
         // Send Ctrl+C
         let ctrl_c_inputs = vec![
-            // Ctrl down
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
                 },
             },
-            // C down
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_C, ..Default::default() },
                 },
             },
-            // C up
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_C, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
                 },
             },
-            // Ctrl up
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -324,23 +323,30 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
         ];
         SendInput(&ctrl_c_inputs, std::mem::size_of::<INPUT>() as i32);
         std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    
-    // Retry loop for clipboard
+        
+        // 2. Wait for change from marker
     let mut retries = 5;
     while retries > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        
-        match get_clipboard::<String, _>(formats::Unicode) {
-            Ok(content) => return Ok(content),
-            Err(_) => {
-                retries -= 1;
-                continue;
+        if let Ok(content) = get_clipboard::<String, _>(formats::Unicode) {
+            if content != marker {
+                // Success! Clean up potential marker artifacts if any (though we have new content)
+                return Ok(content);
             }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        retries -= 1;
+    }
+    
+    // 3. Cleanup: If we still have the marker, clear it so it doesn't leak
+    if let Ok(content) = get_clipboard::<String, _>(formats::Unicode) {
+        if content == marker {
+            let _ = empty(); // Clear the clipboard if it still contains our marker
         }
     }
     
-    Err("Failed to get clipboard content after retries".to_string())
+    // If we still didn't get results, it's an empty module/selection
+    Ok("".to_string())
+    }
 }
 
 /// Get active fragment (selection or current line)
@@ -353,12 +359,8 @@ pub fn get_active_fragment(hwnd: isize) -> Result<String, String> {
         }
     }
 
-    // 2. Fallback: Try to select current line if nothing is selected
-    // Note: 1C Configurator doesn't have a simple "select current line" hotkey, 
-    // but we can try Home, Shift+End or similar if needed.
-    // For now, let's just return what we got or empty.
-    
-    Err("No selection or active fragment found".to_string())
+    // 2. Fallback: For empty selection/module, return empty string so it loads as "Empty" instead of failing
+    Ok("".to_string())
 }
 
 /// Paste code into configurator window
