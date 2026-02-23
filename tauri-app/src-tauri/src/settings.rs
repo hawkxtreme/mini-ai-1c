@@ -299,7 +299,7 @@ pub fn load_settings() -> AppSettings {
     // Migration: Force high-performance node launcher for built-in MCP servers
     let mut modified = false;
     for server in settings.mcp_servers.iter_mut() {
-        if server.id == "builtin-1c-naparnik" || server.id == "builtin-1c-metadata" {
+        if server.id == "builtin-1c-naparnik" || server.id == "builtin-1c-metadata" || server.id == "builtin-1c-help" {
             let current_cmd = server.command.as_deref().unwrap_or("");
             if current_cmd != "node" {
                 crate::app_log!("[SETTINGS] Migrating builtin server '{}' from '{}' to 'node' launcher", server.id, current_cmd);

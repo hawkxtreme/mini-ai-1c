@@ -427,60 +427,88 @@ impl McpSession {
         let mut command = config.command.clone().ok_or("Command is missing")?;
         let mut args = config.args.clone().unwrap_or_default();
 
-        // Path resolution for production (Tauri Resources)
-        // Only resolve as resources if we are NOT in debug mode,
-        // because in debug mode we want to use the local files via npx/tsx.
+        // Path resolution for production (Tauri Resources & Embedded)
+        let app_handle_opt = MCP_MANAGER.app_handle.lock().await;
+
         #[cfg(not(debug_assertions))]
-        {
+        if let Some(app_handle) = app_handle_opt.as_ref() {
             let cmd_lower = command.to_lowercase();
             let is_stdio_node_launcher = cmd_lower == "npx" || cmd_lower == "npx.cmd" || cmd_lower == "node" || cmd_lower.contains("tsx");
             
             if is_stdio_node_launcher {
-                let app_handle_opt = MCP_MANAGER.app_handle.lock().await;
-                if let Some(app_handle) = app_handle_opt.as_ref() {
-                    crate::app_log!("[MCP] Resolving resources for command '{}' with args {:?}", command, args);
-                    for arg in args.iter_mut() {
-                        if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js") || arg.ends_with(".cjs")) {
-                            let filename = std::path::Path::new(&*arg)
-                                .file_name()
-                                .and_then(|f| f.to_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| arg.to_string());
-                            
-                            // Priority 1: .cjs version (for production with type: module)
-                            let js_filename = filename.replace(".ts", ".cjs").replace(".js", ".cjs");
-                            let js_subpath = format!("mcp-servers/{}", js_filename);
-                            
-                            // Priority 2: original filename
-                            let orig_subpath = format!("mcp-servers/{}", filename);
+                crate::app_log!("[MCP] Resolving resources for command '{}' with args {:?}", command, args);
 
-                            let mut resolved = false;
+                // Embedded resources for "True Portability"
+                let embedded_servers = [
+                    ("1c-help.cjs", include_bytes!("../mcp-servers/1c-help.cjs") as &[u8]),
+                    ("1c-metadata.cjs", include_bytes!("../mcp-servers/1c-metadata.cjs") as &[u8]),
+                    ("1c-naparnik.cjs", include_bytes!("../mcp-servers/1c-naparnik.cjs") as &[u8]),
+                ];
+
+                for arg in args.iter_mut() {
+                    if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js") || arg.ends_with(".cjs")) {
+                        let filename = std::path::Path::new(&*arg)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| arg.to_string());
+                        
+                        let js_filename = filename.replace(".ts", ".cjs").replace(".js", ".cjs");
+                        let mut resolved = false;
+
+                        // Phase 1: Try to find embedded resource and extract it to AppData
+                        if let Some((_, bytes)) = embedded_servers.iter().find(|(name, _)| *name == js_filename) {
+                            let mcp_dir = crate::settings::get_settings_dir().join("mcp-servers");
+                            let _ = std::fs::create_dir_all(&mcp_dir);
+                            let target_path = mcp_dir.join(&js_filename);
                             
-                            // Try JS first in any case if it exists in resources
+                            // Only write if not exists or different size (basic cache)
+                            let current_size = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
+                            if current_size != bytes.len() as u64 {
+                                crate::app_log!("[MCP] Extracting embedded server to: {:?}", target_path);
+                                if let Err(e) = std::fs::write(&target_path, bytes) {
+                                    crate::app_log!("[ERROR] Failed to extract embedded MCP: {}", e);
+                                }
+                            }
+
+                            if target_path.exists() {
+                                let path_str = target_path.to_string_lossy().to_string();
+                                *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                crate::app_log!("[MCP] Using embedded/extracted resource: {}", arg);
+                                resolved = true;
+                            }
+                        }
+
+                        // Phase 2: Fallback to standard Tauri resource resolution (MSI case)
+                        if !resolved {
+                            let js_subpath = format!("mcp-servers/{}", js_filename);
                             if let Ok(path) = app_handle.path().resolve(&js_subpath, tauri::path::BaseDirectory::Resource) {
                                 if path.exists() {
                                     let path_str = path.to_string_lossy().to_string();
-                                    // Normalize for Node.js on Windows (remove \\?\ prefix)
                                     *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                                    crate::app_log!("[MCP] Resolved to JS resource: {}", arg);
+                                    crate::app_log!("[MCP] Resolved to MSI resource: {}", arg);
                                     resolved = true;
                                 }
                             }
-                            
-                            if !resolved {
-                                if let Ok(path) = app_handle.path().resolve(&orig_subpath, tauri::path::BaseDirectory::Resource) {
-                                    if path.exists() {
-                                        let path_str = path.to_string_lossy().to_string();
-                                        *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                                        crate::app_log!("[MCP] Resolved to original resource: {}", arg);
-                                        resolved = true;
-                                    }
-                                }
-                            }
+                        }
+                        
+                        // Phase 3: Last resort - check next to EXE
+                        if !resolved {
+                             if let Ok(exe_path) = std::env::current_exe() {
+                                 if let Some(exe_dir) = exe_path.parent() {
+                                     let local_path = exe_dir.join("mcp-servers").join(&js_filename);
+                                     if local_path.exists() {
+                                         let path_str = local_path.to_string_lossy().to_string();
+                                         *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                         crate::app_log!("[MCP] Resolved to EXE-relative resource: {}", arg);
+                                         resolved = true;
+                                     }
+                                 }
+                             }
+                        }
 
-                            if !resolved {
-                                 crate::app_log!("[WARN] Could not resolve MCP resource '{}' in 'mcp-servers/' folder", filename);
-                            }
+                        if !resolved {
+                             crate::app_log!("[WARN] Could not resolve MCP resource '{}' via any method", js_filename);
                         }
                     }
                 }
