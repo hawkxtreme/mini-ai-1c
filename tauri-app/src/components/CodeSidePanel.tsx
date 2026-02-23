@@ -83,6 +83,40 @@ export function CodeSidePanel({
     // Store references to view zones so we can remove/update them
     const viewZoneIdsRef = useRef<string[]>([]);
     const [diffChanges, setDiffChanges] = useState<any[]>([]);
+    const [currentDiffIndex, setCurrentDiffIndex] = useState(-1);
+
+    const goToDiff = useCallback((index: number) => {
+        if (!diffChanges[index] || !editorRef.current) return;
+        const change = diffChanges[index];
+        // Используем номер строки начала изменения
+        const line = change.modifiedStartLineNumber || change.originalStartLineNumber || 1;
+        editorRef.current.revealLineInCenter(line);
+        setCurrentDiffIndex(index);
+
+        // Фокусируем редактор
+        editorRef.current.focus();
+    }, [diffChanges]);
+
+    const nextDiff = useCallback(() => {
+        if (diffChanges.length === 0) return;
+        const nextIndex = (currentDiffIndex + 1) % diffChanges.length;
+        goToDiff(nextIndex);
+    }, [currentDiffIndex, diffChanges, goToDiff]);
+
+    const prevDiff = useCallback(() => {
+        if (diffChanges.length === 0) return;
+        const prevIndex = (currentDiffIndex - 1 + diffChanges.length) % diffChanges.length;
+        goToDiff(prevIndex);
+    }, [currentDiffIndex, diffChanges, goToDiff]);
+
+    // Сброс индекса при изменении состава диффов
+    useEffect(() => {
+        if (diffChanges.length === 0) {
+            setCurrentDiffIndex(-1);
+        } else if (currentDiffIndex >= diffChanges.length) {
+            setCurrentDiffIndex(diffChanges.length - 1);
+        }
+    }, [diffChanges.length]);
 
     const errorCount = useMemo(() => diagnostics.filter(d => d.severity === 'error').length, [diagnostics]);
     const warningCount = useMemo(() => diagnostics.filter(d => d.severity !== 'error').length, [diagnostics]);
@@ -219,7 +253,27 @@ export function CodeSidePanel({
                     </div>
 
                     {viewMode === 'diff' && diffChanges.length > 0 && (
-                        <div className="flex bg-[#27272a]/50 rounded-lg p-0.5 ml-2 flex-shrink-0 animate-in fade-in">
+                        <div className="flex bg-[#27272a]/50 rounded-lg p-0.5 ml-2 flex-shrink-0 animate-in fade-in items-center">
+                            <div className="flex items-center gap-0.5 mr-1 border-r border-zinc-700/50 pr-1">
+                                <button
+                                    onClick={prevDiff}
+                                    className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                                    title="К предыдущему изменению"
+                                >
+                                    <ChevronUp className="w-3 h-3" />
+                                </button>
+                                <span className="text-[9px] text-zinc-500 font-bold min-w-[32px] text-center tabular-nums">
+                                    {currentDiffIndex + 1} / {diffChanges.length}
+                                </span>
+                                <button
+                                    onClick={nextDiff}
+                                    className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                                    title="К следующему изменению"
+                                >
+                                    <ChevronDown className="w-3 h-3" />
+                                </button>
+                            </div>
+
                             <button
                                 onClick={() => {
                                     if (!diffEditorRef.current) return;
