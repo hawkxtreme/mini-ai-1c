@@ -76,7 +76,9 @@ pub fn run() {
             get_mcp_server_logs,
             save_debug_logs,
             align_with_configurator,
+            send_hotkey_cmd,
         ])
+
         .setup(|app| {
             // Setup Tray Icon
             let _tray = TrayIconBuilder::new()

@@ -725,7 +725,26 @@ pub async fn undo_last_change(hwnd: isize) -> Result<(), String> {
 
 // Hotkeys removed
 
+/// Send a hotkey combination to 1C Configurator
+#[tauri::command]
+pub fn send_hotkey_cmd(hwnd: isize, key: u16, modifiers: Vec<u16>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        configurator::send_hotkey(hwnd, key, modifiers);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        let _ = key;
+        let _ = modifiers;
+        Err("Hotkeys are only available on Windows".to_string())
+    }
+}
+
 // ============== LLM Utilities ==============
+
 
 /// Fetch models for a profile
 #[tauri::command]

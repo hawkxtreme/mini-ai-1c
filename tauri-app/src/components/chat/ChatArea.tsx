@@ -5,7 +5,8 @@ import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle } from '../../utils/configurator';
 import { MarkdownRenderer } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, FileText, MousePointerClick, Brain, Check, X, Terminal, Pencil, Play, Send, User, HardHat } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, FileText, MousePointerClick, Brain, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic } from 'lucide-react';
+import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
@@ -100,6 +101,27 @@ export function ChatArea({
     const [isContextSelection, setIsContextSelection] = useState(false);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [editText, setEditText] = useState('');
+    const [showVoiceHint, setShowVoiceHint] = useState(false);
+
+    const { isRecording, toggleRecording, isSupported, error: voiceError, permissionState } = useVoiceInput((text) => {
+        setInput(prev => prev + (prev ? ' ' : '') + text);
+    }, selectedHwnd);
+
+    // Show hint if permission is denied or pending on first click
+    useEffect(() => {
+        if (voiceError === 'not-allowed') {
+            setShowVoiceHint(true);
+            const timer = setTimeout(() => setShowVoiceHint(false), 8000);
+            return () => clearTimeout(timer);
+        }
+    }, [voiceError]);
+
+    // Automatically stop recording when AI starts responding
+    useEffect(() => {
+        if (isLoading && isRecording) {
+            toggleRecording();
+        }
+    }, [isLoading, isRecording, toggleRecording]);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -199,6 +221,12 @@ export function ChatArea({
 
     const handleSendMessage = () => {
         if (!input.trim() || isLoading) return;
+
+        // Stop voice recording if active when sending
+        if (isRecording) {
+            toggleRecording();
+        }
+
         const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
         sendMessage(input, contextCode || modifiedCode, diagStrings);
         setInput('');
@@ -543,7 +571,7 @@ export function ChatArea({
                                             setShowGetCodeDropdown(false);
                                         }
                                     }}
-                                    className={`w-full flex items-center gap-1.5 text-[12px] font-medium px-2 py-1.5 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                                    className={`w-full flex items-center gap-1.5 text-[12px] font-medium px-2 h-8 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                                 >
                                     <ChevronDown className={`w-3 h-3 text-zinc-500 flex-shrink-0 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
                                     <span className="truncate block">
@@ -571,7 +599,7 @@ export function ChatArea({
                                         refreshWindows();
                                     }
                                 }}
-                                    className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                                    className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 h-8 rounded-md transition-all border border-transparent ${showConfigDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                                     title={activeConfigTitle}
                                 >
                                     <Monitor className="w-3.5 h-3.5 flex-shrink-0" />
@@ -601,7 +629,7 @@ export function ChatArea({
                                         setShowConfigDropdown(false);
                                     }
                                 }}
-                                    className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2 py-1.5 rounded-md transition-all border border-transparent ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                                    className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2 h-8 rounded-md transition-all border border-transparent ${showGetCodeDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
                                 >
                                     <FileText className="w-3.5 h-3.5" />
                                     <span className="hidden xl:inline">Код</span>
@@ -622,7 +650,7 @@ export function ChatArea({
 
                             {/* Behavior Preset Toggle */}
                             {settings?.code_generation && (
-                                <div className="flex items-center bg-zinc-800/30 border border-zinc-700/50 rounded-lg p-0.5 flex-shrink-0">
+                                <div className="flex items-center bg-zinc-800/30 border border-zinc-700/50 rounded-lg p-0.5 h-8 flex-shrink-0">
                                     <button
                                         onClick={() => {
                                             if (settings) {
@@ -635,7 +663,7 @@ export function ChatArea({
                                                 });
                                             }
                                         }}
-                                        className={`flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] font-bold transition-all ${settings.code_generation.behavior_preset === 'project'
+                                        className={`flex items-center gap-1 px-2.5 h-full rounded-md text-[10px] font-bold transition-all ${settings.code_generation.behavior_preset === 'project'
                                             ? 'bg-blue-500/15 text-blue-400 shadow-sm'
                                             : 'text-zinc-600 hover:text-zinc-400'
                                             }`}
@@ -656,7 +684,7 @@ export function ChatArea({
                                                 });
                                             }
                                         }}
-                                        className={`flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] font-bold transition-all ${settings.code_generation.behavior_preset === 'maintenance'
+                                        className={`flex items-center gap-1 px-2.5 h-full rounded-md text-[10px] font-bold transition-all ${settings.code_generation.behavior_preset === 'maintenance'
                                             ? 'bg-orange-500/15 text-orange-400 shadow-sm'
                                             : 'text-zinc-600 hover:text-zinc-400'
                                             }`}
@@ -669,9 +697,45 @@ export function ChatArea({
                             )}
                         </div>
 
-                        <button onClick={isLoading ? stopChat : handleSendMessage} disabled={!isLoading && !input.trim()} className={`p-2 rounded-lg transition-colors flex-shrink-0 ${isLoading ? 'bg-red-500/10 text-red-400' : input.trim() ? 'bg-blue-600 text-white' : 'bg-[#27272a] text-zinc-600'}`}>
-                            {isLoading ? <Square className="w-4 h-4 fill-current" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                        </button>
+                        <div className="flex items-center gap-1">
+                            {isSupported && (
+                                <div className="relative">
+                                    {showVoiceHint && (
+                                        <div className="absolute bottom-full right-0 mb-4 w-64 p-3 bg-blue-600 text-white text-xs rounded-xl shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-300 z-50">
+                                            <div className="font-bold mb-1 flex items-center gap-2">
+                                                <Mic className="w-3 h-3" />
+                                                Нужно разрешение
+                                            </div>
+                                            Нажмите "Разрешить" в появившемся окне браузера в верхнем левом углу для доступа к микрофону.
+                                            <div className="absolute top-full right-4 w-3 h-3 bg-blue-600 rotate-45 -translate-y-1.5" />
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={async () => {
+                                            if (isLoading) return;
+                                            const wasRecording = isRecording;
+                                            await toggleRecording();
+
+                                            // Show hint ONLY if we are starting AND permission is NOT granted
+                                            // 'unknown' is also treated as "maybe show" to be safe, but only if user hasn't seen it
+                                            if (!wasRecording && (permissionState === 'prompt' || permissionState === 'unknown')) {
+                                                setShowVoiceHint(true);
+                                                setTimeout(() => setShowVoiceHint(false), 5000);
+                                            }
+                                        }}
+                                        disabled={isLoading}
+                                        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all ${isLoading ? 'opacity-20 cursor-not-allowed' : ''} ${isRecording ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                                        title={isLoading ? 'Голосовой ввод недоступен во время генерации' : (isRecording ? 'Остановить запись' : 'Голосовой ввод')}
+                                    >
+                                        <Mic className={`w-4 h-4 ${isRecording ? 'animate-pulse' : ''}`} />
+                                    </button>
+                                </div>
+                            )}
+
+                            <button onClick={isLoading ? stopChat : handleSendMessage} disabled={!isLoading && !input.trim()} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors flex-shrink-0 ${isLoading ? 'bg-red-500/10 text-red-400' : input.trim() ? 'bg-blue-600 text-white' : 'bg-[#27272a] text-zinc-600'}`}>
+                                {isLoading ? <Square className="w-4 h-4 fill-current" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

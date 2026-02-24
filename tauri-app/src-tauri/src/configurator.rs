@@ -125,6 +125,65 @@ fn send_shift_up(count: usize) {
     }
 }
 
+/// Send a hotkey combination (key + optional modifiers) to the window
+#[cfg(windows)]
+pub fn send_hotkey(hwnd: isize, virtual_key: u16, modifiers: Vec<u16>) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+    
+    unsafe {
+        let window = HWND(hwnd as *mut std::ffi::c_void);
+        
+        // Focus window
+        if IsIconic(window).as_bool() {
+             let _ = ShowWindow(window, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(window);
+        let _ = SetFocus(window);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let mut inputs = Vec::new();
+        
+        // Modifiers down
+        for &modifier in &modifiers {
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(modifier), ..Default::default() },
+                },
+            });
+        }
+        
+        // Key down
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(virtual_key), ..Default::default() },
+            },
+        });
+        
+        // Key up
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(virtual_key), dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+            },
+        });
+        
+        // Modifiers up (reverse order)
+        for &modifier in modifiers.iter().rev() {
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(modifier), dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                },
+            });
+        }
+        
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+
 
 #[cfg(windows)]
 use std::sync::Mutex;
