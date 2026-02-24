@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Check, Server, Brain, Monitor, ArrowRight, Download, Terminal, Cloud, LogOut, ChevronRight, ChevronLeft, Bot, FileText, PanelRight } from 'lucide-react';
 import { LLMProfile } from '../../contexts/ProfileContext';
-import { AppSettings, DEFAULT_CUSTOM_PROMPTS, DEFAULT_CODE_GENERATION } from '../../types/settings';
+import { AppSettings, DEFAULT_CUSTOM_PROMPTS, DEFAULT_CODE_GENERATION, DEFAULT_SLASH_COMMANDS } from '../../types/settings';
 
 // --- Steps ---
 type Step = 'welcome' | 'environment' | 'llm-setup' | 'mcp-setup' | 'tour' | 'finish';
@@ -107,7 +107,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                 debug_mcp: false,
                 custom_prompts: DEFAULT_CUSTOM_PROMPTS,
                 code_generation: DEFAULT_CODE_GENERATION,
-                active_llm_profile: ""
+                active_llm_profile: "",
+                slash_commands: DEFAULT_SLASH_COMMANDS
             };
 
             // Автоматическая активация MCP серверов при завершении
@@ -164,7 +165,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                     enabled: bslEnvOk ? true : currentSettings.bsl_server.enabled,
                     jar_path: downloadedJarPath || currentSettings.bsl_server.jar_path || "",
                     java_path: currentSettings.bsl_server.java_path || "java"
-                }
+                },
+                slash_commands: currentSettings.slash_commands || DEFAULT_SLASH_COMMANDS
             };
 
             await updateSettings(newSettings);
