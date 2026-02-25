@@ -17,7 +17,25 @@ interface MarkdownRendererProps {
 function cleanDiffArtifacts(content: string): string {
     let cleaned = content;
 
-    // 1. Удаляем специфические префиксы, которые иногда добавляет ЛЛМ
+    // 0. Очищаем XML-формат вызова инструментов (Qwen / некоторые другие модели)
+    // Формат: <function=name>\n<parameter=x>\n...\n</parameter>\n</function>
+    // или: <function=name><parameter=x>...</parameter></function>
+    cleaned = cleaned.replace(/<function=[^>]+>[\s\S]*?<\/function>/g, '');
+    // Также удаляем незавершённые блоки (при стриминге)
+    const qwenFnMatch = cleaned.match(/<function=[^>]+>/);
+    if (qwenFnMatch) {
+        cleaned = cleaned.split(qwenFnMatch[0])[0];
+    }
+
+    // 1. Удаляем малформед блоки: =======\nКОНТЕНТ\n>>>>>>> REPLACE без <<<<<<< SEARCH
+    // Qwen Coder иногда пропускает SEARCH-часть и генерирует только REPLACE
+    cleaned = cleaned.replace(/^={7}[\s\S]*?^>{5,10}\s+REPLACE\s*$/gm, '');
+
+    // 2. Очищаем одиночные разделители ======= (невалидные полу-диффы без SEARCH/REPLACE)
+    // Такой разделитель без <<<<<<< SEARCH и >>>>>>> REPLACE — мусор от модели
+    cleaned = cleaned.replace(/^={7}\s*$/gm, '');
+
+    // 3. Удаляем специфические префиксы, которые иногда добавляет ЛЛМ
     const metaPhrases = [
         /Ниже приведены исправления в формате SEARCH\/REPLACE:?/gi,
         /Ниже приведены исправления в формате «Поиск\/Замена»:?/gi,
@@ -29,20 +47,30 @@ function cleanDiffArtifacts(content: string): string {
         cleaned = cleaned.replace(phrase, '');
     }
 
-    // 2. Скрываем завершенные блоки (match 5-10 chevrons)
+    // 4. Скрываем завершенные блоки (match 5-10 chevrons)
     cleaned = cleaned.replace(/<{5,10} SEARCH[\s\S]*?>{5,10} REPLACE/g, '');
 
-    // 3. Скрываем незавершенные блоки при стриминге
+    // 5. Скрываем незавершенные блоки при стриминге
     const searchMarker = cleaned.match(/<{5,10} SEARCH/);
     if (searchMarker && cleaned.includes(searchMarker[0])) {
         cleaned = cleaned.split(searchMarker[0])[0];
     }
 
-    // 4. Удаляем одиночные строки, состоящие только из шевронов (5-10 штук) и мусора
+    // 6. Удаляем одиночные строки из шевронов и маркеры REPLACE/SEARCH
     cleaned = cleaned.replace(/^<{5,10}\s*$/gm, '');
     cleaned = cleaned.replace(/^>{5,10}\s*$/gm, '');
+    cleaned = cleaned.replace(/^>{5,10}\s+REPLACE\s*$/gm, '');
+    cleaned = cleaned.replace(/^<{5,10}\s+SEARCH\s*$/gm, '');
+    cleaned = cleaned.replace(/^={7}\s*$/gm, '');
 
-    return cleaned.trim();
+    const hasBlocks = /<{5,10} SEARCH/.test(content);
+    const result = cleaned.trim();
+
+    if (!result && hasBlocks) {
+        return '';
+    }
+
+    return result;
 }
 
 function ThoughtSection({ title, children }: { title: string, children: React.ReactNode }) {

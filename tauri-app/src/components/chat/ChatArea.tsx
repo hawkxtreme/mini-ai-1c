@@ -94,6 +94,7 @@ export function ChatArea({
 
     const [appliedDiffMessages, setAppliedDiffMessages] = useState<Set<string>>(new Set());
     const [dismissedDiffMessages, setDismissedDiffMessages] = useState<Set<string>>(new Set());
+    const [diffActions, setDiffActions] = useState<Map<string, 'accepted' | 'rejected'>>(new Map());
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
     const [showConfigDropdown, setShowConfigDropdown] = useState(false);
@@ -141,6 +142,7 @@ export function ChatArea({
             toggleRecording();
         }
     }, [isLoading, isRecording, toggleRecording]);
+
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -196,16 +198,8 @@ export function ChatArea({
         return () => clearTimeout(timer);
     }, [messages, isLoading]);
 
-    // Automatically expand thinking block when it starts arriving
-    useEffect(() => {
-        if (isLoading && messages.length > 0) {
-            const lastIndex = messages.length - 1;
-            const lastMessage = messages[lastIndex];
-            if (lastMessage.role === 'assistant' && lastMessage.thinking && !expandedThinking[lastIndex]) {
-                setExpandedThinking(prev => ({ ...prev, [lastIndex]: true }));
-            }
-        }
-    }, [messages, isLoading, expandedThinking]);
+    // Блок ДУМАЮ по умолчанию свёрнут — пользователь разворачивает вручную.
+    // (Авторасширение во время стриминга отключено)
 
     // Прокрутка вниз при отправке нового сообщения пользователем (всегда плавно)
     useEffect(() => {
@@ -224,8 +218,12 @@ export function ChatArea({
         if (!isLoading && messages.length > 0) {
             const lastMsg = messages[messages.length - 1];
             const currentOriginal = contextCode || modifiedCode || "";
-            // Проверяем: 1. Есть ли маркеры SEARCH. 2. Есть ли хотя бы один применимый блок.
-            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content) && hasApplicableDiffBlocks(currentOriginal, lastMsg.content)) {
+
+            // Проверяем: есть ли маркеры SEARCH
+            console.log(`[ChatArea:diag] isLoading=${isLoading}, role=${lastMsg.role}, contextLen=${currentOriginal.length}, msgContentLen=${(lastMsg.content || '').length}`);
+            console.log(`[ChatArea:diag] msgContent(100)="${(lastMsg.content || '').substring(0, 100).replace(/\n/g, '↵')}"`);
+            console.log(`[ChatArea:diag] hasDiffBlocks=${lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)}`);
+            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)) {
                 const msgKey = lastMsg.id || String(messages.length - 1);
 
                 if (!appliedDiffMessages.has(msgKey)) {
@@ -234,18 +232,29 @@ export function ChatArea({
                         onActiveDiffChange(lastMsg.content);
                     }
 
-                    console.log("[ChatArea] Auto-applying diffs for message", msgKey);
-                    const newCode = applyDiff(currentOriginal, lastMsg.content);
-                    if (newCode !== currentOriginal) {
-                        if (onApplyCode) {
-                            onApplyCode(newCode);
+                    console.log("[ChatArea] Diff markers found in message", msgKey);
+
+                    const isApplicable = hasApplicableDiffBlocks(currentOriginal, lastMsg.content);
+                    if (isApplicable) {
+                        console.log("[ChatArea] Auto-applying diffs...");
+                        const newCode = applyDiff(currentOriginal, lastMsg.content);
+                        if (newCode !== currentOriginal) {
+                            if (onApplyCode) {
+                                onApplyCode(newCode);
+                            }
                         }
+                        setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+                    } else {
+                        console.warn("[ChatArea] Diff markers found but blocks are not applicable to current code. Check indentation/tabs or EOF.");
+                        // Даже если не применилось автоматически, мы помечаем как "обработанное", 
+                        // чтобы не спамить ворнингами при каждом рендере, 
+                        // но пользователь увидит ошибку в консоли если что.
+                        setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
                     }
-                    setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
                 } else {
                     // Синхронизируем activeDiffContent по мере докачки сообщения, 
                     // если этот дифф-блок является текущим активным
-                    if (onActiveDiffChange && activeDiffContent && lastMsg.content.startsWith(activeDiffContent)) {
+                    if (onActiveDiffChange && activeDiffContent && lastMsg.content.includes(activeDiffContent)) {
                         onActiveDiffChange(lastMsg.content);
                     }
                 }
@@ -329,6 +338,28 @@ export function ChatArea({
         // Устанавливаем фокус обратно в textarea (через ref, если он есть)
         // Но так как input привязан к состоянию, пользователь просто продолжит ввод
     };
+
+    // Expose testing hooks
+    useEffect(() => {
+        (window as any).__MINI_AI_TEST__ = {
+            setBaselineCode: (code: string) => {
+                setContextCode(code);
+                if (onCodeLoaded) {
+                    onCodeLoaded(code, true);
+                }
+                console.log("[TEST] Baseline code set and propagated, length:", code.length);
+            },
+            sendMessage: (text: string) => {
+                setInput(text);
+                console.log("[TEST] Triggering sendMessage with:", text);
+                handleSendMessage(text);
+            },
+            injectAssistantMessage: (content: string) => {
+                console.log("[TEST] injectAssistantMessage called");
+            }
+        };
+        return () => { delete (window as any).__MINI_AI_TEST__; };
+    }, [handleSendMessage, onCodeLoaded]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         const value = e.target.value;
@@ -568,10 +599,35 @@ export function ChatArea({
                                                     originalCode={contextCode || modifiedCode || ""}
                                                 />
                                                 {(() => {
+                                                    const msgKey = msg.id || String(i);
+                                                    const action = diffActions.get(msgKey);
+
+                                                    // Если действие уже совершено — показываем badge
+                                                    if (action) {
+                                                        return (
+                                                            <div className={`flex items-center gap-1.5 mt-2 w-fit ml-auto px-2.5 py-1 rounded-full text-[11px] font-medium ${action === 'accepted'
+                                                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                                                : 'bg-zinc-800/60 text-zinc-500 border border-zinc-700/40'
+                                                                }`}>
+                                                                {action === 'accepted' ? (
+                                                                    <>
+                                                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                                                                        Изменения приняты
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                                                                        Изменения отклонены
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    }
+
                                                     const isDiffActive = activeDiffContent && (activeDiffContent === msg.content || msg.content.includes(activeDiffContent.substring(0, 50)));
                                                     const shouldShowBanner = hasDiffBlocks(msg.content) &&
                                                         parseDiffBlocks(msg.content).length > 0 &&
-                                                        !dismissedDiffMessages.has(msg.id || String(i)) &&
+                                                        !dismissedDiffMessages.has(msgKey) &&
                                                         isDiffActive;
 
                                                     if (!shouldShowBanner) return null;
@@ -580,13 +636,15 @@ export function ChatArea({
                                                         <DiffSummaryBanner
                                                             content={msg.content}
                                                             onApply={() => {
-                                                                const newCode = applyDiff(contextCode || modifiedCode || "", msg.content);
+                                                                // modifiedCode уже содержит применённый дифф (auto-apply из useEffect).
+                                                                // Просто фиксируем его как новый бейзлайн — НЕ применяем дифф повторно.
                                                                 if (onCommitCode) {
-                                                                    onCommitCode(newCode);
+                                                                    onCommitCode(modifiedCode || '');
                                                                 } else if (onApplyCode) {
-                                                                    onApplyCode(newCode);
+                                                                    onApplyCode(modifiedCode || '');
                                                                 }
                                                                 if (onActiveDiffChange) onActiveDiffChange('');
+                                                                setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
                                                             }}
                                                             onReject={() => {
                                                                 if (originalCode) {
@@ -597,6 +655,7 @@ export function ChatArea({
                                                                     }
                                                                 }
                                                                 if (onActiveDiffChange) onActiveDiffChange('');
+                                                                setDiffActions(prev => new Map(prev).set(msgKey, 'rejected'));
                                                             }}
                                                         />
                                                     );

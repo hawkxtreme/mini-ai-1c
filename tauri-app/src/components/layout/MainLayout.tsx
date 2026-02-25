@@ -34,14 +34,40 @@ export function MainLayout() {
     const [selectionActive, setSelectionActive] = useState(true);
     const [activeDiffContent, setActiveDiffContent] = useState(''); // Стейт для диффов
 
-    const appWindow = getCurrentWindow();
+    // useMemo + try/catch защищает от ошибки "Cannot read properties of undefined (reading 'metadata')"
+    // которая возникает если Tauri IPC не инициализирован (первый рендер / dev-режим браузера)
+    const appWindow = useMemo(() => {
+        try {
+            return getCurrentWindow();
+        } catch (e) {
+            console.warn('[MainLayout] getCurrentWindow() failed:', e);
+            return null;
+        }
+    }, []);
+
+    // Диагностика ошибок
+    useEffect(() => {
+        const handleError = (event: ErrorEvent) => {
+            if (event.message?.includes('metadata')) {
+                console.error("Критическая ошибка UI (metadata):", {
+                    message: event.message,
+                    error: event.error,
+                    stack: event.error?.stack,
+                    settings_exists: !!settings,
+                    bslStatus_exists: !!bslStatus
+                });
+            }
+        };
+        window.addEventListener('error', handleError);
+        return () => window.removeEventListener('error', handleError);
+    }, [settings, bslStatus]);
 
     // Problem #4: Listen for external diff reset events
     useEffect(() => {
         const unlisten = listen<string>('RESET_DIFF', (event) => {
-            console.log("Diff Reset Event received", event.payload.length);
-            setLastConfiguratorCode(event.payload);
-            setUiBaselineCode(event.payload);
+            console.log("Diff Reset Event received", event.payload?.length);
+            setLastConfiguratorCode(event.payload || '');
+            setUiBaselineCode(event.payload || '');
             setActiveDiffContent(''); // Сбрасываем диффы при новом коде
         });
         return () => {
@@ -57,9 +83,9 @@ export function MainLayout() {
                 setIsValidating(true);
                 try {
                     const results = await analyzeCode(modifiedCode);
-                    setDiagnostics(results);
+                    setDiagnostics(results || []);
                 } catch (e) {
-                    console.error("Analysis failed", e);
+                    console.error("Analysis failed:", e);
                 } finally {
                     setIsValidating(false);
                 }
@@ -68,7 +94,7 @@ export function MainLayout() {
             const timer = setTimeout(runAnalysis, 1000);
             return () => clearTimeout(timer);
         }
-    }, [modifiedCode, viewMode]);
+    }, [modifiedCode, viewMode, analyzeCode]);
 
     const handleApply = useCallback(async () => {
         setIsApplying(true);
@@ -129,12 +155,12 @@ export function MainLayout() {
         if (viewMode === 'assistant') setViewMode('split');
     }, [viewMode]);
 
-    const minimize = () => appWindow.minimize();
+    const minimize = () => appWindow?.minimize();
     const maximize = async () => {
-        const isMaximized = await appWindow.isMaximized();
-        isMaximized ? appWindow.unmaximize() : appWindow.maximize();
+        const isMaximized = await appWindow?.isMaximized();
+        isMaximized ? appWindow?.unmaximize() : appWindow?.maximize();
     };
-    const close = () => appWindow.close();
+    const close = () => appWindow?.close();
 
     return (
         <div className="flex flex-col h-screen bg-transparent relative overflow-hidden">
@@ -142,7 +168,7 @@ export function MainLayout() {
 
             {/* Custom Title Bar */}
             <div className="relative h-10 bg-[#09090b] flex items-center justify-between px-4 border-b border-[#27272a] select-none z-50">
-                <div data-tauri-drag-region className="absolute inset-0 z-0" onMouseDown={() => appWindow.startDragging()} />
+                <div data-tauri-drag-region className="absolute inset-0 z-0" onMouseDown={() => appWindow?.startDragging()} />
                 <div className="relative z-10 flex items-center gap-2 pointer-events-none">
                     <img src={logo} alt="Logo" className="w-5 h-5" />
                     <span className="text-sm font-medium text-zinc-300">Mini AI 1C</span>
@@ -176,7 +202,7 @@ export function MainLayout() {
                 />
 
                 <div className="flex flex-1 overflow-hidden bg-[#09090b] relative">
-                    <div className={`flex flex-1 overflow-hidden transition-all duration-300 ${viewMode === 'code' ? 'hidden' : 'opacity-100 w-full'}`}>
+                    <div className={`flex flex-1 overflow-hidden transition-all duration-300 ${viewMode === 'code' ? 'hidden' : 'opacity-100'}`}>
                         <ChatArea
                             originalCode={uiBaselineCode}
                             modifiedCode={modifiedCode}
