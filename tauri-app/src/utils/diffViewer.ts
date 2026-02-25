@@ -31,7 +31,8 @@ function stripMarkdownCodeBlocks(content: string): string {
  */
 export function parseDiffBlocks(content: string): DiffBlock[] {
     const blocks: DiffBlock[] = [];
-    const regex = /<<<<<<< SEARCH\s*([\s\S]*?)=======\s*([\s\S]*?)>>>>>>> REPLACE/g;
+    // Регулярка теперь более гибкая к пробелам после маркеров
+    const regex = /<<<<<<< SEARCH[\s\t]*\n?([\s\S]*?)=======[\s\t]*\n?([\s\S]*?)>>>>>>> REPLACE/g;
 
     let match;
     let index = 0;
@@ -50,18 +51,18 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
             }
         }
 
-        const searchTrim = search.trim();
-        const replaceTrim = replace.replace(/^\n/, '').replace(/\n$/, '');
+        // Важно: мы НЕ делаем trim(), так как отступы в 1С критичны.
+        // Очищаем только системный префикс :line: если он есть.
+        const searchFinal = search;
+        const replaceFinal = replace;
 
-        // Если блок поиска пустой - это приведет к вставке в начало файла (дублированию кода). 
-        // Если ИИ не указал искомый код, мы не сможем его найти. Пропускаем.
-        if (!searchTrim) {
-            console.warn('Пустой блок SEARCH найден, игнорируем во избежание дублирования');
+        if (!searchFinal.trim() && !lineMatch) {
+            console.warn('Пустой блок SEARCH найден без указания строки, игнорируем во избежание дублирования');
             continue;
         }
 
         // Расчет чистой статистики с использованием diffLines
-        const dLines = diffLines(searchTrim, replaceTrim, { ignoreWhitespace: false });
+        const dLines = diffLines(searchFinal.trim(), replaceFinal.trim(), { ignoreWhitespace: false });
         let added = 0;
         let removed = 0;
         let unchanged = 0;
@@ -80,8 +81,8 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
 
 
         blocks.push({
-            search: searchTrim, // Важно: trim для надежности поиска, но может быть опасно для отступов
-            replace: replaceTrim, // Чистим лишние переносы от формата
+            search: searchFinal,
+            replace: replaceFinal,
             lineStart,
             status: 'pending',
             index: index++,
@@ -120,12 +121,67 @@ export function applyDiff(originalCode: string, diffContent: string | DiffBlock[
         // 1. Точный поиск
         // Нормализуем окончания строк для кросс-платформенности
         const normalizedOriginal = result.replace(/\r\n/g, '\n');
-        const normalizedSearch = block.search.replace(/\r\n/g, '\n');
+        let normalizedSearch = block.search.replace(/\r\n/g, '\n');
 
         // Пробуем найти блок
         if (normalizedOriginal.includes(normalizedSearch)) {
             result = normalizedOriginal.replace(normalizedSearch, block.replace);
             continue;
+        }
+
+        // 2. Если не нашли, и поиск заканчивается переводом строки (часто бывает из-за формата блока)
+        // пробуем сопоставить БЕЗ него (для случая конца файла - EOF)
+        if (normalizedSearch.endsWith('\n')) {
+            const trimmedSearch = normalizedSearch.slice(0, -1);
+            if (trimmedSearch && normalizedOriginal.endsWith(trimmedSearch)) {
+                // Если совпало в конце файла, заменяем
+                const lastIndex = normalizedOriginal.lastIndexOf(trimmedSearch);
+                if (lastIndex !== -1) {
+                    result = normalizedOriginal.slice(0, lastIndex) + block.replace;
+                    continue;
+                }
+            }
+
+            // Также пробуем просто найти trimmedSearch где угодно, если он уникальный
+            const occurrences = normalizedOriginal.split(trimmedSearch).length - 1;
+            if (occurrences === 1) {
+                result = normalizedOriginal.replace(trimmedSearch, block.replace);
+                continue;
+            }
+        }
+
+        // 3. Совсем суровый вариант: убираем пробелы в конце каждой строки поиска (иногда ИИ их добавляет)
+        const looseSearch = normalizedSearch.split('\n').map(l => l.trimEnd()).join('\n');
+        const looseOriginal = normalizedOriginal.split('\n').map(l => l.trimEnd()).join('\n');
+
+        if (looseOriginal.includes(looseSearch)) {
+            console.log('[applyDiff] Найдено совпадение через loose-matching');
+
+            // Находим индекс в "расслабленном" тексте
+            const looseIndex = looseOriginal.indexOf(looseSearch);
+            if (looseIndex !== -1) {
+                // Пытаемся спроецировать этот индекс на оригинальный текст. 
+                // Так как trimEnd() только убирает символы в конце строк, 
+                // мы можем найти соответствующие границы строк в оригинале.
+
+                const originalLines = normalizedOriginal.split('\n');
+                const searchLinesCount = looseSearch.split('\n').length;
+                const looseLinesBefore = looseOriginal.substring(0, looseIndex).split('\n');
+                const startLineIdx = looseLinesBefore.length - 1;
+
+                // Проверяем, что блок действительно соответствует этим строкам (с точностью до trimEnd)
+                const candidateLines = originalLines.slice(startLineIdx, startLineIdx + searchLinesCount);
+                const candidateContent = candidateLines.join('\n');
+
+                if (candidateContent.split('\n').map(l => l.trimEnd()).join('\n') === looseSearch) {
+                    // Успешная проекция! Заменяем эти строки.
+                    const head = originalLines.slice(0, startLineIdx).join('\n');
+                    const tail = originalLines.slice(startLineIdx + searchLinesCount).join('\n');
+
+                    result = (head ? head + '\n' : '') + block.replace + (tail ? '\n' + tail : '');
+                    continue;
+                }
+            }
         }
 
         // Если не нашли - выводим варнинг
@@ -152,9 +208,27 @@ export function hasApplicableDiffBlocks(originalCode: string, content: string): 
     if (blocks.length === 0) return false;
 
     const normalizedOriginal = originalCode.replace(/\r\n/g, '\n');
+
     return blocks.some(block => {
         const normalizedSearch = block.search.replace(/\r\n/g, '\n');
-        return normalizedSearch && normalizedOriginal.includes(normalizedSearch);
+
+        // 1. Точное совпадение
+        if (normalizedOriginal.includes(normalizedSearch)) return true;
+
+        // 2. EOF / Trimmed совпадение
+        if (normalizedSearch.endsWith('\n')) {
+            const trimmedSearch = normalizedSearch.slice(0, -1);
+            if (trimmedSearch && (normalizedOriginal.endsWith(trimmedSearch) || normalizedOriginal.split(trimmedSearch).length === 2)) {
+                return true;
+            }
+        }
+
+        // 3. Loose matching
+        const looseSearch = normalizedSearch.split('\n').map(l => l.trimEnd()).join('\n');
+        const looseOriginal = normalizedOriginal.split('\n').map(l => l.trimEnd()).join('\n');
+        if (looseOriginal.includes(looseSearch)) return true;
+
+        return false;
     });
 }
 

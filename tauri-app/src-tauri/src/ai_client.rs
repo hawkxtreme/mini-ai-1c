@@ -184,22 +184,27 @@ Your goal is to make **Targeted Edits** using the SEARCH/REPLACE block format.
    - **DO NOT include long runs (e.g. 5+ lines) of unchanging lines in SEARCH blocks**.
    - If changing multiple areas, provide multiple SEARCH/REPLACE blocks in the order they appear in the file.
 
-5. **EXAMPLE (Adding a description):**
-<<<<<<< SEARCH
-Procedure MyFunction()
-    // some code
-=======
-// My new description
-Procedure MyFunction()
-    // some code
->>>>>>> REPLACE
+5. **OUTPUT FORMAT (CRITICAL):**
+   - Respond ONLY with a brief text explanation and the SEARCH/REPLACE blocks.
+   - **START your response immediately with `<<<<<<< SEARCH` if no explanation is needed.**
+   - **FORBIDDEN**: Meta-talk like "Ниже приведен код...", "Вот исправления...".
+   - **🚫 CRITICAL: EVERY block MUST start with `<<<<<<< SEARCH`. NEVER start a block with `=======` or `>>>>>>> REPLACE`.** Without the `<<<<<<< SEARCH` header, the diff block is invalid and will be ignored.
 
-6. **OUTPUT FORMAT (CRITICAL):**
-   - When using SEARCH/REPLACE blocks, do NOT add a separate ```bsl...``` code block with the full or partial file content.
-   - Your response must contain ONLY the necessary text explanation + SEARCH/REPLACE blocks.
-   - **FORBIDDEN (CRITICAL)**: Do NOT add phrases like "Below are the changes...", "Ниже приведены исправления...", "Ниже приведен код...", "Вот исправления в формате SEARCH/REPLACE" or any meta-talk about the format itself.
-   - **FORBIDDEN**: Adding an empty ```bsl``` block or a full file listing alongside SEARCH/REPLACE blocks.
-   - The SEARCH/REPLACE blocks ARE the code changes.
+6. **EOF RULE (COMPLETING CODE):**
+   - If the code ends abruptly in the middle of a function or loop, you MUST complete it.
+   - The SEARCH block must contain the last 2-3 lines of the truncated file.
+   - The REPLACE block MUST contain those same lines PLUS the logically required closing keywords (e.g., `EndIf;`, `EndDo;`, `EndFunction`, `Return ...;`) and any missing logic.
+   - **CRITICAL**: Do NOT just repeat the SEARCH block. Your goal is to make the file syntactically and logically complete.
+   - **EOF EXAMPLE:**
+     If file ends with: `If X > 0`
+     Your block MUST be:
+     <<<<<<< SEARCH
+     If X > 0
+     =======
+     If X > 0 Then
+         Return True;
+     EndIf;
+     >>>>>>> REPLACE
 "#;
 
 const TWO_STEP_PLANNING_RULES: &str = r#"
@@ -276,9 +281,11 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
 
 {}
 
-=== LANGUAGE HINT ===
-- THE TARGET LANGUAGE FOR THE FINAL RESPONSE IS: **{}**.
-- REQUIRED: Think in English inside `<thinking>`, but respond in {}!
+=== ЯЗЫК ОТВЕТА (КРИТИЧЕСКИ ВАЖНО) ===
+- ALWAYS respond in **{}** language. This is MANDATORY and MUST NOT be violated under any circumstances.
+- You MAY think inside `<thinking>` in any language (English is preferred for efficiency).
+- But the FINAL ANSWER (outside `<thinking>`) MUST ALWAYS be in {} — NEVER in English or any other language.
+- If the user writes in Russian — answer in Russian. If in another language — answer in Russian anyway.
 
 {}
 Твоя ГЛАВНАЯ ЦЕЛЬ: Выполнять запросы пользователя МАКСИМАЛЬНО ТОЧНО, НЕ ВНОСЯ НИКАКИХ ЛИШНИХ ИЗМЕНЕНИЙ.
@@ -298,12 +305,13 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
 - Если запрос пользователя является ВОПРОСОМ (содержит слова: "что делает", "объясни", "как работает", "расскажи", "зачем", "почему", "что такое", "как используется") — ОТВЕЧАЙ ТОЛЬКО ТЕКСТОМ.
 - В режиме вопроса ЗАПРЕЩЕНО использовать блоки SEARCH/REPLACE.
 - В режиме вопроса ЗАПРЕЩЕНО вносить ЛЮБЫЕ изменения в код, даже "очевидные улучшения" или исправления.
-- Изменения кода (SEARCH/REPLACE) — ТОЛЬКО если запрос содержит явное действие: "исправь", "добавь", "измени", "перепиши", "удали", "создай", "реализуй", "оптимизируй".
+- Изменения кода (SEARCH/REPLACE) — если запрос содержит явное действие: "исправь", "добавь", "измени", "перепиши", "удали", "создай", "реализуй", "оптимизируй", **"допиши"**, **"заверши"**, "дополни".
 - ПУСТОЙ МОДУЛЬ: Если исходный код BSL пуст или содержит только маркер/комментарии, а пользователь просит "добавить", "создать" или "написать" — генерируй ПОЛНЫЙ текст модуля с нуля в блоке ```bsl. Не пытайся использовать SEARCH/REPLACE для абсолютно пустого файла.
 
-Используй {} язык в финальном ответе. Форматируй код в блоках ```bsl...```.
-При написании или исправлении кода соблюдай каноническое написание ключевых слов 1С (BSL)."#,
-        planning_rules, target_lang, target_lang, code_rules, target_lang
+**КРИТИЧЕСКИ ВАЖНО**: Если тебе предоставлен исходный код (контекст) и запрошено изменение — используй SEARCH/REPLACE. НЕ форматируй изменённый код в ```bsl``` блоки вместо SEARCH/REPLACE.
+
+ФИНАЛЬНОЕ НАПОМИНАНИЕ: твой ответ НА РУССКОМ ЯЗЫКЕ!"#,
+        planning_rules, target_lang, target_lang, code_rules
     ));
 
     // 3. Инструкции для маркировки (только если включено или в режиме Maintenance)
@@ -695,6 +703,8 @@ pub async fn stream_chat_completion(
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
     let mut announced_tool_calls = std::collections::HashSet::new();
     let mut is_thinking = false;
+    let mut is_qwen_fn = false;           // Qwen XML tool call mode: <function=name>...</function>
+    let mut qwen_fn_buf = String::new();  // Буфер Qwen XML tool call
     let mut has_switched_to_executing = false;
     let mut first_token_received = false;
     let start_gen_time = std::time::Instant::now();
@@ -716,6 +726,12 @@ pub async fn stream_chat_completion(
             for line in event.lines() {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
+                        crate::app_log!("[AI][DIAG] [DONE] received. full_content.len()={}, tool_calls={}, qwen_fn_buf_len={}", 
+                            full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
+                        if !full_content.is_empty() {
+                            let preview = &full_content[..full_content.len().min(600)];
+                            crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
+                        }
                          return Ok(ApiMessage {
                             role: "assistant".to_string(),
                             content: if full_content.is_empty() { None } else { Some(full_content) },
@@ -740,7 +756,21 @@ pub async fn stream_chat_completion(
                                 
                                 // Process the search buffer
                                 loop {
-                                    if !is_thinking {
+                                    if !is_thinking && !is_qwen_fn {
+                                        // --- Qwen XML function call detection ---
+                                        if let Some(fn_start) = content_search_temp.find("<function=") {
+                                            // Emit everything before the tag as regular text
+                                            if fn_start > 0 {
+                                                let text = content_search_temp[..fn_start].to_string();
+                                                full_content.push_str(&text);
+                                                let _ = app_handle.emit("chat-chunk", text);
+                                            }
+                                            is_qwen_fn = true;
+                                            qwen_fn_buf = content_search_temp[fn_start..].to_string();
+                                            content_search_temp.clear();
+                                            break;
+                                        }
+                                        
                                         if let Some(start_pos) = content_search_temp.find("<thinking>") {
                                             // 1. Text before <thinking> goes to regular chat
                                             if start_pos > 0 {
@@ -756,14 +786,30 @@ pub async fn stream_chat_completion(
                                             // 3. Remove processed part including tag
                                             content_search_temp = content_search_temp[start_pos + 10..].to_string();
                                         } else if let Some(last_lt) = content_search_temp.rfind('<') {
-                                            // Potential tag start found. Emit everything before it.
-                                            if last_lt > 0 {
-                                                let text = content_search_temp[..last_lt].to_string();
-                                                full_content.push_str(&text);
-                                                let _ = app_handle.emit("chat-chunk", text);
-                                                content_search_temp = content_search_temp[last_lt..].to_string();
+                                            // Potential tag start - but only hold back if it COULD be an XML tag.
+                                            // XML tags start with '<' followed by a letter, slash, or '?'.
+                                            // Diff markers like '<<<<<<< SEARCH' start with multiple '<'.
+                                            // Do NOT hold back for diff markers or operator sequences.
+                                            let after_lt = content_search_temp[last_lt..].chars().nth(1);
+                                            let is_potential_tag = matches!(after_lt, Some(c) if c.is_alphabetic() || c == '/' || c == '?');
+                                            
+                                            if is_potential_tag {
+                                                // Hold back everything from `<` onwards, emit the rest.
+                                                if last_lt > 0 {
+                                                    let text = content_search_temp[..last_lt].to_string();
+                                                    full_content.push_str(&text);
+                                                    let _ = app_handle.emit("chat-chunk", text);
+                                                    content_search_temp = content_search_temp[last_lt..].to_string();
+                                                }
+                                                break;
+                                            } else {
+                                                // Not a potential tag (e.g., diff marker '<<<'), emit everything.
+                                                full_content.push_str(&content_search_temp);
+                                                let _ = app_handle.emit("chat-chunk", content_search_temp.clone());
+                                                content_search_temp.clear();
+                                                break;
                                             }
-                                            break;
+
                                         } else {
                                             // No '<' found, emit everything
                                             full_content.push_str(&content_search_temp);
@@ -801,6 +847,51 @@ pub async fn stream_chat_completion(
                                             break;
                                         }
                                     }
+                                }
+                            }
+                            
+                            // 1b. Handle Qwen XML tool calls accumulation
+                            if is_qwen_fn {
+                                qwen_fn_buf.push_str(&content_search_temp);
+                                content_search_temp.clear();
+                                if let Some(end_pos) = qwen_fn_buf.find("</function>") {
+                                    let full_block = qwen_fn_buf[..end_pos + "</function>".len()].to_string();
+                                    let remainder = qwen_fn_buf[end_pos + "</function>".len()..].to_string();
+                                    qwen_fn_buf.clear();
+                                    is_qwen_fn = false;
+                                    // Parse: <function=name>\n<parameter=p>\nVALUE\n</parameter>\n</function>
+                                    if let Some(fn_name_end) = full_block[10..].find('>') {
+                                        let fn_name = full_block[10..10 + fn_name_end].to_string();
+                                        let mut args_map = serde_json::Map::new();
+                                        let body = &full_block[10 + fn_name_end + 1..];
+                                        // Find all <parameter=X>VALUE</parameter>
+                                        let mut pos = 0;
+                                        while let Some(p_start) = body[pos..].find("<parameter=") {
+                                            let abs = pos + p_start;
+                                            if let Some(close_gt) = body[abs..].find('>') {
+                                                let p_name = body[abs + 11..abs + close_gt].to_string();
+                                                let v_start = abs + close_gt + 1;
+                                                if let Some(v_end) = body[v_start..].find("</parameter>") {
+                                                    let value = body[v_start..v_start + v_end].trim().to_string();
+                                                    args_map.insert(p_name, serde_json::Value::String(value));
+                                                    pos = v_start + v_end + 12;
+                                                } else { break; }
+                                            } else { break; }
+                                        }
+                                        let args_json = serde_json::to_string(&args_map).unwrap_or("{}".to_string());
+                                        let tc_idx = accumulated_tool_calls.len();
+                                        let tc = ToolCall {
+                                            id: format!("qwen_fn_{}", tc_idx),
+                                            r#type: "function".to_string(),
+                                            function: ToolCallFunction { name: fn_name.clone(), arguments: args_json },
+                                        };
+                                        let _ = app_handle.emit("tool-call-started", serde_json::json!({
+                                            "index": tc_idx, "id": tc.id, "name": fn_name
+                                        }));
+                                        accumulated_tool_calls.push(tc);
+                                    }
+                                    // Continue with remainder
+                                    content_search_temp = remainder;
                                 }
                             }
                             
@@ -853,6 +944,12 @@ pub async fn stream_chat_completion(
     
     let total_gen_duration = start_gen_time.elapsed().as_millis();
     crate::app_log!("[AI][TIMER] Total generation time: {} ms", total_gen_duration);
+    crate::app_log!("[AI][DIAG] full_content len={}, tool_calls={}, qwen_fn_buf_len={}", 
+        full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
+    if !full_content.is_empty() {
+        let preview = &full_content[..full_content.len().min(500)];
+        crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
+    }
     
     Ok(ApiMessage {
         role: "assistant".to_string(),
