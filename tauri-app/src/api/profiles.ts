@@ -1,15 +1,18 @@
 import { invoke } from '@tauri-apps/api/core';
+import { CliProviderInfo } from '../types/settings';
 
 export interface LLMProfile {
     id: string;
     name: string;
-    provider: string;
+    provider: string; // "openai", "ollama", "qwen_cli", etc.
     model: string;
     api_key_encrypted: string;
     base_url: string | null;
     max_tokens: number;
     temperature: number;
     context_window_override?: number;
+    provider_subtype?: 'cli';
+    cli_info?: CliProviderInfo;
 }
 
 export interface ProfileStore {

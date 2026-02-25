@@ -28,6 +28,7 @@ dirs = "5.0"
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+sha2 = "0.10"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-dialog = "2"
@@ -36,7 +37,7 @@ lazy_static = "1.5.0"
 notify = "8.2.0"
 async-trait = "0.1.89"
 url = "2.5"
-
+keyring = "2"
 
 
 [target.'cfg(windows)'.dependencies]

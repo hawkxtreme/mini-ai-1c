@@ -598,9 +598,27 @@ pub async fn stream_chat_completion(
     app_handle: tauri::AppHandle,
 ) -> Result<ApiMessage, String> {
     let profile = get_active_profile().ok_or("No active LLM profile")?;
-    let api_key = profile.get_api_key();
-    let base_url = profile.get_base_url();
-    let url = format!("{}/chat/completions", base_url);
+    let (api_key, url) = if matches!(profile.provider, LLMProvider::QwenCli) {
+        let token_info = crate::llm::cli_providers::qwen::QwenCliProvider::get_token()?;
+        let (access_token, _, expires_at, resource_url) = token_info.ok_or("Qwen CLI: Требуется авторизация")?;
+
+        // Check expiry
+        if chrono::Utc::now().timestamp() as u64 > expires_at {
+            return Err("Qwen CLI: Токен истек. Требуется повторная авторизация".to_string());
+        }
+
+        // Use resource_url from token if available, else fallback to portal.qwen.ai
+        let base = if let Some(ru) = resource_url.as_deref().filter(|s| !s.is_empty()) {
+            format!("https://{}/v1", ru)
+        } else {
+            "https://portal.qwen.ai/v1".to_string()
+        };
+        (access_token, format!("{}/chat/completions", base))
+    } else {
+        let api_key = profile.get_api_key();
+        let base_url = profile.get_base_url();
+        (api_key, format!("{}/chat/completions", base_url))
+    };
     
     // Get tools first to build dynamic prompt
     let tools_info = get_available_tools().await;
@@ -651,6 +669,18 @@ pub async fn stream_chat_completion(
         headers.insert("HTTP-Referer", HeaderValue::from_static("https://mini-ai-1c.local"));
         headers.insert("X-Title", HeaderValue::from_static("Mini AI 1C Agent"));
     }
+
+    if matches!(profile.provider, LLMProvider::QwenCli) {
+        headers.insert("User-Agent", HeaderValue::from_static("QwenCode/0.10.3 (darwin; arm64)"));
+        headers.insert("X-Dashscope-Useragent", HeaderValue::from_static("QwenCode/0.10.3 (darwin; arm64)"));
+        headers.insert("X-Dashscope-Authtype", HeaderValue::from_static("qwen-oauth"));
+        headers.insert("X-Dashscope-Cachecontrol", HeaderValue::from_static("enable"));
+        headers.insert("X-Stainless-Runtime", HeaderValue::from_static("node"));
+        headers.insert("X-Stainless-Runtime-Version", HeaderValue::from_static("v22.17.0"));
+        headers.insert("X-Stainless-Lang", HeaderValue::from_static("js"));
+        headers.insert("X-Stainless-Package-Version", HeaderValue::from_static("5.11.0"));
+        headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("cors"));
+    }
     
     crate::app_log!("[AI] Sending request to {} (Model: {})", url, request_body.model);
 
@@ -694,7 +724,33 @@ pub async fn stream_chat_completion(
     };
     
     crate::app_log!("[AI] Response received. Status: {}", response.status());
-    
+
+    // For QwenCli — parse rate-limit headers and cache usage in keyring
+    if matches!(profile.provider, LLMProvider::QwenCli) {
+        let hdrs = response.headers();
+        crate::app_log!(force: true, "[DEBUG] Qwen response headers: {:?}", hdrs);
+        // Common patterns: x-ratelimit-limit-requests, x-ratelimit-remaining-requests,
+        // x-ratelimit-reset-requests (or -tokens variants)
+        let limit = hdrs.get("x-ratelimit-limit-requests")
+            .or_else(|| hdrs.get("x-ratelimit-requests-limit"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok());
+        let remaining = hdrs.get("x-ratelimit-remaining-requests")
+            .or_else(|| hdrs.get("x-ratelimit-requests-remaining"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok());
+        let reset = hdrs.get("x-ratelimit-reset-requests")
+            .or_else(|| hdrs.get("x-ratelimit-requests-reset"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let (Some(limit), Some(remaining)) = (limit, remaining) {
+            let used = limit.saturating_sub(remaining);
+            crate::app_log!(force: true, "[DEBUG] Qwen rate-limit: used={}/{}, reset={:?}", used, limit, reset);
+            let _ = crate::llm::cli_providers::qwen::QwenCliProvider::save_usage(used, limit, reset);
+        }
+    }
+
     // Stream response
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -729,7 +785,7 @@ pub async fn stream_chat_completion(
                         crate::app_log!("[AI][DIAG] [DONE] received. full_content.len()={}, tool_calls={}, qwen_fn_buf_len={}", 
                             full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
                         if !full_content.is_empty() {
-                            let preview = &full_content[..full_content.len().min(600)];
+                            let preview: String = full_content.chars().take(300).collect();
                             crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
                         }
                          return Ok(ApiMessage {
@@ -947,7 +1003,7 @@ pub async fn stream_chat_completion(
     crate::app_log!("[AI][DIAG] full_content len={}, tool_calls={}, qwen_fn_buf_len={}", 
         full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
     if !full_content.is_empty() {
-        let preview = &full_content[..full_content.len().min(500)];
+        let preview: String = full_content.chars().take(300).collect();
         crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
     }
     

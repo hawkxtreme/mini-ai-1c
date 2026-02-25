@@ -13,7 +13,9 @@ import { MessageActions } from './MessageActions';
 import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
-import { DEFAULT_SLASH_COMMANDS, SlashCommand } from '../../types/settings';
+import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/settings';
+import { cliProvidersApi } from '../../api/cli_providers';
+import { QwenAuthModal } from '../settings/QwenAuthModal';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -98,6 +100,8 @@ export function ChatArea({
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
     const [showConfigDropdown, setShowConfigDropdown] = useState(false);
+    const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+    const [cliStatuses, setCliStatuses] = useState<Record<string, CliStatus>>({});
     const [showGetCodeDropdown, setShowGetCodeDropdown] = useState(false);
     const [expandedThinking, setExpandedThinking] = useState<Record<number, boolean>>({});
     const [contextCode, setContextCode] = useState('');
@@ -142,6 +146,39 @@ export function ChatArea({
             toggleRecording();
         }
     }, [isLoading, isRecording, toggleRecording]);
+
+    // CLI Statuses
+    const fetchCliStatuses = async () => {
+        try {
+            const status = await cliProvidersApi.getStatus('qwen');
+            setCliStatuses(prev => ({ ...prev, qwen: status }));
+        } catch (err) {
+            console.error('Failed to fetch CLI status:', err);
+        }
+    };
+
+    useEffect(() => {
+        fetchCliStatuses();
+    }, []);
+
+    // Обновляем лимиты когда активный профиль переключается на QwenCli
+    useEffect(() => {
+        const activeProfile = profiles.find(p => p.id === activeProfileId);
+        if (activeProfile?.provider === 'QwenCli') {
+            fetchCliStatuses();
+        }
+    }, [activeProfileId]);
+
+    // Периодическое обновление лимитов Qwen каждые 60 секунд
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const activeProfile = profiles.find(p => p.id === activeProfileId);
+            if (activeProfile?.provider === 'QwenCli') {
+                fetchCliStatuses();
+            }
+        }, 60_000);
+        return () => clearInterval(interval);
+    }, [activeProfileId, profiles]);
 
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -760,31 +797,134 @@ export function ChatArea({
 
                     <div ref={dropdownRef} className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-wrap w-full">
                         <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                            {/* Model Selector */}
-                            <div className="relative flex-shrink-1 min-w-0 max-w-[140px]">
+                            <div className="relative">
                                 <button
-                                    onClick={() => {
-                                        const next = !showModelDropdown;
-                                        setShowModelDropdown(next);
-                                        if (next) {
-                                            setShowConfigDropdown(false);
-                                            setShowGetCodeDropdown(false);
-                                        }
-                                    }}
-                                    className={`w-full flex items-center gap-1.5 text-[12px] font-medium px-2 h-8 rounded-md transition-all border border-transparent ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                                    onClick={() => setShowModelDropdown(!showModelDropdown)}
+                                    className="h-8 flex items-center gap-1.5 px-3 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-all text-[11px] font-medium active:scale-95"
                                 >
-                                    <ChevronDown className={`w-3 h-3 text-zinc-500 flex-shrink-0 transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} />
-                                    <span className="truncate block">
-                                        {profiles.find(p => p.id === activeProfileId)?.name || 'Agent'}
-                                    </span>
+                                    {(() => {
+                                        const activeProfile = profiles.find(p => p.id === activeProfileId);
+                                        const isQwen = activeProfile?.provider === 'QwenCli';
+                                        const qwenStatus = cliStatuses['qwen'];
+                                        return (
+                                            <>
+                                                <Brain className={`w-3.5 h-3.5 ${isQwen ? 'text-amber-400' : 'text-blue-400'}`} />
+                                                {activeProfile?.name || 'Выберите профиль'}
+                                                {isQwen && qwenStatus?.is_authenticated && qwenStatus.usage && (
+                                                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${
+                                                        qwenStatus.usage.requests_used / qwenStatus.usage.requests_limit > 0.8
+                                                            ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                                                            : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                                    }`}>
+                                                        {qwenStatus.usage.requests_used}/{qwenStatus.usage.requests_limit}
+                                                    </span>
+                                                )}
+                                                {isQwen && qwenStatus?.is_authenticated && !qwenStatus.usage && (
+                                                    <span className="text-[9px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">
+                                                        free
+                                                    </span>
+                                                )}
+                                                {isQwen && qwenStatus && !qwenStatus.is_authenticated && (
+                                                    <span className="text-[9px] bg-red-500/15 text-red-400 border border-red-500/30 px-1.5 py-0.5 rounded-full">
+                                                        Войти
+                                                    </span>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
+                                    <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${showModelDropdown ? 'rotate-180' : ''}`} />
                                 </button>
+
                                 {showModelDropdown && (
-                                    <div className="absolute bottom-full left-0 mb-2 w-56 bg-[#1f1f23] border border-[#27272a] rounded-lg shadow-2xl z-30 ring-1 ring-black/20 p-1">
-                                        {profiles.map(p => (
-                                            <button key={p.id} onClick={() => { setActiveProfile(p.id); setShowModelDropdown(false); }} className={`w-full text-left px-3 py-2 rounded-md text-[13px] flex items-center justify-between ${p.id === activeProfileId ? 'bg-blue-500/10 text-blue-400' : 'text-zinc-400 hover:bg-[#27272a]'}`}>
-                                                {p.name}
+                                    <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#09090b] border border-[#27272a] rounded-xl shadow-2xl z-50 overflow-hidden py-1 animate-in slide-in-from-bottom-2 duration-200">
+                                        <div className="px-3 py-2 border-b border-[#27272a] mb-1">
+                                            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Ваши профили</span>
+                                        </div>
+                                        <div className="max-h-[350px] overflow-y-auto custom-scrollbar">
+                                            {/* Standard Assistants Section */}
+                                            {profiles.filter(p => p.provider !== 'QwenCli').length > 0 && (
+                                                <>
+                                                    <div className="px-3 py-1.5 border-b border-[#27272a] mb-1 sticky top-0 bg-[#09090b] z-10">
+                                                        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Стандартные ассистенты</span>
+                                                    </div>
+                                                    {profiles.filter(p => p.provider !== 'QwenCli').map(p => (
+                                                        <div
+                                                            key={p.id}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-blue-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            onClick={() => {
+                                                                setActiveProfile(p.id);
+                                                                setShowModelDropdown(false);
+                                                            }}
+                                                        >
+                                                            <div className="flex flex-col gap-0.5 min-w-0">
+                                                                <span className={`text-[12px] font-semibold truncate ${activeProfileId === p.id ? 'text-blue-400' : 'text-zinc-200'}`}>{p.name}</span>
+                                                                <span className="text-[10px] text-zinc-500 truncate">{p.provider} • {p.model}</span>
+                                                            </div>
+                                                            {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />}
+                                                        </div>
+                                                    ))}
+                                                </>
+                                            )}
+
+                                            {/* CLI Providers Section */}
+                                            {profiles.filter(p => p.provider === 'QwenCli').length > 0 && (
+                                                <>
+                                                    <div className="px-3 py-1.5 border-b border-[#27272a] mt-1 mb-1 sticky top-0 bg-[#09090b] z-10">
+                                                        <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">CLI Провайдеры (Free)</span>
+                                                    </div>
+                                                    {profiles.filter(p => p.provider === 'QwenCli').map(p => {
+                                                        const status = cliStatuses['qwen'];
+                                                        const isAuthenticated = status?.is_authenticated;
+
+                                                        return (
+                                                            <div
+                                                                key={p.id}
+                                                                className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-amber-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                                onClick={() => {
+                                                                    if (!isAuthenticated) {
+                                                                        setIsAuthModalOpen(true);
+                                                                    } else {
+                                                                        setActiveProfile(p.id);
+                                                                        setShowModelDropdown(false);
+                                                                    }
+                                                                }}
+                                                            >
+                                                                <div className="flex flex-col gap-0.5 min-w-0">
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        <span className={`text-[12px] font-semibold truncate ${activeProfileId === p.id ? 'text-amber-400' : 'text-zinc-200'}`}>{p.name}</span>
+                                                                        {!isAuthenticated && <span className="text-[9px] bg-red-500/20 text-red-500 px-1 rounded border border-red-500/20">Login required</span>}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className="text-[10px] text-zinc-500 truncate">{p.model}</span>
+                                                                        {isAuthenticated && status?.usage && (
+                                                                            <span className="text-[9px] text-zinc-600 font-mono">
+                                                                                {status.usage.requests_used}/{status.usage.requests_limit}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />}
+                                                                    <Terminal className="w-3 h-3 text-zinc-700" />
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </>
+                                            )}
+                                        </div>
+                                        <div className="p-2 border-t border-[#27272a] mt-1">
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onOpenSettings?.('llm');
+                                                    setShowModelDropdown(false);
+                                                }}
+                                                className="w-full py-1.5 px-3 flex items-center justify-center gap-2 text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50 rounded-lg transition-all"
+                                            >
+                                                <Settings className="w-3.5 h-3.5" /> Настроить профили
                                             </button>
-                                        ))}
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -939,6 +1079,26 @@ export function ChatArea({
                     </div>
                 </div>
             </div>
+
+            {isAuthModalOpen && (
+                <QwenAuthModal
+                    isOpen={isAuthModalOpen}
+                    onClose={() => {
+                        setIsAuthModalOpen(false);
+                        fetchCliStatuses();
+                    }}
+                    onSuccess={async (access_token, refresh_token, expires_at, resource_url) => {
+                        console.log('[DEBUG] ChatArea: Qwen Auth Success, saving token...');
+                        try {
+                            await cliProvidersApi.saveToken('qwen', access_token, refresh_token, expires_at, resource_url);
+                            console.log('[DEBUG] ChatArea: Token saved successfully');
+                            await fetchCliStatuses();
+                        } catch (err) {
+                            console.error('[DEBUG] ChatArea: Failed to save token:', err);
+                        }
+                    }}
+                />
+            )}
         </div >
     );
 }

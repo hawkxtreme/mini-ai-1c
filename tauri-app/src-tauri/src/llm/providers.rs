@@ -33,7 +33,17 @@ pub struct RegistryProviderData {
 const REGISTRY_URL: &str = "https://raw.githubusercontent.com/hawkxtreme/mini-ai-1c/main/registry/models.json"; // Placeholder
 // const OPENAI_MODELS_ENDPOINT: &str = "/v1/models";
 
-pub async fn fetch_models_from_api(_provider_id: &str, base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
+pub async fn fetch_models_from_api(provider_id: &str, base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
+    // Special handling for Qwen CLI — return static list immediately (no /v1/models endpoint via OAuth)
+    if provider_id == "QwenCli" {
+        return Ok(vec![
+            Model { id: "coder-model".into(),       name: "Qwen 3.5 Plus (1M ctx)".into(),  context_window: 1_048_576, description: Some("Qwen 3.5 Plus — hybrid model, leading coding, 1M context".into()), cost_in: None, cost_out: None },
+            Model { id: "qwen3-coder-plus".into(),  name: "Qwen3 Coder Plus".into(),         context_window: 32_768,   description: Some("Advanced code generation and understanding".into()), cost_in: None, cost_out: None },
+            Model { id: "qwen3-coder-flash".into(), name: "Qwen3 Coder Flash".into(),        context_window: 32_768,   description: Some("Fast code generation model".into()), cost_in: None, cost_out: None },
+            Model { id: "vision-model".into(),      name: "Qwen3 Vision".into(),              context_window: 32_768,   description: Some("Multimodal vision-language model".into()), cost_in: None, cost_out: None },
+        ]);
+    }
+
     let client = Client::new();
     let trimmed_base = base_url.trim_end_matches('/');
     

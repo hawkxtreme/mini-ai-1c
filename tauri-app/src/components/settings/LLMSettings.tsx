@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Plus, Save, RefreshCw, Trash2, Check, ExternalLink } from 'lucide-react';
+import { Plus, Save, RefreshCw, Trash2, Check, LogIn, LogOut, Info, X } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { cliProvidersApi } from '../../api/cli_providers';
+import { QwenAuthModal } from './QwenAuthModal';
+import { CliStatus } from '../../types/settings';
 
 import { LLMProfile, ProfileStore } from '../../contexts/ProfileContext';
 
@@ -11,18 +14,19 @@ interface LLMSettingsProps {
 }
 
 const PROVIDERS = [
-    { value: 'OpenAI', label: 'OpenAI', defaultModel: 'gpt-4o', defaultUrl: 'https://api.openai.com/v1' },
-    { value: 'Anthropic', label: 'Anthropic', defaultModel: 'claude-3-5-sonnet-latest', defaultUrl: 'https://api.anthropic.com/v1' },
-    { value: 'Google', label: 'Google Gemini', defaultModel: 'gemini-1.5-pro', defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
-    { value: 'DeepSeek', label: 'DeepSeek', defaultModel: 'deepseek-chat', defaultUrl: 'https://api.deepseek.com/v1' },
-    { value: 'Groq', label: 'Groq', defaultModel: 'llama-3.3-70b-versatile', defaultUrl: 'https://api.groq.com/openai/v1' },
-    { value: 'Mistral', label: 'Mistral AI', defaultModel: 'mistral-large-latest', defaultUrl: 'https://api.mistral.ai/v1' },
-    { value: 'XAI', label: 'xAI (Grok)', defaultModel: 'grok-beta', defaultUrl: 'https://api.x.ai/v1' },
-    { value: 'Perplexity', label: 'Perplexity', defaultModel: 'sonar-reasoning', defaultUrl: 'https://api.perplexity.ai' },
-    { value: 'ZAI', label: 'Z.ai (Zhipu)', defaultModel: 'glm-5', defaultUrl: 'https://api.z.ai/api/coding/paas/v4' },
-    { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001', defaultUrl: 'https://openrouter.ai/api/v1' },
-    { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1' },
-    { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '' },
+    { value: 'OpenAI', label: 'OpenAI', defaultModel: 'gpt-4o', defaultUrl: 'https://api.openai.com/v1', type: 'standard' },
+    { value: 'Anthropic', label: 'Anthropic', defaultModel: 'claude-3-5-sonnet-latest', defaultUrl: 'https://api.anthropic.com/v1', type: 'standard' },
+    { value: 'Google', label: 'Google Gemini', defaultModel: 'gemini-1.5-pro', defaultUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', type: 'standard' },
+    { value: 'DeepSeek', label: 'DeepSeek', defaultModel: 'deepseek-chat', defaultUrl: 'https://api.deepseek.com/v1', type: 'standard' },
+    { value: 'Groq', label: 'Groq', defaultModel: 'llama-3.3-70b-versatile', defaultUrl: 'https://api.groq.com/openai/v1', type: 'standard' },
+    { value: 'Mistral', label: 'Mistral AI', defaultModel: 'mistral-large-latest', defaultUrl: 'https://api.mistral.ai/v1', type: 'standard' },
+    { value: 'XAI', label: 'xAI (Grok)', defaultModel: 'grok-beta', defaultUrl: 'https://api.x.ai/v1', type: 'standard' },
+    { value: 'Perplexity', label: 'Perplexity', defaultModel: 'sonar-reasoning', defaultUrl: 'https://api.perplexity.ai', type: 'standard' },
+    { value: 'ZAI', label: 'Z.ai (Zhipu)', defaultModel: 'glm-5', defaultUrl: 'https://api.z.ai/api/coding/paas/v4', type: 'standard' },
+    { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001', defaultUrl: 'https://openrouter.ai/api/v1', type: 'standard' },
+    { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1', type: 'standard' },
+    { value: 'QwenCli', label: 'Qwen Code (CLI)', defaultModel: 'coder-model', defaultUrl: 'https://portal.qwen.ai/v1', type: 'cli' },
+    { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '', type: 'standard' },
 ];
 
 export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
@@ -34,34 +38,51 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const [connectionTest, setConnectionTest] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [showSaved, setShowSaved] = useState(false);
+    const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+    const [cliStatus, setCliStatus] = useState<CliStatus | null>(null);
+    const [loadingStatus, setLoadingStatus] = useState(false);
 
-    // Select profile to edit
+    // Track which profile was previously active to detect real profile switches
+    const prevEditingIdRef = useRef<string | null>(null);
+
     // Select profile to edit
     useEffect(() => {
         if (editingId) {
             const p = profiles.profiles.find(p => p.id === editingId);
             if (p) {
-                // Only update form if we are switching to a different profile
-                // OR if we are forced to re-sync (e.g. initial load)
-                // We check if the current form ID matches the editing ID to avoid overwriting unsaved changes
-                setEditForm(prev => {
-                    if (prev && prev.id === editingId) {
-                        return prev;
-                    }
-                    return { ...p };
-                });
+                const isNewProfile = prevEditingIdRef.current !== editingId;
+                prevEditingIdRef.current = editingId;
 
-                // Reset other states only when switching profiles
-                setEditForm(prev => {
-                    if (prev && prev.id === editingId) return prev;
-                    setNewApiKey('');
+                setEditForm(prev => (prev?.id === editingId ? prev : { ...p }));
+                setNewApiKey('');
+                setConnectionTest(null);
+
+                // Only reset model list when switching to a different profile
+                if (isNewProfile) {
                     setModelList([]);
-                    setConnectionTest(null);
-                    return { ...p };
-                });
+                }
+
+                // Fetch CLI status if it's a CLI provider
+                if (p.provider === 'QwenCli') {
+                    fetchCliStatus('qwen');
+                } else {
+                    setCliStatus(null);
+                }
             }
         }
     }, [editingId, profiles]);
+
+    const fetchCliStatus = async (provider: string) => {
+        setLoadingStatus(true);
+        try {
+            const status = await cliProvidersApi.getStatus(provider);
+            setCliStatus(status);
+        } catch (e) {
+            console.error('Failed to fetch CLI status:', e);
+        } finally {
+            setLoadingStatus(false);
+        }
+    };
 
     const handleSave = async () => {
         if (!editForm) return;
@@ -84,35 +105,36 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     };
 
     const handleDelete = async (id: string) => {
-        if (!confirm('Delete this profile?')) return;
         try {
             await invoke('delete_profile', { profileId: id });
-            await invoke('delete_profile', { profileId: id });
             onUpdate();
-            if (editingId === id) setEditingId(null);
+            if (editingId === id) {
+                setEditingId(null);
+                setEditForm(null);
+                setModelList([]);
+                setNewApiKey('');
+                setConnectionTest(null);
+                setCliStatus(null);
+            }
         } catch (e) {
             alert('Error: ' + e);
         }
     };
 
-    const handleCreate = () => {
+    const handleCreate = (providerValue: string = 'OpenAI') => {
         const id = `profile_${Date.now()}`;
+        const provider = PROVIDERS.find(p => p.value === providerValue) || PROVIDERS[0];
+
         const newProfile: LLMProfile = {
             id,
             name: 'New Profile',
-            provider: 'OpenAI',
-            model: 'gpt-4o-mini',
+            provider: provider.value,
+            model: provider.defaultModel,
             api_key_encrypted: '',
-            base_url: null,
+            base_url: provider.defaultUrl,
             max_tokens: 4096,
             temperature: 0.7
         };
-        // We can't save immediately without valid data, but we need it in the list to edit.
-        // Option: Add to local state 'profiles' temporarily?
-        // Better: Save basic profile immediately or handle "Draft" state.
-        // Let's use a "Draft" approach or just mock it in the list.
-        // For simplicity, let's just append to local list via parent update or effectively save it.
-        // Actually, let's just save it.
         invoke('save_profile', { profile: newProfile, apiKey: null }).then(() => {
             onUpdate();
             setEditingId(id);
@@ -124,35 +146,24 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         setLoadingModels(true);
         try {
             if (newApiKey) {
-                // Use explicit credentials from form
                 const res = await invoke<any[]>('fetch_models_from_provider', {
                     providerId: editForm.provider,
                     baseUrl: editForm.base_url || PROVIDERS.find(p => p.value === editForm.provider)?.defaultUrl || '',
                     apiKey: newApiKey
                 });
-                const sorted = [...res].sort((a, b) => a.id.localeCompare(b.id));
-                setModelList(sorted);
+                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
             } else if (editForm.api_key_encrypted) {
-                // Use stored credentials
-                // First save any pending changes (except key)
                 await invoke('save_profile', { profile: editForm, apiKey: null });
-
-                const res = await invoke<any[]>('fetch_models_for_profile', {
-                    profileId: editForm.id
-                });
-                const sorted = [...res].sort((a, b) => a.id.localeCompare(b.id));
-                setModelList(sorted);
+                const res = await invoke<any[]>('fetch_models_for_profile', { profileId: editForm.id });
+                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
             } else {
-                // Case: No API key provided (e.g. Ollama/Local)
                 const res = await invoke<any[]>('fetch_models_from_provider', {
                     providerId: editForm.provider,
                     baseUrl: editForm.base_url || PROVIDERS.find(p => p.value === editForm.provider)?.defaultUrl || '',
                     apiKey: ''
                 });
-                const sorted = [...res].sort((a, b) => a.id.localeCompare(b.id));
-                setModelList(sorted);
+                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
             }
-
         } catch (e) {
             alert("Error fetching: " + e);
         }
@@ -161,7 +172,6 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
 
     const handleSetActive = async (id: string) => {
         await invoke('set_active_profile', { profileId: id });
-        await invoke('set_active_profile', { profileId: id });
         onUpdate();
     };
 
@@ -169,29 +179,74 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         <div className="flex h-full w-full">
             {/* Sidebar List */}
             <div className="w-24 sm:w-1/3 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto p-2 sm:p-3">
-                <div className="space-y-1.5">
-                    {profiles.profiles.map(p => (
-                        <div
-                            key={p.id}
-                            onClick={() => setEditingId(p.id)}
-                            className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
-                                ? 'border-blue-500 bg-blue-500/10'
-                                : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
-                                }`}
-                        >
-                            <div className="flex justify-between items-center mb-0.5">
-                                <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
-                                {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-green-500 flex-shrink-0" />}
-                            </div>
-                            <div className="text-[10px] text-zinc-500 truncate">{p.provider} • {p.model}</div>
+                <div className="space-y-6">
+                    {/* Standard Profiles Group */}
+                    <div className="space-y-2">
+                        <div className="px-1 flex items-center gap-2 opacity-50">
+                            <span className="text-[10px] uppercase font-black tracking-widest text-zinc-400">LLM Ассистенты</span>
+                            <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
-                    ))}
-                    <button
-                        onClick={handleCreate}
-                        className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition"
-                    >
-                        <Plus className="w-4 h-4" /> New Profile
-                    </button>
+                        <div className="space-y-1.5">
+                            {profiles.profiles.filter(p => p.provider !== 'QwenCli').map(p => (
+                                <div
+                                    key={p.id}
+                                    onClick={() => setEditingId(p.id)}
+                                    className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
+                                        ? 'border-blue-500 bg-blue-500/10'
+                                        : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
+                                        }`}
+                                >
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
+                                        {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-green-500 flex-shrink-0" />}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500 truncate">{p.provider} • {p.model}</div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="space-y-1.5 pt-1">
+                            <button
+                                onClick={() => handleCreate('OpenAI')}
+                                className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
+                            >
+                                <Plus className="w-3 h-3" /> Новый ассистент
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* CLI Providers Group */}
+                    <div className="space-y-2">
+                        <div className="px-1 flex items-center gap-2 opacity-50">
+                            <span className="text-[10px] uppercase font-black tracking-widest text-zinc-400">CLI Провайдеры</span>
+                            <div className="h-[1px] flex-1 bg-zinc-800"></div>
+                        </div>
+                        <div className="space-y-1.5">
+                            {profiles.profiles.filter(p => p.provider === 'QwenCli').map(p => (
+                                <div
+                                    key={p.id}
+                                    onClick={() => setEditingId(p.id)}
+                                    className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
+                                        ? 'border-blue-400 bg-blue-400/10'
+                                        : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
+                                        }`}
+                                >
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
+                                        {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-blue-400 flex-shrink-0" />}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500 truncate">{p.provider} • {p.model}</div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="space-y-1.5 pt-1">
+                            <button
+                                onClick={() => handleCreate('QwenCli')}
+                                className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
+                            >
+                                <Plus className="w-3 h-3" /> Новый CLI провайдер
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -200,12 +255,12 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 {editForm ? (
                     <div className="space-y-6 max-w-xl">
                         <div className="flex justify-between items-center pb-4 border-b border-zinc-800">
-                            <h3 className="text-lg font-semibold">Edit Profile</h3>
+                            <h3 className="text-lg font-semibold text-zinc-100">Edit Profile</h3>
                             <div className="flex gap-2">
                                 {profiles.active_profile_id !== editForm.id && (
-                                    <button onClick={() => handleSetActive(editForm.id)} className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded border border-zinc-700">Set Active</button>
+                                    <button onClick={() => handleSetActive(editForm.id)} className="text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors">Set Active</button>
                                 )}
-                                <button onClick={() => handleDelete(editForm.id)} className="p-1.5 text-red-400 hover:bg-red-500/10 rounded"><Trash2 className="w-4 h-4" /></button>
+                                <button onClick={() => handleDelete(editForm.id)} className="p-1.5 text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 className="w-4 h-4" /></button>
                             </div>
                         </div>
 
@@ -214,7 +269,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="flex-1 min-w-[150px]">
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Profile Name</label>
                                 <input
-                                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none"
+                                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none text-zinc-200"
                                     value={editForm.name}
                                     onChange={e => setEditForm({ ...editForm, name: e.target.value })}
                                 />
@@ -237,10 +292,107 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                         <SelectValue />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {PROVIDERS.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
+                                        {PROVIDERS.find(p => p.value === editForm.provider)?.type === 'cli' ? (
+                                            <>
+                                                <div className="px-2 py-1.5 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">CLI Провайдеры</div>
+                                                {PROVIDERS.filter(p => p.type === 'cli').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
+                                            </>
+                                        ) : (
+                                            <>
+                                                <div className="px-2 py-1.5 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">LLM Ассистенты</div>
+                                                {PROVIDERS.filter(p => p.type === 'standard').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
+                                            </>
+                                        )}
                                     </SelectContent>
                                 </Select>
                             </div>
+                        </div>
+
+                        {/* API Key / CLI Auth Section */}
+                        <div className="space-y-4">
+                            {editForm.provider === 'QwenCli' && (
+                                <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-xs text-zinc-500 uppercase font-bold">Authentication</label>
+                                            {loadingStatus && <RefreshCw className="w-3 h-3 animate-spin text-zinc-500" />}
+                                        </div>
+                                        {cliStatus?.is_authenticated ? (
+                                            <span className="flex items-center gap-1.5 text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full border border-green-500/20 font-medium whitespace-nowrap">
+                                                <Check className="w-3 h-3" /> Logged In
+                                            </span>
+                                        ) : (
+                                            <span className="flex items-center gap-1.5 text-[10px] bg-red-500/10 text-red-500 px-2 py-0.5 rounded-full border border-red-500/20 font-medium whitespace-nowrap">
+                                                <X className="w-3 h-3" /> Logged Out
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {cliStatus?.is_authenticated ? (
+                                            <>
+                                                {cliStatus.usage && (
+                                                    <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
+                                                        <div className="flex justify-between items-center mb-2">
+                                                            <span className="text-xs text-zinc-400 font-medium">Daily Limit</span>
+                                                            <span className="text-xs text-zinc-200 font-mono">
+                                                                {cliStatus.usage.requests_used} / {cliStatus.usage.requests_limit}
+                                                            </span>
+                                                        </div>
+                                                        <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                                                            <div
+                                                                className={`h-full transition-all duration-500 rounded-full ${(cliStatus.usage.requests_used / cliStatus.usage.requests_limit) > 0.8 ? 'bg-amber-500' : 'bg-blue-500'
+                                                                    }`}
+                                                                style={{ width: `${Math.min(100, (cliStatus.usage.requests_used / cliStatus.usage.requests_limit) * 100)}%` }}
+                                                            />
+                                                        </div>
+                                                        {cliStatus.usage.resets_at && (
+                                                            <p className="text-[10px] text-zinc-500 mt-2 flex items-center gap-1">
+                                                                <Info className="w-3 h-3" />
+                                                                Resets at: {new Date(cliStatus.usage.resets_at).toLocaleString()}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                <button
+                                                    onClick={async () => {
+                                                        await cliProvidersApi.logout('qwen');
+                                                        fetchCliStatus('qwen');
+                                                    }}
+                                                    className="w-full h-10 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg border border-zinc-700 text-sm font-medium transition-all"
+                                                >
+                                                    <LogOut className="w-4 h-4" /> Logout from Qwen
+                                                </button>
+                                            </>
+                                        ) : (
+                                            <button
+                                                onClick={() => setIsAuthModalOpen(true)}
+                                                className="w-full h-12 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-lg shadow-blue-900/10 text-sm font-bold transition-all active:scale-[0.98]"
+                                            >
+                                                <LogIn className="w-5 h-5" /> Login to Qwen Account
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="text-[10px] text-zinc-500 leading-relaxed px-1">
+                                        Qwen Code CLI integration uses official OAuth Device Flow.
+                                        Tokens are stored securely in your system's Keychain.
+                                    </p>
+                                </div>
+                            )}
+
+                            {editForm.provider !== 'QwenCli' && (
+                                <div>
+                                    <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
+                                    <input
+                                        type="password"
+                                        className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none placeholder-zinc-700 text-zinc-200"
+                                        placeholder={editForm.api_key_encrypted ? "•••••••••••• (Encrypted)" : "sk-..."}
+                                        value={newApiKey}
+                                        onChange={e => setNewApiKey(e.target.value)}
+                                    />
+                                </div>
+                            )}
                         </div>
 
                         <div>
@@ -252,18 +404,6 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             />
                         </div>
 
-                        {/* API Key (Swapped here) */}
-                        <div>
-                            <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
-                            <input
-                                type="password"
-                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none placeholder-zinc-700"
-                                placeholder={editForm.api_key_encrypted ? "•••••••••••• (Encrypted)" : "sk-..."}
-                                value={newApiKey}
-                                onChange={e => setNewApiKey(e.target.value)}
-                            />
-                        </div>
-
                         {/* Model Selection */}
                         <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-4">
                             <div className="flex justify-between items-end">
@@ -271,8 +411,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 <button
                                     onClick={handleFetchModels}
                                     disabled={loadingModels}
-                                    title={"Fetch models from API"}
-                                    className="text-xs flex items-center gap-1 text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="text-xs flex items-center gap-1 text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                 >
                                     <RefreshCw className={`w-3 h-3 ${loadingModels ? 'animate-spin' : ''}`} />
                                     {loadingModels ? 'Fetching...' : 'Fetch from API'}
@@ -285,7 +424,6 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                         value={editForm.model}
                                         onValueChange={v => {
                                             const m = modelList.find(m => m.id === v);
-                                            console.log(`Selecting model: ${v}, context: ${m?.context_window}`);
                                             setEditForm(prev => {
                                                 if (!prev) return prev;
                                                 return {
@@ -297,15 +435,15 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             });
                                         }}
                                     >
-                                        <SelectTrigger className="w-full bg-zinc-900 border-zinc-700 h-9">
+                                        <SelectTrigger className="w-full bg-zinc-900 border-zinc-700 h-9 px-3">
                                             <SelectValue placeholder="Select a model" />
                                         </SelectTrigger>
-                                        <SelectContent className="max-h-60 w-[var(--radix-select-trigger-width)]">
+                                        <SelectContent className="max-h-60">
                                             {modelList.map((m: any) => (
                                                 <SelectItem key={m.id} value={m.id}>
-                                                    <div className="flex items-center justify-between gap-4 w-full pr-6">
+                                                    <div className="flex items-center justify-between gap-4 w-full pr-2">
                                                         <span className="truncate text-sm font-medium">{m.id}</span>
-                                                        <span className="text-[10px] text-zinc-500 font-mono flex-shrink-0 opacity-70">
+                                                        <span className="text-[10px] text-zinc-500 font-mono flex-shrink-0">
                                                             {m.context_window ? `${Math.round(m.context_window / 1024)}k` : ''}
                                                         </span>
                                                     </div>
@@ -315,52 +453,20 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     </Select>
                                 ) : (
                                     <input
-                                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none"
+                                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none text-zinc-200"
                                         value={editForm.model}
-                                        onChange={e => setEditForm({ ...editForm, model: e.target.value })}
-                                        placeholder="gpt-4, claude-3, etc."
+                                        onChange={e => setEditForm(prev => prev ? ({ ...prev, model: e.target.value }) : null)}
+                                        placeholder="gpt-4, qwen-2.5-coder, etc."
                                     />
                                 )}
                             </div>
-
-                            {/* Model Details (Characteristics) */}
-                            {(() => {
-                                const selectedModel = modelList.find(m => m.id === editForm.model);
-                                if (!selectedModel) return null;
-                                return (
-                                    <div className="mt-2 p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-2">
-                                        <div className="flex justify-between text-[11px]">
-                                            <span className="text-zinc-500 uppercase font-bold">Max Tokens (Context)</span>
-                                            <span className="text-zinc-300 font-mono">
-                                                {selectedModel.context_window === 4096 ?
-                                                    <span className="text-zinc-500">Default (4,096)</span> :
-                                                    selectedModel.context_window?.toLocaleString() || 'Unknown'
-                                                }
-                                            </span>
-                                        </div>
-                                        {(selectedModel.cost_in !== undefined || selectedModel.cost_out !== undefined) && (
-                                            <div className="flex justify-between text-[11px]">
-                                                <span className="text-zinc-500 uppercase font-bold">Cost (per 1M tokens)</span>
-                                                <span className="text-green-500 font-mono">
-                                                    ${selectedModel.cost_in?.toFixed(2)} / ${selectedModel.cost_out?.toFixed(2)}
-                                                </span>
-                                            </div>
-                                        )}
-                                        {selectedModel.description && (
-                                            <p className="text-[10px] text-zinc-600 italic leading-tight pt-1 border-t border-zinc-800/50">
-                                                {selectedModel.description}
-                                            </p>
-                                        )}
-                                    </div>
-                                );
-                            })()}
 
                             <div className="flex flex-wrap gap-4 pt-2">
                                 <div className="flex-1 min-w-[120px]">
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Context Window</label>
                                     <input
                                         type="number"
-                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm"
+                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm text-zinc-200"
                                         value={editForm.max_tokens}
                                         onChange={e => setEditForm({ ...editForm, max_tokens: parseInt(e.target.value) || 0 })}
                                     />
@@ -369,7 +475,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">Temperature</label>
                                     <input
                                         type="number" step="0.1" min="0" max="2"
-                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm"
+                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm text-zinc-200"
                                         value={editForm.temperature}
                                         onChange={e => setEditForm({ ...editForm, temperature: parseFloat(e.target.value) || 0.7 })}
                                     />
@@ -378,11 +484,11 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         </div>
 
                         {/* Save Button */}
-                        <div className="pt-4">
+                        <div className="pt-4 pb-10">
                             <button
                                 onClick={handleSave}
                                 disabled={isSaving}
-                                className={`w-full py-3 ${showSaved ? 'bg-green-600 hover:bg-green-500 shadow-green-900/20' : 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/20'} text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50 active:scale-95 shadow-lg`}
+                                className={`w-full py-3 ${showSaved ? 'bg-green-600 hover:bg-green-500' : 'bg-blue-600 hover:bg-blue-500'} text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50 active:scale-[0.98] shadow-lg`}
                             >
                                 {isSaving ? (
                                     <>
@@ -397,18 +503,36 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 ) : (
                                     <>
                                         <Save className="w-4 h-4" />
-                                        Save Settings
+                                        Save Profile
                                     </>
                                 )}
                             </button>
                         </div>
                     </div>
                 ) : (
-                    <div className="h-full flex items-center justify-center text-zinc-500">
-                        <p>Select or create a profile</p>
+                    <div className="h-full flex flex-col items-center justify-center text-zinc-500 gap-4">
+                        <div className="p-4 bg-zinc-800/20 rounded-full border border-zinc-800/50">
+                            <Plus className="w-8 h-8 opacity-20" />
+                        </div>
+                        <p className="text-sm">Select or create an LLM profile</p>
                     </div>
                 )}
             </div>
+
+            <QwenAuthModal
+                isOpen={isAuthModalOpen}
+                onClose={() => setIsAuthModalOpen(false)}
+                onSuccess={async (access_token, refresh_token, expires_at, resource_url) => {
+                    console.log('[DEBUG] LLMSettings: Qwen Auth Success, saving token...');
+                    try {
+                        await cliProvidersApi.saveToken('qwen', access_token, refresh_token, expires_at, resource_url);
+                        console.log('[DEBUG] LLMSettings: Token saved successfully');
+                        await fetchCliStatus('qwen');
+                    } catch (err) {
+                        console.error('[DEBUG] LLMSettings: Failed to save token:', err);
+                    }
+                }}
+            />
         </div>
     );
 }

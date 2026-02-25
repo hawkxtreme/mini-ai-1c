@@ -77,6 +77,12 @@ pub fn run() {
             save_debug_logs,
             align_with_configurator,
             send_hotkey_cmd,
+            // CLI Providers
+            cli_auth_start,
+            cli_auth_poll,
+            cli_save_token,
+            cli_logout,
+            cli_get_status,
         ])
 
         .setup(|app| {

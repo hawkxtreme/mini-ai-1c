@@ -21,6 +21,7 @@ pub enum LLMProvider {
     Ollama,
     ZAI,
     Custom,
+    QwenCli,
 }
 
 impl Default for LLMProvider {
@@ -94,6 +95,7 @@ impl LLMProfile {
                 LLMProvider::ZAI => "https://api.z.ai/api/coding/paas/v4".to_string(),
                 LLMProvider::Ollama => "http://localhost:11434/v1".to_string(),
                 LLMProvider::Custom => String::new(),
+                LLMProvider::QwenCli => "https://chat.qwen.ai/api/v1".to_string(),
             }
         })
     }

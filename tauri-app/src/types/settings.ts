@@ -12,8 +12,52 @@ export interface BslStatus {
 // Режим генерации кода
 export type CodeGenerationMode = 'full' | 'diff' | 'auto';
 
+// CLI Auth Types
+export interface CliAuthInitResponse {
+    device_code: string;
+    user_code: string;
+    verification_url: string;
+    expires_in: number;
+    poll_interval: number;
+    code_verifier?: string;
+}
+
+export type CliAuthStatus =
+    | { status: 'Pending' }
+    | { status: 'Authorized'; data: { access_token: string; refresh_token: string | null; expires_at: number; resource_url: string | null } }
+    | { status: 'Expired' }
+    | { status: 'SlowDown' }
+    | { status: 'Error'; data: string };
+
+export interface CliUsage {
+    requests_used: number;
+    requests_limit: number;
+    resets_at?: string;
+}
+
+export interface CliStatus {
+    is_authenticated: boolean;
+    auth_expires_at?: string;
+    usage?: CliUsage;
+}
+
 // Пресеты поведения промптов
-export type PromptBehaviorPreset = 'project' | 'maintenance';
+export type PromptBehaviorPreset = 'project' | 'maintenance' | 'cli';
+
+export type CliProviderType = 'qwen' | 'gemini' | 'codex' | 'claude';
+
+export interface CliProviderUsage {
+    requests_used: number;
+    requests_limit: number;
+    resets_at?: string;
+}
+
+export interface CliProviderInfo {
+    provider: CliProviderType;
+    is_authenticated: boolean;
+    auth_expires_at?: string;
+    usage?: CliProviderUsage;
+}
 
 // Стиль маркировки больше не нужен как отдельный тип, он зашит в пресет
 

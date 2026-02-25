@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use crate::llm::cli_providers::{self as cli, qwen::QwenCliProvider};
 
 use crate::llm_profiles::{self, LLMProfile, ProfileStore};
 use crate::settings::{self, AppSettings};
@@ -104,13 +105,21 @@ pub fn delete_profile(profile_id: String) -> Result<(), String> {
     let mut store = llm_profiles::load_profiles();
 
     // Check if profile exists
-    if !store.profiles.iter().any(|p| p.id == profile_id) {
+    let profile = store.profiles.iter().find(|p| p.id == profile_id).cloned();
+    if profile.is_none() {
         return Err("Профиль не найден".to_string());
     }
 
     // Don't allow deleting the last profile
     if store.profiles.len() <= 1 {
         return Err("Нельзя удалить последний профиль".to_string());
+    }
+
+    // If it's a CLI provider — clear the stored token from keychain
+    if let Some(p) = &profile {
+        if matches!(p.provider, crate::llm_profiles::LLMProvider::QwenCli) {
+            let _ = QwenCliProvider::logout(); // ignore error if no token exists
+        }
     }
 
     // Remove the profile
@@ -1239,5 +1248,52 @@ pub async fn test_mcp_connection(config: McpServerConfig) -> Result<String, Stri
     match client.list_tools().await {
         Ok(tools) => Ok(format!("Подключено! ({})", tools.len())),
         Err(e) => Err(format!("Ошибка: {}", e)),
+    }
+}
+
+// ============== CLI Providers Commands ==============
+
+#[tauri::command]
+pub async fn cli_auth_start(provider: String) -> Result<cli::CliAuthInitResponse, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_auth_start called for: {}", provider);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::auth_start().await,
+        _ => Err(format!("Unsupported provider: {}", provider)),
+    }
+}
+
+#[tauri::command]
+pub async fn cli_auth_poll(provider: String, device_code: String, code_verifier: Option<String>) -> Result<cli::CliAuthStatus, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_auth_poll called for: {}, device_code: {}", provider, device_code);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::auth_poll(&device_code, code_verifier.as_deref()).await,
+        _ => Err(format!("Unsupported provider: {}", provider)),
+    }
+}
+
+#[tauri::command]
+pub async fn cli_save_token(provider: String, access_token: String, refresh_token: Option<String>, expires_at: u64, resource_url: Option<String>) -> Result<(), String> {
+    crate::app_log!(force: true, "[DEBUG] cli_save_token called for: {}", provider);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::save_token(&access_token, refresh_token.as_deref(), expires_at, resource_url.as_deref()),
+        _ => Err(format!("Unsupported provider: {}", provider)),
+    }
+}
+
+#[tauri::command]
+pub async fn cli_logout(provider: String) -> Result<(), String> {
+    crate::app_log!(force: true, "[DEBUG] cli_logout called for: {}", provider);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::logout(),
+        _ => Err(format!("Unsupported provider: {}", provider)),
+    }
+}
+
+#[tauri::command]
+pub async fn cli_get_status(provider: String) -> Result<cli::CliStatus, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_get_status called for: {}", provider);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::get_status().await,
+        _ => Err(format!("Unsupported provider: {}", provider)),
     }
 }
