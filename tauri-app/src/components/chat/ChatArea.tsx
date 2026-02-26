@@ -169,6 +169,18 @@ export function ChatArea({
         }
     }, [activeProfileId]);
 
+    // Обновляем счётчик сразу после завершения генерации
+    const prevIsLoadingRef = useRef(false);
+    useEffect(() => {
+        if (prevIsLoadingRef.current && !isLoading) {
+            const activeProfile = profiles.find(p => p.id === activeProfileId);
+            if (activeProfile?.provider === 'QwenCli') {
+                fetchCliStatuses();
+            }
+        }
+        prevIsLoadingRef.current = isLoading;
+    }, [isLoading]);
+
     // Периодическое обновление лимитов Qwen каждые 60 секунд
     useEffect(() => {
         const interval = setInterval(() => {
@@ -812,16 +824,11 @@ export function ChatArea({
                                                 {activeProfile?.name || 'Выберите профиль'}
                                                 {isQwen && qwenStatus?.is_authenticated && qwenStatus.usage && (
                                                     <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${
-                                                        qwenStatus.usage.requests_used / qwenStatus.usage.requests_limit > 0.8
+                                                        qwenStatus.usage.requests_limit > 0 && qwenStatus.usage.requests_used / qwenStatus.usage.requests_limit > 0.8
                                                             ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
                                                             : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                                                     }`}>
-                                                        {qwenStatus.usage.requests_used}/{qwenStatus.usage.requests_limit}
-                                                    </span>
-                                                )}
-                                                {isQwen && qwenStatus?.is_authenticated && !qwenStatus.usage && (
-                                                    <span className="text-[9px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">
-                                                        free
+                                                        {qwenStatus.usage.requests_used}{qwenStatus.usage.requests_limit > 0 ? `/${qwenStatus.usage.requests_limit}` : ''}
                                                     </span>
                                                 )}
                                                 {isQwen && qwenStatus && !qwenStatus.is_authenticated && (
@@ -898,7 +905,7 @@ export function ChatArea({
                                                                         <span className="text-[10px] text-zinc-500 truncate">{p.model}</span>
                                                                         {isAuthenticated && status?.usage && (
                                                                             <span className="text-[9px] text-zinc-600 font-mono">
-                                                                                {status.usage.requests_used}/{status.usage.requests_limit}
+                                                                                {status.usage.requests_used}{status.usage.requests_limit > 0 ? `/${status.usage.requests_limit}` : ''}
                                                                             </span>
                                                                         )}
                                                                     </div>

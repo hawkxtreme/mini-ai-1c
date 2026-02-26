@@ -29,8 +29,11 @@ pub enum CliAuthStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliUsage {
+    #[serde(alias = "requests_used", alias = "requestsUsed")]
     pub requests_used: u32,
+    #[serde(alias = "requests_limit", alias = "requestsLimit")]
     pub requests_limit: u32,
+    #[serde(alias = "resets_at", alias = "resetsAt")]
     pub resets_at: Option<String>,
 }
 

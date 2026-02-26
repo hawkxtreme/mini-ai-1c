@@ -1297,3 +1297,12 @@ pub async fn cli_get_status(provider: String) -> Result<cli::CliStatus, String> 
         _ => Err(format!("Unsupported provider: {}", provider)),
     }
 }
+
+#[tauri::command]
+pub async fn cli_refresh_usage(provider: String) -> Result<cli::CliUsage, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_refresh_usage called for: {}", provider);
+    match provider.as_str() {
+        "qwen" => QwenCliProvider::fetch_usage_from_api().await,
+        _ => Err(format!("Unsupported provider for refresh: {}", provider)),
+    }
+}

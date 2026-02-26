@@ -47,10 +47,11 @@ fn generate_code_challenge(code_verifier: &str) -> String {
 pub struct QwenCliProvider;
 
 impl QwenCliProvider {
+    // ── Auth ─────────────────────────────────────────────────────────────────
+
     pub async fn auth_start() -> Result<CliAuthInitResponse, String> {
         let client = Client::new();
 
-        // PKCE: generate code_verifier and code_challenge
         let code_verifier = generate_code_verifier();
         let code_challenge = generate_code_challenge(&code_verifier);
 
@@ -99,7 +100,6 @@ impl QwenCliProvider {
         params.insert("device_code", device_code);
         params.insert("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
 
-        // PKCE: code_verifier is required
         let verifier_owned;
         if let Some(cv) = code_verifier {
             verifier_owned = cv.to_string();
@@ -151,6 +151,8 @@ impl QwenCliProvider {
         }
     }
 
+    // ── Token storage (keyring) ───────────────────────────────────────────────
+
     pub fn save_token(access_token: &str, refresh_token: Option<&str>, expires_at: u64, resource_url: Option<&str>) -> Result<(), String> {
         crate::app_log!(force: true, "[DEBUG] QwenCliProvider::save_token called. Expires: {}, resource_url: {:?}", expires_at, resource_url);
         let entry = Entry::new("mini-ai-1c", "qwen-cli").map_err(|e| e.to_string())?;
@@ -183,41 +185,114 @@ impl QwenCliProvider {
     pub fn logout() -> Result<(), String> {
         let entry = Entry::new("mini-ai-1c", "qwen-cli").map_err(|e| e.to_string())?;
         entry.delete_password().map_err(|e| e.to_string())?;
-        // Also clear cached usage
-        if let Ok(usage_entry) = Entry::new("mini-ai-1c", "qwen-cli-usage") {
-            let _ = usage_entry.delete_password();
-        }
         Ok(())
     }
 
+    // ── Local usage counter (file-based, multi-instance safe) ─────────────────
+
+    fn usage_file_path() -> std::path::PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("mini-ai-1c")
+            .join("qwen-usage.json")
+    }
+
+    /// Read today's usage from the local file. Resets to 0 if the date has changed.
+    pub fn get_local_usage() -> CliUsage {
+        let path = Self::usage_file_path();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+
+        let resets_at = (Utc::now().date_naive() + chrono::Duration::days(1))
+            .and_hms_opt(0, 0, 0)
+            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339());
+
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                if data.get("date").and_then(|d| d.as_str()) == Some(today.as_str()) {
+                    let count = data.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as u32;
+                    let limit = data.get("limit").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
+                    return CliUsage {
+                        requests_used: count,
+                        requests_limit: limit,
+                        resets_at,
+                    };
+                }
+            }
+        }
+
+        CliUsage {
+            requests_used: 0,
+            requests_limit: 0,
+            resets_at,
+        }
+    }
+
+    /// Increment the local request counter after a successful API call.
+    /// Uses atomic temp-file rename to be safe across multiple app instances.
+    pub fn increment_request_count() {
+        let path = Self::usage_file_path();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+
+        // Read current count (reset if date changed)
+        let mut count: u64 = 0;
+        let mut limit: u64 = 0;
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                if data.get("date").and_then(|d| d.as_str()) == Some(today.as_str()) {
+                    count = data.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+                    limit = data.get("limit").and_then(|l| l.as_u64()).unwrap_or(0);
+                }
+            }
+        }
+        count += 1;
+
+        let data = serde_json::json!({ "date": today, "count": count, "limit": limit });
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        if std::fs::write(&tmp_path, data.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp_path, &path);
+        }
+        crate::app_log!("[Qwen] Request count: {}", count);
+    }
+
+    /// Called when the server provides rate-limit info via response headers.
+    /// Overwrites the local counter with accurate server data.
     pub fn save_usage(requests_used: u32, requests_limit: u32, resets_at: Option<String>) -> Result<(), String> {
-        let entry = Entry::new("mini-ai-1c", "qwen-cli-usage").map_err(|e| e.to_string())?;
+        let path = Self::usage_file_path();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
         let data = serde_json::json!({
-            "requests_used": requests_used,
-            "requests_limit": requests_limit,
+            "date": today,
+            "count": requests_used,
+            "limit": requests_limit,
             "resets_at": resets_at,
         });
-        entry.set_password(&data.to_string()).map_err(|e| e.to_string())?;
-        crate::app_log!(force: true, "[DEBUG] Qwen usage cached: {}/{}, resets_at={:?}", requests_used, requests_limit, resets_at);
+
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, data.to_string()).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
+        crate::app_log!("[Qwen] Usage saved from server: {}/{}", requests_used, requests_limit);
         Ok(())
     }
 
-    fn get_cached_usage() -> Option<CliUsage> {
-        let entry = Entry::new("mini-ai-1c", "qwen-cli-usage").ok()?;
-        let pwd = entry.get_password().ok()?;
-        let data: serde_json::Value = serde_json::from_str(&pwd).ok()?;
-        Some(CliUsage {
-            requests_used: data["requests_used"].as_u64()? as u32,
-            requests_limit: data["requests_limit"].as_u64()? as u32,
-            resets_at: data["resets_at"].as_str().map(|s| s.to_string()),
-        })
+    /// Returns current local usage (no external API call).
+    pub async fn fetch_usage_from_api() -> Result<CliUsage, String> {
+        Ok(Self::get_local_usage())
     }
 
     pub async fn get_status() -> Result<CliStatus, String> {
         let token_info = Self::get_token()?;
         if let Some((_, _, expires_at, _)) = token_info {
             let is_expired = Utc::now().timestamp() as u64 > expires_at;
-            let usage = if !is_expired { Self::get_cached_usage() } else { None };
+            let usage = if !is_expired { Some(Self::get_local_usage()) } else { None };
 
             Ok(CliStatus {
                 is_authenticated: !is_expired,
@@ -232,5 +307,4 @@ impl QwenCliProvider {
             })
         }
     }
-
 }

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { CliAuthInitResponse, CliAuthStatus, CliStatus } from '../types/settings';
+import { CliAuthInitResponse, CliAuthStatus, CliStatus, CliUsage } from '../types/settings';
 
 export const cliProvidersApi = {
     /**
@@ -41,7 +41,9 @@ export const cliProvidersApi = {
     async getStatus(provider: string): Promise<CliStatus> {
         return await invoke('cli_get_status', { provider });
     },
-
+    async refreshUsage(provider: string): Promise<CliUsage> {
+        return await invoke('cli_refresh_usage', { provider });
+    },
     /**
      * Удалить токены и выйти из аккаунта
      */

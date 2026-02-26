@@ -83,6 +83,7 @@ pub fn run() {
             cli_save_token,
             cli_logout,
             cli_get_status,
+            cli_refresh_usage,
         ])
 
         .setup(|app| {

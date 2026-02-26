@@ -72,11 +72,16 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         }
     }, [editingId, profiles]);
 
-    const fetchCliStatus = async (provider: string) => {
+    const fetchCliStatus = async (provider: string, force = false) => {
         setLoadingStatus(true);
         try {
-            const status = await cliProvidersApi.getStatus(provider);
-            setCliStatus(status);
+            if (force) {
+                const usage = await cliProvidersApi.refreshUsage(provider);
+                setCliStatus(prev => prev ? { ...prev, usage } : null);
+            } else {
+                const status = await cliProvidersApi.getStatus(provider);
+                setCliStatus(status);
+            }
         } catch (e) {
             console.error('Failed to fetch CLI status:', e);
         } finally {
@@ -331,19 +336,28 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     <div className="space-y-4">
                                         {cliStatus?.is_authenticated ? (
                                             <>
-                                                {cliStatus.usage && (
+                                                {cliStatus.usage ? (
                                                     <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
                                                         <div className="flex justify-between items-center mb-2">
-                                                            <span className="text-xs text-zinc-400 font-medium">Daily Limit</span>
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs text-zinc-400 font-medium">Daily Limit</span>
+                                                                <button
+                                                                    onClick={() => fetchCliStatus('qwen', true)}
+                                                                    disabled={loadingStatus}
+                                                                    className="p-1 hover:bg-zinc-800 rounded transition-colors"
+                                                                    title="Refresh limits"
+                                                                >
+                                                                    <RefreshCw className={`w-3 h-3 ${loadingStatus ? 'animate-spin' : ''} text-zinc-500`} />
+                                                                </button>
+                                                            </div>
                                                             <span className="text-xs text-zinc-200 font-mono">
-                                                                {cliStatus.usage.requests_used} / {cliStatus.usage.requests_limit}
+                                                                {cliStatus.usage.requests_used} / {cliStatus.usage.requests_limit > 0 ? cliStatus.usage.requests_limit : '?'}
                                                             </span>
                                                         </div>
                                                         <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
                                                             <div
-                                                                className={`h-full transition-all duration-500 rounded-full ${(cliStatus.usage.requests_used / cliStatus.usage.requests_limit) > 0.8 ? 'bg-amber-500' : 'bg-blue-500'
-                                                                    }`}
-                                                                style={{ width: `${Math.min(100, (cliStatus.usage.requests_used / cliStatus.usage.requests_limit) * 100)}%` }}
+                                                                className={`h-full transition-all duration-500 rounded-full ${cliStatus.usage.requests_limit > 0 && (cliStatus.usage.requests_used / cliStatus.usage.requests_limit) > 0.8 ? 'bg-amber-500' : 'bg-blue-500'}`}
+                                                                style={{ width: cliStatus.usage.requests_limit > 0 ? `${Math.min(100, (cliStatus.usage.requests_used / cliStatus.usage.requests_limit) * 100)}%` : '0%' }}
                                                             />
                                                         </div>
                                                         {cliStatus.usage.resets_at && (
@@ -353,6 +367,15 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                                             </p>
                                                         )}
                                                     </div>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => fetchCliStatus('qwen', true)}
+                                                        disabled={loadingStatus}
+                                                        className="w-full h-9 flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-lg border border-zinc-800 text-xs font-medium transition-all disabled:opacity-50"
+                                                    >
+                                                        <RefreshCw className={`w-3 h-3 ${loadingStatus ? 'animate-spin' : ''}`} />
+                                                        {loadingStatus ? 'Loading limits...' : 'Load usage limits'}
+                                                    </button>
                                                 )}
 
                                                 <button

@@ -782,13 +782,16 @@ pub async fn stream_chat_completion(
             for line in event.lines() {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
-                        crate::app_log!("[AI][DIAG] [DONE] received. full_content.len()={}, tool_calls={}, qwen_fn_buf_len={}", 
+                        crate::app_log!("[AI][DIAG] [DONE] received. full_content.len()={}, tool_calls={}, qwen_fn_buf_len={}",
                             full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
                         if !full_content.is_empty() {
                             let preview: String = full_content.chars().take(300).collect();
                             crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
                         }
-                         return Ok(ApiMessage {
+                        if matches!(profile.provider, LLMProvider::QwenCli) {
+                            crate::llm::cli_providers::qwen::QwenCliProvider::increment_request_count();
+                        }
+                        return Ok(ApiMessage {
                             role: "assistant".to_string(),
                             content: if full_content.is_empty() { None } else { Some(full_content) },
                             tool_calls: if accumulated_tool_calls.is_empty() { None } else { Some(accumulated_tool_calls) },
@@ -1000,13 +1003,13 @@ pub async fn stream_chat_completion(
     
     let total_gen_duration = start_gen_time.elapsed().as_millis();
     crate::app_log!("[AI][TIMER] Total generation time: {} ms", total_gen_duration);
-    crate::app_log!("[AI][DIAG] full_content len={}, tool_calls={}, qwen_fn_buf_len={}", 
+    crate::app_log!("[AI][DIAG] full_content len={}, tool_calls={}, qwen_fn_buf_len={}",
         full_content.len(), accumulated_tool_calls.len(), qwen_fn_buf.len());
     if !full_content.is_empty() {
         let preview: String = full_content.chars().take(300).collect();
         crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
     }
-    
+
     Ok(ApiMessage {
         role: "assistant".to_string(),
         content: if full_content.is_empty() { None } else { Some(full_content) },
