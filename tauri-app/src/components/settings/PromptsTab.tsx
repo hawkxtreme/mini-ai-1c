@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Plus, Trash2, FileText, ChevronDown, ChevronUp, Code, Shield, Zap, Sparkles, User, HardHat, Edit2 } from 'lucide-react';
+import { Save, Plus, Trash2, FileText, ChevronDown, ChevronUp, Code, Shield, Zap, Sparkles, User, HardHat, Edit2, Terminal } from 'lucide-react';
 import {
     AppSettings,
     CustomPromptsSettings,
@@ -102,6 +102,13 @@ export function PromptsTab({ settings, onSettingsChange, onSave, saving }: Promp
             icon: HardHat,
             color: 'text-orange-400',
             badge: 'Поддержка / Внедрение'
+        },
+        cli: {
+            title: 'CLI Ассистент',
+            desc: 'Оптимизирован для работы через внешние CLI-провайдеры (Qwen, DeepSeek). Экономный расход токенов и фокус на конкретных изменениях.',
+            icon: Terminal,
+            color: 'text-amber-400',
+            badge: 'Free / CLI'
         }
     };
 
