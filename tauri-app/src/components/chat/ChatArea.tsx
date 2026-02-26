@@ -150,16 +150,27 @@ export function ChatArea({
     // CLI Statuses
     const fetchCliStatuses = async () => {
         try {
-            const status = await cliProvidersApi.getStatus('qwen');
-            setCliStatuses(prev => ({ ...prev, qwen: status }));
+            const cliProfiles = profiles.filter(p => p.provider === 'QwenCli');
+            const newStatuses: Record<string, CliStatus> = {};
+
+            for (const p of cliProfiles) {
+                try {
+                    const status = await cliProvidersApi.getStatus(p.id, 'qwen');
+                    newStatuses[p.id] = status;
+                } catch (err) {
+                    console.error(`Failed to fetch CLI status for profile ${p.id}:`, err);
+                }
+            }
+
+            setCliStatuses(newStatuses);
         } catch (err) {
-            console.error('Failed to fetch CLI status:', err);
+            console.error('Failed to fetch CLI statuses:', err);
         }
     };
 
     useEffect(() => {
         fetchCliStatuses();
-    }, []);
+    }, [profiles]);
 
     // Обновляем лимиты когда активный профиль переключается на QwenCli
     useEffect(() => {
@@ -822,16 +833,15 @@ export function ChatArea({
                                             <>
                                                 <Brain className={`w-3.5 h-3.5 ${isQwen ? 'text-amber-400' : 'text-blue-400'}`} />
                                                 {activeProfile?.name || 'Выберите профиль'}
-                                                {isQwen && qwenStatus?.is_authenticated && qwenStatus.usage && (
-                                                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${
-                                                        qwenStatus.usage.requests_limit > 0 && qwenStatus.usage.requests_used / qwenStatus.usage.requests_limit > 0.8
+                                                {isQwen && activeProfile && cliStatuses[activeProfile.id]?.is_authenticated && cliStatuses[activeProfile.id].usage && (
+                                                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full border ${cliStatuses[activeProfile.id].usage!.requests_limit > 0 && cliStatuses[activeProfile.id].usage!.requests_used / cliStatuses[activeProfile.id].usage!.requests_limit > 0.8
                                                             ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
                                                             : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                                                    }`}>
-                                                        {qwenStatus.usage.requests_used}{qwenStatus.usage.requests_limit > 0 ? `/${qwenStatus.usage.requests_limit}` : ''}
+                                                        }`}>
+                                                        {cliStatuses[activeProfile.id].usage!.requests_used}{cliStatuses[activeProfile.id].usage!.requests_limit > 0 ? `/${cliStatuses[activeProfile.id].usage!.requests_limit}` : ''}
                                                     </span>
                                                 )}
-                                                {isQwen && qwenStatus && !qwenStatus.is_authenticated && (
+                                                {isQwen && activeProfile && cliStatuses[activeProfile.id] && !cliStatuses[activeProfile.id].is_authenticated && (
                                                     <span className="text-[9px] bg-red-500/15 text-red-400 border border-red-500/30 px-1.5 py-0.5 rounded-full">
                                                         Войти
                                                     </span>
@@ -880,7 +890,7 @@ export function ChatArea({
                                                         <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">CLI Провайдеры (Free)</span>
                                                     </div>
                                                     {profiles.filter(p => p.provider === 'QwenCli').map(p => {
-                                                        const status = cliStatuses['qwen'];
+                                                        const status = cliStatuses[p.id];
                                                         const isAuthenticated = status?.is_authenticated;
 
                                                         return (
@@ -889,6 +899,8 @@ export function ChatArea({
                                                                 className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-amber-500/10' : 'hover:bg-zinc-800/50'}`}
                                                                 onClick={() => {
                                                                     if (!isAuthenticated) {
+                                                                        // Set this profile as target before opening modal
+                                                                        setActiveProfile(p.id);
                                                                         setIsAuthModalOpen(true);
                                                                     } else {
                                                                         setActiveProfile(p.id);
@@ -1096,8 +1108,10 @@ export function ChatArea({
                     }}
                     onSuccess={async (access_token, refresh_token, expires_at, resource_url) => {
                         console.log('[DEBUG] ChatArea: Qwen Auth Success, saving token...');
+                        const currentProfile = profiles.find(p => p.id === activeProfileId);
+                        if (!currentProfile) return;
                         try {
-                            await cliProvidersApi.saveToken('qwen', access_token, refresh_token, expires_at, resource_url);
+                            await cliProvidersApi.saveToken(currentProfile.id, 'qwen', access_token, refresh_token, expires_at, resource_url);
                             console.log('[DEBUG] ChatArea: Token saved successfully');
                             await fetchCliStatuses();
                         } catch (err) {

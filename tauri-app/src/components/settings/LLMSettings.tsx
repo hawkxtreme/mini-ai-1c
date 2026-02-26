@@ -64,22 +64,27 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
 
                 // Fetch CLI status if it's a CLI provider
                 if (p.provider === 'QwenCli') {
-                    fetchCliStatus('qwen');
+                    fetchCliStatus(p.id, 'qwen');
                 } else {
                     setCliStatus(null);
+                }
+
+                // Auto-fetch models for CLI providers since the Fetch button is hidden
+                if (PROVIDERS.find(prov => prov.value === p.provider)?.type === 'cli') {
+                    handleFetchModels();
                 }
             }
         }
     }, [editingId, profiles]);
 
-    const fetchCliStatus = async (provider: string, force = false) => {
+    const fetchCliStatus = async (profileId: string, provider: string, force = false) => {
         setLoadingStatus(true);
         try {
             if (force) {
-                const usage = await cliProvidersApi.refreshUsage(provider);
+                const usage = await cliProvidersApi.refreshUsage(profileId, provider);
                 setCliStatus(prev => prev ? { ...prev, usage } : null);
             } else {
-                const status = await cliProvidersApi.getStatus(provider);
+                const status = await cliProvidersApi.getStatus(profileId, provider);
                 setCliStatus(status);
             }
         } catch (e) {
@@ -150,24 +155,37 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         if (!editForm) return;
         setLoadingModels(true);
         try {
+            let res: any[] = [];
             if (newApiKey) {
-                const res = await invoke<any[]>('fetch_models_from_provider', {
+                res = await invoke<any[]>('fetch_models_from_provider', {
                     providerId: editForm.provider,
                     baseUrl: editForm.base_url || PROVIDERS.find(p => p.value === editForm.provider)?.defaultUrl || '',
                     apiKey: newApiKey
                 });
-                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
             } else if (editForm.api_key_encrypted) {
                 await invoke('save_profile', { profile: editForm, apiKey: null });
-                const res = await invoke<any[]>('fetch_models_for_profile', { profileId: editForm.id });
-                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
+                res = await invoke<any[]>('fetch_models_for_profile', { profileId: editForm.id });
             } else {
-                const res = await invoke<any[]>('fetch_models_from_provider', {
+                res = await invoke<any[]>('fetch_models_from_provider', {
                     providerId: editForm.provider,
                     baseUrl: editForm.base_url || PROVIDERS.find(p => p.value === editForm.provider)?.defaultUrl || '',
                     apiKey: ''
                 });
-                setModelList([...res].sort((a, b) => a.id.localeCompare(b.id)));
+            }
+
+            const sortedModels = [...res].sort((a, b) => a.id.localeCompare(b.id));
+            setModelList(sortedModels);
+
+            // Sync metadata for the current model if it's already selected
+            if (editForm.model) {
+                const currentModel = sortedModels.find(m => m.id === editForm.model);
+                if (currentModel) {
+                    setEditForm(prev => prev ? ({
+                        ...prev,
+                        max_tokens: currentModel.context_window || prev.max_tokens,
+                        context_window_override: currentModel.context_window
+                    }) : null);
+                }
             }
         } catch (e) {
             alert("Error fetching: " + e);
@@ -342,7 +360,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                                             <div className="flex items-center gap-2">
                                                                 <span className="text-xs text-zinc-400 font-medium">Daily Limit</span>
                                                                 <button
-                                                                    onClick={() => fetchCliStatus('qwen', true)}
+                                                                    onClick={() => fetchCliStatus(editForm.id, 'qwen', true)}
                                                                     disabled={loadingStatus}
                                                                     className="p-1 hover:bg-zinc-800 rounded transition-colors"
                                                                     title="Refresh limits"
@@ -369,7 +387,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                                     </div>
                                                 ) : (
                                                     <button
-                                                        onClick={() => fetchCliStatus('qwen', true)}
+                                                        onClick={() => fetchCliStatus(editForm.id, 'qwen', true)}
                                                         disabled={loadingStatus}
                                                         className="w-full h-9 flex items-center justify-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-lg border border-zinc-800 text-xs font-medium transition-all disabled:opacity-50"
                                                     >
@@ -380,8 +398,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
 
                                                 <button
                                                     onClick={async () => {
-                                                        await cliProvidersApi.logout('qwen');
-                                                        fetchCliStatus('qwen');
+                                                        await cliProvidersApi.logout(editForm.id, 'qwen');
+                                                        fetchCliStatus(editForm.id, 'qwen');
                                                     }}
                                                     className="w-full h-10 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg border border-zinc-700 text-sm font-medium transition-all"
                                                 >
@@ -418,27 +436,31 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             )}
                         </div>
 
-                        <div>
-                            <label className="text-xs text-zinc-500 uppercase font-bold px-1">Base URL</label>
-                            <input
-                                className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none font-mono text-zinc-400"
-                                value={editForm.base_url || ''}
-                                onChange={e => setEditForm({ ...editForm, base_url: e.target.value })}
-                            />
-                        </div>
+                        {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && (
+                            <div>
+                                <label className="text-xs text-zinc-500 uppercase font-bold px-1">Base URL</label>
+                                <input
+                                    className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none font-mono text-zinc-400"
+                                    value={editForm.base_url || ''}
+                                    onChange={e => setEditForm({ ...editForm, base_url: e.target.value })}
+                                />
+                            </div>
+                        )}
 
                         {/* Model Selection */}
                         <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-4">
                             <div className="flex justify-between items-end">
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Model ID</label>
-                                <button
-                                    onClick={handleFetchModels}
-                                    disabled={loadingModels}
-                                    className="text-xs flex items-center gap-1 text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                >
-                                    <RefreshCw className={`w-3 h-3 ${loadingModels ? 'animate-spin' : ''}`} />
-                                    {loadingModels ? 'Fetching...' : 'Fetch from API'}
-                                </button>
+                                {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && (
+                                    <button
+                                        onClick={handleFetchModels}
+                                        disabled={loadingModels}
+                                        className="text-xs flex items-center gap-1 text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        <RefreshCw className={`w-3 h-3 ${loadingModels ? 'animate-spin' : ''}`} />
+                                        {loadingModels ? 'Fetching...' : 'Fetch from API'}
+                                    </button>
+                                )}
                             </div>
 
                             <div className="relative">
@@ -547,15 +569,16 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 onClose={() => setIsAuthModalOpen(false)}
                 onSuccess={async (access_token, refresh_token, expires_at, resource_url) => {
                     console.log('[DEBUG] LLMSettings: Qwen Auth Success, saving token...');
+                    if (!editForm) return;
                     try {
-                        await cliProvidersApi.saveToken('qwen', access_token, refresh_token, expires_at, resource_url);
+                        await cliProvidersApi.saveToken(editForm.id, 'qwen', access_token, refresh_token, expires_at, resource_url);
                         console.log('[DEBUG] LLMSettings: Token saved successfully');
-                        await fetchCliStatus('qwen');
+                        await fetchCliStatus(editForm.id, 'qwen');
                     } catch (err) {
                         console.error('[DEBUG] LLMSettings: Failed to save token:', err);
                     }
                 }}
             />
-        </div>
+        </div >
     );
 }

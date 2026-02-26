@@ -20,6 +20,7 @@ export const cliProvidersApi = {
      * Сохранить токены в Keychain
      */
     async saveToken(
+        profileId: string,
         provider: string,
         accessToken: string,
         refreshToken: string | null,
@@ -27,6 +28,7 @@ export const cliProvidersApi = {
         resourceUrl: string | null
     ): Promise<void> {
         return await invoke('cli_save_token', {
+            profileId,
             provider,
             accessToken,
             refreshToken,
@@ -38,16 +40,16 @@ export const cliProvidersApi = {
     /**
      * Получить текущий статус авторизации и использование лимитов
      */
-    async getStatus(provider: string): Promise<CliStatus> {
-        return await invoke('cli_get_status', { provider });
+    async getStatus(profileId: string, provider: string): Promise<CliStatus> {
+        return await invoke('cli_get_status', { profileId, provider });
     },
-    async refreshUsage(provider: string): Promise<CliUsage> {
-        return await invoke('cli_refresh_usage', { provider });
+    async refreshUsage(profileId: string, provider: string): Promise<CliUsage> {
+        return await invoke('cli_refresh_usage', { profileId, provider });
     },
     /**
      * Удалить токены и выйти из аккаунта
      */
-    async logout(provider: string): Promise<void> {
-        return await invoke('cli_logout', { provider });
+    async logout(profileId: string, provider: string): Promise<void> {
+        return await invoke('cli_logout', { profileId, provider });
     }
 };

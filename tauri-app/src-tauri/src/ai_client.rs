@@ -599,7 +599,7 @@ pub async fn stream_chat_completion(
 ) -> Result<ApiMessage, String> {
     let profile = get_active_profile().ok_or("No active LLM profile")?;
     let (api_key, url) = if matches!(profile.provider, LLMProvider::QwenCli) {
-        let token_info = crate::llm::cli_providers::qwen::QwenCliProvider::get_token()?;
+        let token_info = crate::llm::cli_providers::qwen::QwenCliProvider::get_token(&profile.id)?;
         let (access_token, _, expires_at, resource_url) = token_info.ok_or("Qwen CLI: Требуется авторизация")?;
 
         // Check expiry
@@ -747,7 +747,7 @@ pub async fn stream_chat_completion(
         if let (Some(limit), Some(remaining)) = (limit, remaining) {
             let used = limit.saturating_sub(remaining);
             crate::app_log!(force: true, "[DEBUG] Qwen rate-limit: used={}/{}, reset={:?}", used, limit, reset);
-            let _ = crate::llm::cli_providers::qwen::QwenCliProvider::save_usage(used, limit, reset);
+            let _ = crate::llm::cli_providers::qwen::QwenCliProvider::save_usage(&profile.id, used, limit, reset);
         }
     }
 
@@ -789,7 +789,7 @@ pub async fn stream_chat_completion(
                             crate::app_log!("[AI][DIAG] content preview: {:?}", preview);
                         }
                         if matches!(profile.provider, LLMProvider::QwenCli) {
-                            crate::llm::cli_providers::qwen::QwenCliProvider::increment_request_count();
+                            crate::llm::cli_providers::qwen::QwenCliProvider::increment_request_count(&profile.id);
                         }
                         return Ok(ApiMessage {
                             role: "assistant".to_string(),

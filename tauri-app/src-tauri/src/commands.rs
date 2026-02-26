@@ -118,7 +118,7 @@ pub fn delete_profile(profile_id: String) -> Result<(), String> {
     // If it's a CLI provider — clear the stored token from keychain
     if let Some(p) = &profile {
         if matches!(p.provider, crate::llm_profiles::LLMProvider::QwenCli) {
-            let _ = QwenCliProvider::logout(); // ignore error if no token exists
+            let _ = QwenCliProvider::logout(&profile_id); // ignore error if no token exists
         }
     }
 
@@ -1272,37 +1272,37 @@ pub async fn cli_auth_poll(provider: String, device_code: String, code_verifier:
 }
 
 #[tauri::command]
-pub async fn cli_save_token(provider: String, access_token: String, refresh_token: Option<String>, expires_at: u64, resource_url: Option<String>) -> Result<(), String> {
-    crate::app_log!(force: true, "[DEBUG] cli_save_token called for: {}", provider);
+pub async fn cli_save_token(profile_id: String, provider: String, access_token: String, refresh_token: Option<String>, expires_at: u64, resource_url: Option<String>) -> Result<(), String> {
+    crate::app_log!(force: true, "[DEBUG] cli_save_token called for profile: {}, provider: {}", profile_id, provider);
     match provider.as_str() {
-        "qwen" => QwenCliProvider::save_token(&access_token, refresh_token.as_deref(), expires_at, resource_url.as_deref()),
+        "qwen" => QwenCliProvider::save_token(&profile_id, &access_token, refresh_token.as_deref(), expires_at, resource_url.as_deref()),
         _ => Err(format!("Unsupported provider: {}", provider)),
     }
 }
 
 #[tauri::command]
-pub async fn cli_logout(provider: String) -> Result<(), String> {
-    crate::app_log!(force: true, "[DEBUG] cli_logout called for: {}", provider);
+pub async fn cli_logout(profile_id: String, provider: String) -> Result<(), String> {
+    crate::app_log!(force: true, "[DEBUG] cli_logout called for profile: {}, provider: {}", profile_id, provider);
     match provider.as_str() {
-        "qwen" => QwenCliProvider::logout(),
+        "qwen" => QwenCliProvider::logout(&profile_id),
         _ => Err(format!("Unsupported provider: {}", provider)),
     }
 }
 
 #[tauri::command]
-pub async fn cli_get_status(provider: String) -> Result<cli::CliStatus, String> {
-    crate::app_log!(force: true, "[DEBUG] cli_get_status called for: {}", provider);
+pub async fn cli_get_status(profile_id: String, provider: String) -> Result<cli::CliStatus, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_get_status called for profile: {}, provider: {}", profile_id, provider);
     match provider.as_str() {
-        "qwen" => QwenCliProvider::get_status().await,
+        "qwen" => QwenCliProvider::get_status(&profile_id).await,
         _ => Err(format!("Unsupported provider: {}", provider)),
     }
 }
 
 #[tauri::command]
-pub async fn cli_refresh_usage(provider: String) -> Result<cli::CliUsage, String> {
-    crate::app_log!(force: true, "[DEBUG] cli_refresh_usage called for: {}", provider);
+pub async fn cli_refresh_usage(profile_id: String, provider: String) -> Result<cli::CliUsage, String> {
+    crate::app_log!(force: true, "[DEBUG] cli_refresh_usage called for profile: {}, provider: {}", profile_id, provider);
     match provider.as_str() {
-        "qwen" => QwenCliProvider::fetch_usage_from_api().await,
+        "qwen" => QwenCliProvider::fetch_usage_from_api(&profile_id).await,
         _ => Err(format!("Unsupported provider for refresh: {}", provider)),
     }
 }
