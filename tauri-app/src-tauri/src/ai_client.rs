@@ -743,7 +743,7 @@ pub async fn stream_chat_completion(
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
-    // Retry logic for 500 errors
+    // Retry logic for 500 errors and Qwen 429 rate-limits
     let mut attempt = 0;
     let max_retries = 3;
     let response = loop {
@@ -760,6 +760,16 @@ pub async fn stream_chat_completion(
             Ok(r) if r.status().as_u16() == 500 && attempt < max_retries => {
                 crate::app_log!("[AI][RETRY] Attempt {} failed with 500. Retrying in 2s...", attempt);
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            Ok(r) if r.status().as_u16() == 429 && matches!(profile.provider, LLMProvider::QwenCli) && attempt < max_retries => {
+                let retry_after = r.headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(5);
+                crate::app_log!("[AI][RETRY] Qwen 429 rate-limit (attempt {}), waiting {}s...", attempt, retry_after);
+                tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
                 continue;
             }
             Ok(r) => {
