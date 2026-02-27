@@ -184,6 +184,48 @@ impl QwenCliProvider {
         }
     }
 
+    pub async fn refresh_access_token(profile_id: &str, refresh_token: &str) -> Result<(), String> {
+        let client = Client::new();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("client_id", CLIENT_ID);
+        params.insert("grant_type", "refresh_token");
+        params.insert("refresh_token", refresh_token);
+
+        crate::app_log!(force: true, "[DEBUG] Qwen: refreshing access token for profile {}", profile_id);
+
+        let resp = client.post(AUTH_TOKEN_URL)
+            .form(&params)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("Network error during refresh: {}", e))?;
+
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| e.to_string())?;
+
+        crate::app_log!(force: true, "[DEBUG] Qwen refresh response {}: {}", status, body);
+
+        if !status.is_success() {
+            return Err(format!("Token refresh failed {}: {}", status.as_u16(), body));
+        }
+
+        let data: QwenTokenResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("Refresh parse error: {}, body: {}", e, body))?;
+
+        let expires_at = Utc::now() + Duration::seconds(data.expires_in as i64);
+        Self::save_token(
+            profile_id,
+            &data.access_token,
+            data.refresh_token.as_deref(),
+            expires_at.timestamp() as u64,
+            data.resource_url.as_deref(),
+        )?;
+
+        crate::app_log!(force: true, "[DEBUG] Qwen: token refreshed, expires_in={}s", data.expires_in);
+        Ok(())
+    }
+
     pub fn logout(profile_id: &str) -> Result<(), String> {
         let entry_name = format!("qwen-cli-{}", profile_id);
         let entry = Entry::new("mini-ai-1c", &entry_name).map_err(|e| e.to_string())?;
