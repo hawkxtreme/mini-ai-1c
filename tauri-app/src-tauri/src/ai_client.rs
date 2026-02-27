@@ -633,12 +633,30 @@ pub async fn stream_chat_completion(
     let profile = get_active_profile().ok_or("No active LLM profile")?;
     let (api_key, url) = if matches!(profile.provider, LLMProvider::QwenCli) {
         let token_info = crate::llm::cli_providers::qwen::QwenCliProvider::get_token(&profile.id)?;
-        let (access_token, _, expires_at, resource_url) = token_info.ok_or("Qwen CLI: Требуется авторизация")?;
+        let (access_token, refresh_token, expires_at, resource_url) = token_info.ok_or("Qwen CLI: Требуется авторизация")?;
 
-        // Check expiry
-        if chrono::Utc::now().timestamp() as u64 > expires_at {
-            return Err("Qwen CLI: Токен истек. Требуется повторная авторизация".to_string());
-        }
+        // Auto-refresh if token expired (or expires within next 60 seconds)
+        let (access_token, resource_url) = if chrono::Utc::now().timestamp() as u64 + 60 > expires_at {
+            if let Some(rt) = refresh_token.as_deref() {
+                crate::app_log!(force: true, "[Qwen] Token expired/near-expiry, attempting refresh...");
+                match crate::llm::cli_providers::qwen::QwenCliProvider::refresh_access_token(&profile.id, rt).await {
+                    Ok(()) => {
+                        let new_info = crate::llm::cli_providers::qwen::QwenCliProvider::get_token(&profile.id)?
+                            .ok_or("Qwen CLI: Токен не найден после обновления")?;
+                        crate::app_log!(force: true, "[Qwen] Token refreshed successfully");
+                        (new_info.0, new_info.3)
+                    }
+                    Err(e) => {
+                        crate::app_log!(force: true, "[Qwen] Token refresh failed: {}", e);
+                        return Err("Qwen CLI: Токен истек и не удалось обновить. Требуется повторная авторизация".to_string());
+                    }
+                }
+            } else {
+                return Err("Qwen CLI: Токен истек. Требуется повторная авторизация".to_string());
+            }
+        } else {
+            (access_token, resource_url)
+        };
 
         // Use resource_url from token if available and not a commercial DashScope endpoint,
         // else fallback to portal.qwen.ai (free tier)
