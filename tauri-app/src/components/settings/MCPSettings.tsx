@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
+import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen } from 'lucide-react';
 
 export type McpTransport = 'http' | 'stdio' | 'internal';
 
@@ -39,6 +40,7 @@ const BUILTIN_1C_SERVER_ID = 'builtin-1c-naparnik';
 const BUILTIN_1C_METADATA_ID = 'builtin-1c-metadata';
 const BUILTIN_BSL_LS_ID = 'bsl-ls';
 const BUILTIN_1C_HELP_ID = 'builtin-1c-help';
+const BUILTIN_1C_SEARCH_ID = 'builtin-1c-search';
 
 export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
@@ -137,12 +139,35 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             }
         }
 
+        // Check 1С:Поиск по конфигурации
+        const searchIdx = updatedServers.findIndex(s => s.id === BUILTIN_1C_SEARCH_ID);
+        if (searchIdx === -1) {
+            updatedServers.push({
+                id: BUILTIN_1C_SEARCH_ID,
+                name: '1С:Поиск по конфигурации',
+                enabled: false,
+                transport: 'stdio',
+                command: 'mcp-1c-search.exe',
+                args: null,
+                env: { 'ONEC_CONFIG_PATH': '' },
+            });
+            needsUpdate = true;
+        } else {
+            const srv = updatedServers[searchIdx];
+            const isExe = srv.command === 'mcp-1c-search.exe' || (srv.command || '').endsWith('mcp-1c-search.exe');
+            if (!isExe) {
+                updatedServers[searchIdx] = { ...srv, command: 'mcp-1c-search.exe', args: null };
+                needsUpdate = true;
+            }
+        }
+
         // Сортируем серверы по нужному порядку карточек
         const ORDER: Record<string, number> = {
             [BUILTIN_BSL_LS_ID]: 0,
             [BUILTIN_1C_HELP_ID]: 1,
-            [BUILTIN_1C_SERVER_ID]: 2,
-            [BUILTIN_1C_METADATA_ID]: 3,
+            [BUILTIN_1C_SEARCH_ID]: 2,
+            [BUILTIN_1C_SERVER_ID]: 3,
+            [BUILTIN_1C_METADATA_ID]: 4,
         };
 
         const originalIds = servers.map(s => s.id).join(',');
@@ -257,7 +282,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     };
 
     const sortedServers = [...servers].sort((a, b) => {
-        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_HELP_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
+        const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_HELP_ID, BUILTIN_1C_SEARCH_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
         const aIdx = builtinIds.indexOf(a.id);
         const bIdx = builtinIds.indexOf(b.id);
 
@@ -298,7 +323,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                         const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
                         const isBslLs = server.id === BUILTIN_BSL_LS_ID;
                         const isHelp = server.id === BUILTIN_1C_HELP_ID;
-                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs || isHelp;
+                        const isSearch = server.id === BUILTIN_1C_SEARCH_ID;
+                        const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs || isHelp || isSearch;
 
                         return (
                             <div
@@ -324,7 +350,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2 min-w-0">
-                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500 shrink-0" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500 shrink-0" /> : isHelp ? <FileText className="w-4 h-4 text-yellow-500 shrink-0" /> : <Sparkles className="w-4 h-4 text-yellow-500 shrink-0" />}
+                                                {isMetadata ? <Database className="w-4 h-4 text-yellow-500 shrink-0" /> : isBslLs ? <Cpu className="w-4 h-4 text-yellow-500 shrink-0" /> : isHelp ? <FileText className="w-4 h-4 text-yellow-500 shrink-0" /> : isSearch ? <Terminal className="w-4 h-4 text-yellow-500 shrink-0" /> : <Sparkles className="w-4 h-4 text-yellow-500 shrink-0" />}
                                                 <span className="text-zinc-100 font-medium text-sm truncate">{server.name}</span>
                                                 <span className="text-[10px] px-1.5 py-0.5 rounded border bg-yellow-500/10 text-yellow-400 border-yellow-500/20 whitespace-nowrap shrink-0">
                                                     PRE-INSTALLED
@@ -500,6 +526,73 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                             </div>
                                                         );
                                                     }
+                                                })()
+                                            ) : isSearch ? (
+                                                (() => {
+                                                    const searchSt = status?.help_status || '';
+                                                    const configPath = server.env?.['ONEC_CONFIG_PATH'] || '';
+                                                    const browseConfigDir = async () => {
+                                                        try {
+                                                            const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию выгрузки конфигурации 1С' });
+                                                            if (dir && typeof dir === 'string') {
+                                                                const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': dir };
+                                                                handleUpdateServer(server.id, { env: newEnv });
+                                                            }
+                                                        } catch (e) {
+                                                            console.error('Failed to open directory dialog:', e);
+                                                        }
+                                                    };
+                                                    return (
+                                                        <div className="space-y-3">
+                                                            <div>
+                                                                <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
+                                                                    <Terminal className="w-3 h-3" /> Путь к выгрузке конфигурации 1С
+                                                                </label>
+                                                                <div className="flex gap-2">
+                                                                    <input
+                                                                        type="text"
+                                                                        value={configPath}
+                                                                        onChange={(e) => {
+                                                                            const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': e.target.value };
+                                                                            handleUpdateServer(server.id, { env: newEnv });
+                                                                        }}
+                                                                        className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none font-mono min-w-0"
+                                                                        placeholder="C:\1C\configs\MyConfig"
+                                                                    />
+                                                                    <button
+                                                                        onClick={browseConfigDir}
+                                                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded-lg text-xs font-medium transition shrink-0"
+                                                                        title="Выбрать папку"
+                                                                    >
+                                                                        <FolderOpen className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </div>
+                                                                <p className="text-[10px] text-zinc-600 mt-1">Корневая директория выгруженной конфигурации (содержит папки CommonModules, Documents и т.д.)</p>
+                                                            </div>
+                                                            {searchSt === 'unavailable' ? (
+                                                                <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3">
+                                                                    <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                                    <div>
+                                                                        <p className="text-xs text-amber-300 font-medium">Путь к конфигурации не задан</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-1">Укажите путь к директории выгрузки конфигурации 1С выше.</p>
+                                                                    </div>
+                                                                </div>
+                                                            ) : searchSt === 'ready' ? (
+                                                                <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center gap-3">
+                                                                    <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
+                                                                    <div>
+                                                                        <p className="text-xs text-green-300 font-medium">Поиск готов к работе</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-0.5 font-mono truncate">{configPath}</p>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
+                                                                    Быстрый поиск по исходному коду конфигурации 1С (BSL и XML файлы).
+                                                                    Поддерживает литеральный и regex-поиск с контекстом строк.
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
                                                 })()
                                             ) : (
                                                 <>

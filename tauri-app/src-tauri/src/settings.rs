@@ -437,6 +437,15 @@ pub fn load_settings() -> AppSettings {
                     modified = true; 
                 }
             }
+        } else if server.id == "builtin-1c-search" {
+            // 1С:Поиск — Rust binary, command must stay as mcp-1c-search.exe (NOT node)
+            let current_cmd = server.command.as_deref().unwrap_or("");
+            if current_cmd != "mcp-1c-search.exe" && !current_cmd.ends_with("mcp-1c-search.exe") {
+                crate::app_log!("[SETTINGS] Migrating builtin-1c-search command to 'mcp-1c-search.exe'");
+                server.command = Some("mcp-1c-search.exe".to_string());
+                server.args = None;
+                modified = true;
+            }
         } else {
             // Generic migration for other servers if they have node_modules in command
             if let Some(cmd) = &server.command {

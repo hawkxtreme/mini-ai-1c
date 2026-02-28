@@ -19,6 +19,8 @@ dist-ssr/
 tauri-app/src-tauri/target/
 tauri-app/src-tauri/gen/
 tauri-app/src-tauri/Cargo.lock
+tauri-app/mcp-1c-search/target/
+tauri-app/mcp-1c-search/**/target/
 
 # IDE
 .vscode/

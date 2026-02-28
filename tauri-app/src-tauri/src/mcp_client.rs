@@ -432,7 +432,6 @@ impl McpSession {
         // Path resolution for production (Tauri Resources & Embedded)
         let app_handle_opt = MCP_MANAGER.app_handle.lock().await;
 
-        #[cfg(not(debug_assertions))]
         if let Some(app_handle) = app_handle_opt.as_ref() {
             let cmd_lower = command.to_lowercase();
             let is_stdio_node_launcher = cmd_lower == "npx" || cmd_lower == "npx.cmd" || cmd_lower == "node" || cmd_lower.contains("tsx");
@@ -513,6 +512,67 @@ impl McpSession {
                              crate::app_log!("[WARN] Could not resolve MCP resource '{}' via any method", js_filename);
                         }
                     }
+                }
+            }
+
+            // .exe binary resolution (Phase 2/3 — no embedded bytes for native binaries)
+            let is_stdio_exe = cmd_lower.ends_with(".exe") && !is_stdio_node_launcher;
+            if is_stdio_exe {
+                let exe_filename = command.clone();
+                let exe_subpath = format!("mcp-servers/{}", exe_filename);
+                let mut exe_resolved = false;
+
+                // Phase 2: Tauri resource (MSI/NSIS bundle)
+                if let Ok(path) = app_handle.path().resolve(&exe_subpath, tauri::path::BaseDirectory::Resource) {
+                    if path.exists() {
+                        let path_str = path.to_string_lossy().to_string();
+                        command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                        crate::app_log!("[MCP] Resolved .exe to resource: {}", command);
+                        exe_resolved = true;
+                    }
+                }
+
+                // Phase 3: Next to main EXE
+                if !exe_resolved {
+                    if let Ok(current_exe) = std::env::current_exe() {
+                        if let Some(exe_dir) = current_exe.parent() {
+                            let local = exe_dir.join("mcp-servers").join(&exe_filename);
+                            if local.exists() {
+                                let path_str = local.to_string_lossy().to_string();
+                                command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                crate::app_log!("[MCP] Resolved .exe EXE-relative: {}", command);
+                                exe_resolved = true;
+                            }
+                        }
+                    }
+                }
+
+                // Phase 4: Dev mode fallback (src-tauri/mcp-servers)
+                if !exe_resolved {
+                    let dev_path = std::path::PathBuf::from("src-tauri/mcp-servers").join(&exe_filename);
+                    if dev_path.exists() {
+                        if let Ok(abs) = std::fs::canonicalize(&dev_path) {
+                            let path_str = abs.to_string_lossy().to_string();
+                            command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                            crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
+                            exe_resolved = true;
+                        }
+                    } else {
+                        // try just mcp-servers (if cwd is already src-tauri)
+                        let dev_path2 = std::path::PathBuf::from("mcp-servers").join(&exe_filename);
+                        if dev_path2.exists() {
+                             if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
+                                let path_str = abs.to_string_lossy().to_string();
+                                command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
+                                exe_resolved = true;
+                            }
+                        }
+                    }
+                }
+
+                if !exe_resolved {
+                    crate::app_log!("[WARN] Could not resolve .exe '{}' — ensure mcp-1c-search is built", exe_filename);
                 }
             }
         }
@@ -603,6 +663,7 @@ impl McpSession {
         let help_progress_writer = help_progress.clone();
         let help_message_writer = help_message.clone();
         let is_help_server = config.id == "builtin-1c-help";
+        let is_search_server = config.id == "builtin-1c-search";
 
         // Writer task
         tokio::spawn(async move {
@@ -686,12 +747,38 @@ impl McpSession {
                                              *help_progress_writer.lock().await = 100;
                                              let version = parts.get(1).unwrap_or(&"");
                                              let count = parts.get(2).unwrap_or(&"0");
-                                             *help_message_writer.lock().await = 
+                                             *help_message_writer.lock().await =
                                                  format!("Готово: {} тем (платформа {})", count, version);
                                          }
                                          "unavailable" => {
                                              *help_progress_writer.lock().await = 0;
                                              let reason = parts.get(1).unwrap_or(&"Платформа 1С не найдена");
+                                             *help_message_writer.lock().await = reason.to_string();
+                                         }
+                                         _ => {}
+                                     }
+                                 }
+                             }
+                             // Парсим SEARCH_STATUS строки от 1С:Поиск (mcp-1c-search)
+                             if is_search_server && line.starts_with("SEARCH_STATUS:") {
+                                 let parts: Vec<&str> = line.trim_start_matches("SEARCH_STATUS:").splitn(3, ':').collect();
+                                 if !parts.is_empty() {
+                                     let state = parts[0];
+                                     *help_status_writer.lock().await = state.to_string();
+                                     match state {
+                                         "ready" => {
+                                             *help_progress_writer.lock().await = 100;
+                                             let count = parts.get(1).unwrap_or(&"");
+                                             let size_mb = parts.get(2).unwrap_or(&"");
+                                             
+                                             *help_message_writer.lock().await =
+                                                 if count.is_empty() { "Готово".to_string() }
+                                                 else if size_mb.is_empty() { format!("Готово: {} файлов", count) }
+                                                 else { format!("Готово: {} файлов ({} МБ)", count, size_mb) };
+                                         }
+                                         "unavailable" => {
+                                             *help_progress_writer.lock().await = 0;
+                                             let reason = parts.get(1).unwrap_or(&"Путь не задан");
                                              *help_message_writer.lock().await = reason.to_string();
                                          }
                                          _ => {}
