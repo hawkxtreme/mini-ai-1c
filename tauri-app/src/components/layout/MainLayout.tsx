@@ -76,25 +76,24 @@ export function MainLayout() {
     }, []);
 
 
-    // Analysis effect
+    // Analysis effect — runs only when modifiedCode changes, not on viewMode switch
     useEffect(() => {
-        if (viewMode !== 'assistant' && modifiedCode) {
-            const runAnalysis = async () => {
-                setIsValidating(true);
-                try {
-                    const results = await analyzeCode(modifiedCode);
-                    setDiagnostics(results || []);
-                } catch (e) {
-                    console.error("Analysis failed:", e);
-                } finally {
-                    setIsValidating(false);
-                }
-            };
+        if (!modifiedCode) return;
+        const runAnalysis = async () => {
+            setIsValidating(true);
+            try {
+                const results = await analyzeCode(modifiedCode);
+                setDiagnostics(results || []);
+            } catch (e) {
+                console.error("Analysis failed:", e);
+            } finally {
+                setIsValidating(false);
+            }
+        };
 
-            const timer = setTimeout(runAnalysis, 1000);
-            return () => clearTimeout(timer);
-        }
-    }, [modifiedCode, viewMode, analyzeCode]);
+        const timer = setTimeout(runAnalysis, 1000);
+        return () => clearTimeout(timer);
+    }, [modifiedCode, analyzeCode]);
 
     const handleApply = useCallback(async () => {
         setIsApplying(true);
@@ -147,13 +146,13 @@ export function MainLayout() {
         }
     }, [modifiedCode, pasteCode]);
 
-    const handleCodeLoaded = useCallback((code: string, isSelection: boolean) => {
+    const handleCodeLoaded = useCallback((code: string, _isSelection: boolean) => {
         setLastConfiguratorCode(code);
         setUiBaselineCode(code);
         setModifiedCode(code);
-        setActiveDiffContent(''); // Сброс при загрузке
-        if (viewMode === 'assistant') setViewMode('split');
-    }, [viewMode]);
+        setActiveDiffContent('');
+        setViewMode(prev => prev === 'assistant' ? 'split' : prev);
+    }, []);
 
     const minimize = () => appWindow?.minimize();
     const maximize = async () => {
@@ -208,8 +207,8 @@ export function MainLayout() {
                             modifiedCode={modifiedCode}
                             onApplyCode={useCallback((code: string) => {
                                 setModifiedCode(code);
-                                if (viewMode === 'assistant') setViewMode('split');
-                            }, [viewMode])}
+                                setViewMode(prev => prev === 'assistant' ? 'split' : prev);
+                            }, [])}
                             onCommitCode={useCallback((code: string) => {
                                 // "Принять" из чата - значит сделать код НОВЫМ визуальным бейзлайном
                                 // Но НЕ обновлять lastConfiguratorCode, так как в 1С код еще старый
