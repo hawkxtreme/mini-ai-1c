@@ -21,6 +21,10 @@ fn default_deletion_marker() -> String {
     "// Доработка (Удаление) - {datetime}\n// {oldCode}".to_string()
 }
 
+fn default_max_iterations() -> Option<u32> {
+    Some(7)
+}
+
 /// Быстрые команды (Slash Commands)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
@@ -204,6 +208,10 @@ pub struct AppSettings {
     /// Быстрые команды
     #[serde(default = "default_slash_commands")]
     pub slash_commands: Vec<SlashCommand>,
+    
+    /// Максимальное количество итераций агента
+    #[serde(default = "default_max_iterations")]
+    pub max_agent_iterations: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

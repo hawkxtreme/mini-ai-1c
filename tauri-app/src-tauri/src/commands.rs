@@ -241,14 +241,14 @@ pub async fn stream_chat(
         let settings = crate::settings::load_settings();
 
         let mut current_iteration = 0;
-        const MAX_ITERATIONS: u32 = 7;
+        let max_iterations = settings.max_agent_iterations.unwrap_or(u32::MAX);
 
         loop {
             current_iteration += 1;
             let _ = task_app_handle.emit("chat-iteration", current_iteration);
 
-            if current_iteration > MAX_ITERATIONS {
-                let _ = task_app_handle.emit("chat-chunk", "\n\n**[Система] Достигнут лимит итераций диалога (7).** Пожалуйста, уточните запрос или продолжите в новом сообщении.");
+            if current_iteration > max_iterations {
+                let _ = task_app_handle.emit("chat-chunk", &format!("\n\n**[Система] Достигнут лимит итераций диалога ({}).** Пожалуйста, уточните запрос или продолжите в новом сообщении.", max_iterations));
                 break;
             }
 

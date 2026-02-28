@@ -79,6 +79,34 @@ export function DebugTab({
                             </div>
                         </div>
 
+                        <div className="flex flex-col pt-4 border-t border-zinc-700 space-y-4">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className="font-medium text-zinc-200 text-sm">Лимит шагов (MCP Iterations)</div>
+                                    <div className="text-xs text-zinc-500">Ограничение количества вызовов инструментов ИИ в рамках одного запроса.</div>
+                                </div>
+                                <div className={`relative inline-flex h-6 w-11 items-center rounded-full cursor-pointer transition-all duration-200 ${settings.max_agent_iterations != null ? 'bg-blue-600 shadow-[0_0_10px_rgba(37,99,235,0.4)]' : 'bg-zinc-700'}`}
+                                    onClick={() => setSettings({ ...settings, max_agent_iterations: settings.max_agent_iterations != null ? null : 7 })}
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${settings.max_agent_iterations != null ? 'translate-x-6' : 'translate-x-1'}`} />
+                                </div>
+                            </div>
+
+                            {settings.max_agent_iterations != null && (
+                                <div className="flex items-center gap-4 bg-zinc-900/50 p-3 rounded-lg border border-zinc-800">
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="25"
+                                        value={settings.max_agent_iterations}
+                                        onChange={(e) => setSettings({ ...settings, max_agent_iterations: parseInt(e.target.value, 10) })}
+                                        className="flex-1 accent-blue-500"
+                                    />
+                                    <span className="text-zinc-300 font-mono text-sm w-8 text-right bg-zinc-800 px-2 py-1 rounded">{settings.max_agent_iterations}</span>
+                                </div>
+                            )}
+                        </div>
+
                         <div className="flex items-center justify-between pt-4 border-t border-zinc-700">
                             <div>
                                 <div className="font-medium text-zinc-200 text-sm">System Logs</div>

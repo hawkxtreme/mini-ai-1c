@@ -131,6 +131,7 @@ export interface AppSettings {
     custom_prompts: CustomPromptsSettings;
     code_generation: CodeGenerationSettings;
     slash_commands: SlashCommand[];
+    max_agent_iterations?: number | null;
 }
 
 export interface BslDiagnosticItem {
