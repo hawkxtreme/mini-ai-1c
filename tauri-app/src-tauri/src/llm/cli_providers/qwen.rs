@@ -335,12 +335,42 @@ impl QwenCliProvider {
 
     pub async fn get_status(profile_id: &str) -> Result<CliStatus, String> {
         let token_info = Self::get_token(profile_id)?;
-        if let Some((_, _, expires_at, _)) = token_info {
+        if let Some((_, refresh_token, expires_at, _)) = token_info {
             let is_expired = Utc::now().timestamp() as u64 > expires_at;
-            let usage = if !is_expired { Some(Self::get_local_usage(profile_id)) } else { None };
 
+            // Auto-refresh on status check if token expired and refresh_token available
+            if is_expired {
+                if let Some(rt) = refresh_token.as_deref() {
+                    crate::app_log!(force: true, "[Qwen] get_status: token expired for profile {}, attempting silent refresh...", profile_id);
+                    match Self::refresh_access_token(profile_id, rt).await {
+                        Ok(()) => {
+                            crate::app_log!(force: true, "[Qwen] get_status: silent refresh OK for profile {}", profile_id);
+                            // Re-read refreshed token info
+                            if let Some((_, _, new_expires_at, _)) = Self::get_token(profile_id)? {
+                                let usage = Some(Self::get_local_usage(profile_id));
+                                return Ok(CliStatus {
+                                    is_authenticated: true,
+                                    auth_expires_at: Some(DateTime::from_timestamp(new_expires_at as i64, 0).unwrap_or(Utc::now()).to_rfc3339()),
+                                    usage,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            crate::app_log!(force: true, "[Qwen] get_status: silent refresh FAILED for profile {}: {}", profile_id, e);
+                            // Fall through — return not authenticated
+                        }
+                    }
+                }
+                return Ok(CliStatus {
+                    is_authenticated: false,
+                    auth_expires_at: Some(DateTime::from_timestamp(expires_at as i64, 0).unwrap_or(Utc::now()).to_rfc3339()),
+                    usage: None,
+                });
+            }
+
+            let usage = Some(Self::get_local_usage(profile_id));
             Ok(CliStatus {
-                is_authenticated: !is_expired,
+                is_authenticated: true,
                 auth_expires_at: Some(DateTime::from_timestamp(expires_at as i64, 0).unwrap_or(Utc::now()).to_rfc3339()),
                 usage,
             })

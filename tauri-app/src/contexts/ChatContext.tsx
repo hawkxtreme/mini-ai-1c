@@ -77,15 +77,25 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     listen<{ index: number, id: string, name: string }>('tool-call-started', (event) => {
                         setMessages(prev => {
                             const last = prev[prev.length - 1];
-                            if (!last || last.role !== 'assistant') return prev;
-
-                            const toolCalls = [...(last.toolCalls || [])];
-                            toolCalls[event.payload.index] = {
+                            const newToolCall = {
                                 id: event.payload.id,
                                 name: event.payload.name,
                                 arguments: '',
-                                status: 'pending'
+                                status: 'pending' as const
                             };
+
+                            if (!last || last.role !== 'assistant') {
+                                return [...prev, {
+                                    id: generateId(),
+                                    role: 'assistant',
+                                    content: '',
+                                    timestamp: Date.now(),
+                                    toolCalls: [newToolCall]
+                                }];
+                            }
+
+                            const toolCalls = [...(last.toolCalls || [])];
+                            toolCalls[event.payload.index] = newToolCall;
 
                             return [...prev.slice(0, -1), { ...last, toolCalls }];
                         });

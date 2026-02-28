@@ -5,7 +5,7 @@ import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle } from '../../utils/configurator';
 import { MarkdownRenderer } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, Monitor, RefreshCw, FileText, MousePointerClick, Brain, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal } from 'lucide-react';
 import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
@@ -613,17 +613,17 @@ export function ChatArea({
                                         <div className="flex-1 min-w-0">
                                             {/* Thinking Section */}
                                             {msg.thinking && (
-                                                <div className="border-l-2 border-white/10 pl-3">
+                                                <div className="my-1 mb-3">
                                                     <button
                                                         onClick={() => toggleThinking(i)}
-                                                        className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-tighter mb-1 transition-colors group"
+                                                        className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
                                                     >
-                                                        <Brain size={12} className={expandedThinking[i] ? 'text-blue-400' : ''} />
-                                                        {msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Думаю'}
-                                                        <ChevronDown size={12} className={`transition-transform ${expandedThinking[i] ? 'rotate-180' : ''}`} />
+                                                        <BrainCircuit className="w-3.5 h-3.5" />
+                                                        <span>{msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Размышления'}</span>
+                                                        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expandedThinking[i] ? 'rotate-90' : ''}`} />
                                                     </button>
                                                     {expandedThinking[i] && (
-                                                        <div className="text-[12px] italic text-white/40 leading-snug animate-in fade-in slide-in-from-top-1">
+                                                        <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
                                                             {msg.thinking}
                                                         </div>
                                                     )}
@@ -641,7 +641,7 @@ export function ChatArea({
 
                                     {/* Tool Calls */}
                                     {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                        <div className="flex flex-col gap-1">
+                                        <div className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
                                             {msg.toolCalls.map((tc, idx) => (
                                                 <ToolCallBlock key={idx} toolCall={tc} />
                                             ))}

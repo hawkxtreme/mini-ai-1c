@@ -896,7 +896,12 @@ pub async fn stream_chat_completion(
                                 
                                 // Process the search buffer
                                 loop {
-                                    if !is_thinking && !is_qwen_fn {
+                                    if is_qwen_fn {
+                                        // If we are accumulating a Qwen function, break the loop and let section 1b handle it.
+                                        break;
+                                    }
+                                    
+                                    if !is_thinking {
                                         // --- Qwen XML function call detection ---
                                         if let Some(fn_start) = content_search_temp.find("<function=") {
                                             // Emit everything before the tag as regular text
@@ -927,14 +932,12 @@ pub async fn stream_chat_completion(
                                             content_search_temp = content_search_temp[start_pos + 10..].to_string();
                                         } else if let Some(last_lt) = content_search_temp.rfind('<') {
                                             // Potential tag start - but only hold back if it COULD be an XML tag.
-                                            // XML tags start with '<' followed by a letter, slash, or '?'.
-                                            // Diff markers like '<<<<<<< SEARCH' start with multiple '<'.
-                                            // Do NOT hold back for diff markers or operator sequences.
                                             let after_lt = content_search_temp[last_lt..].chars().nth(1);
                                             let is_potential_tag = matches!(after_lt, Some(c) if c.is_alphabetic() || c == '/' || c == '?');
+                                            let potential_tag_len = content_search_temp.len() - last_lt;
                                             
-                                            if is_potential_tag {
-                                                // Hold back everything from `<` onwards, emit the rest.
+                                            // Hold back only if it's less than 15 chars
+                                            if is_potential_tag && potential_tag_len < 15 {
                                                 if last_lt > 0 {
                                                     let text = content_search_temp[..last_lt].to_string();
                                                     full_content.push_str(&text);
@@ -943,13 +946,11 @@ pub async fn stream_chat_completion(
                                                 }
                                                 break;
                                             } else {
-                                                // Not a potential tag (e.g., diff marker '<<<'), emit everything.
                                                 full_content.push_str(&content_search_temp);
                                                 let _ = app_handle.emit("chat-chunk", content_search_temp.clone());
                                                 content_search_temp.clear();
                                                 break;
                                             }
-
                                         } else {
                                             // No '<' found, emit everything
                                             full_content.push_str(&content_search_temp);
@@ -958,6 +959,7 @@ pub async fn stream_chat_completion(
                                             break;
                                         }
                                     } else {
+                                        // is_thinking == true
                                         if let Some(end_pos) = content_search_temp.find("</thinking>") {
                                             // 1. Text before </thinking> goes to thinking channel
                                             if end_pos > 0 {
@@ -973,13 +975,21 @@ pub async fn stream_chat_completion(
                                             // 3. Remove processed part including tag
                                             content_search_temp = content_search_temp[end_pos + 11..].to_string();
                                         } else if let Some(last_lt) = content_search_temp.rfind('<') {
+                                            let potential_tag_len = content_search_temp.len() - last_lt;
                                             // Potential end-tag start found.
-                                            if last_lt > 0 {
-                                                let text = content_search_temp[..last_lt].to_string();
-                                                let _ = app_handle.emit("chat-thinking-chunk", text);
-                                                content_search_temp = content_search_temp[last_lt..].to_string();
+                                            if potential_tag_len < 15 {
+                                                if last_lt > 0 {
+                                                    let text = content_search_temp[..last_lt].to_string();
+                                                    let _ = app_handle.emit("chat-thinking-chunk", text);
+                                                    content_search_temp = content_search_temp[last_lt..].to_string();
+                                                }
+                                                break;
+                                            } else {
+                                                // Exceeded max length without matching </thinking>. Emit everything to thinking.
+                                                let _ = app_handle.emit("chat-thinking-chunk", content_search_temp.clone());
+                                                content_search_temp.clear();
+                                                break;
                                             }
-                                            break;
                                         } else {
                                             // No '<' found, emit everything to thinking
                                             let _ = app_handle.emit("chat-thinking-chunk", content_search_temp.clone());

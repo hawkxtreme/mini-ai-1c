@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ToolCall } from '../../contexts/ChatContext';
-import { Play, Check, AlertCircle, XCircle, Terminal, ChevronDown, ChevronRight } from 'lucide-react';
+import { Play, CheckCircle, AlertCircle, XCircle, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 
 interface ToolCallBlockProps {
     toolCall: ToolCall;
@@ -11,23 +11,12 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
 
     const getStatusIcon = () => {
         switch (toolCall.status) {
-            case 'pending': return <Play size={14} className="text-yellow-400 animate-pulse" />;
-            case 'executing': return <Play size={14} className="text-blue-400 animate-spin" />;
-            case 'done': return <Check size={14} className="text-green-400" />;
+            case 'pending': return <Loader2 size={14} className="text-blue-400 animate-spin" />;
+            case 'executing': return <Loader2 size={14} className="text-blue-400 animate-spin" />;
+            case 'done': return <CheckCircle size={14} className="text-emerald-500" />;
             case 'error': return <AlertCircle size={14} className="text-red-400" />;
             case 'rejected': return <XCircle size={14} className="text-gray-400" />;
             default: return <Terminal size={14} className="text-white/50" />;
-        }
-    };
-
-    const getStatusColor = () => {
-        switch (toolCall.status) {
-            case 'pending': return 'border-yellow-500/30 bg-yellow-500/5';
-            case 'executing': return 'border-blue-500/30 bg-blue-500/5';
-            case 'done': return 'border-green-500/30 bg-green-500/5';
-            case 'error': return 'border-red-500/30 bg-red-500/5';
-            case 'rejected': return 'border-white/10 bg-white/5 opacity-60';
-            default: return 'border-white/10 bg-white/5';
         }
     };
 
@@ -42,56 +31,38 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
 
     const hasContent = toolCall.arguments && toolCall.arguments.trim().length > 0;
 
-    if (toolCall.status === 'done') {
-        const hasContent = toolCall.arguments && toolCall.arguments.trim().length > 0;
+    // Design for Pending / Executing
+    if (toolCall.status === 'pending' || toolCall.status === 'executing') {
         return (
-            <div className="my-1 flex items-center gap-2 px-2 py-0.5 opacity-50 hover:opacity-100 transition-opacity">
-                <Check size={12} className="text-green-500" />
-                <span className="font-mono text-[10px] text-zinc-500 font-medium">
-                    MCP: {toolCall.name}
+            <div className="flex items-center gap-2 py-1.5 px-3 mb-2 bg-zinc-800/30 rounded-lg w-fit border border-white/5 shadow-sm animate-pulse origin-left animate-in zoom-in-95 duration-200">
+                {getStatusIcon()}
+                <span className="text-[12px] font-medium text-zinc-300">
+                    Работа с {toolCall.name}...
                 </span>
-                {hasContent && (
-                    <button
-                        onClick={() => setIsExpanded(!isExpanded)}
-                        className="text-[10px] text-zinc-600 hover:text-zinc-300 underline"
-                    >
-                        {isExpanded ? 'hide args' : 'args'}
-                    </button>
-                )}
-                {isExpanded && hasContent && (
-                    <div className="absolute mt-5 left-10 z-10 p-2 bg-zinc-900 border border-zinc-800 rounded shadow-lg max-w-lg">
-                        <pre className="text-[10px] text-zinc-400 whitespace-pre-wrap">{formatJSON(toolCall.arguments)}</pre>
-                    </div>
-                )}
             </div>
         );
     }
 
-    // Default rendering for pending/executing/error
+    // Design for Done / Error / Rejected
     return (
-        <div className={`my-2 border rounded-lg overflow-hidden transition-all ${getStatusColor()}`}>
+        <div className="flex flex-col gap-0.5 mb-2 w-full animate-in fade-in duration-300">
             <button
                 onClick={() => hasContent && setIsExpanded(!isExpanded)}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 bg-white/5 border-b border-white/5 ${hasContent ? 'hover:bg-white/10 cursor-pointer' : 'cursor-default'}`}
+                className={`flex items-center gap-2 py-1 px-2 w-fit rounded transition-colors group ${hasContent ? 'hover:bg-zinc-800/50 cursor-pointer' : 'cursor-default'}`}
+                title={toolCall.status}
             >
                 {getStatusIcon()}
-                <span className="font-mono text-[11px] uppercase tracking-wider font-bold text-white/80 flex-1 text-left">
-                    Вызов MCP: {toolCall.name}
-                </span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase font-bold ${toolCall.status === 'error' ? 'bg-red-500/20 text-red-400' :
-                        'bg-white/10 text-white/50'
-                    }`}>
-                    {toolCall.status}
+                <span className={`text-[11px] font-mono group-hover:text-zinc-300 transition-colors ${toolCall.status === 'error' ? 'text-red-400/80' : 'text-zinc-500'}`}>
+                    {toolCall.name} {toolCall.status === 'error' ? '(Ошибка)' : toolCall.status === 'rejected' ? '(Отклонено)' : toolCall.status === 'done' ? '(Завершено)' : ''}
                 </span>
                 {hasContent && (
-                    isExpanded ?
-                        <ChevronDown size={14} className="text-white/40" /> :
-                        <ChevronRight size={14} className="text-white/40" />
+                    <ChevronRight size={14} className={`text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                 )}
             </button>
+
             {isExpanded && hasContent && (
-                <div className="p-2.5 font-mono text-[11px] text-white/70 overflow-x-auto bg-black/40">
-                    <pre className="whitespace-pre-wrap break-all">
+                <div className="ml-6 mr-4 mt-1 p-2.5 rounded border border-zinc-800/50 bg-[#121214] overflow-x-auto shadow-inner">
+                    <pre className="font-mono text-[10px] text-zinc-400 whitespace-pre-wrap break-words">
                         {formatJSON(toolCall.arguments)}
                     </pre>
                 </div>
@@ -101,3 +72,4 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
 };
 
 export default ToolCallBlock;
+

@@ -100,23 +100,17 @@ function ThoughtSection({ title, children }: { title: string, children: React.Re
     const [isCollapsed, setIsCollapsed] = useState(true);
 
     return (
-        <div className="my-4 overflow-hidden border border-zinc-800 rounded-lg bg-zinc-900/40 backdrop-blur-sm">
+        <div className="my-2 mb-4">
             <button
                 onClick={() => setIsCollapsed(!isCollapsed)}
-                className="w-full flex items-center justify-between px-4 py-2 hover:bg-zinc-800/50 transition-colors group text-zinc-400"
+                className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
             >
-                <div className="flex items-center gap-2">
-                    <BrainCircuit className="w-4 h-4 text-zinc-500" />
-                    <span className="text-xs font-bold uppercase tracking-widest">{title}</span>
-                </div>
-                {isCollapsed ? (
-                    <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-zinc-300" />
-                ) : (
-                    <ChevronDown className="w-4 h-4 text-zinc-500 group-hover:text-zinc-300" />
-                )}
+                <BrainCircuit className="w-3.5 h-3.5" />
+                <span>{title}</span>
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${!isCollapsed ? 'rotate-90' : ''}`} />
             </button>
             {!isCollapsed && (
-                <div className="px-4 pb-4 pt-2 border-t border-zinc-800/50 text-sm text-zinc-400 bg-zinc-950/20">
+                <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1">
                     {children}
                 </div>
             )}
