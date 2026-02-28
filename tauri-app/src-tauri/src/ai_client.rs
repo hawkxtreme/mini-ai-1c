@@ -689,14 +689,18 @@ pub async fn stream_chat_completion(
     }];
     api_messages.extend(messages);
     
-    // Build request
-    // Heuristic: If max_tokens (Context Window in UI) is very large (> 16k), 
-    // it likely represents input capacity, not generation limit.
-    // Most APIs reject huge max_tokens for generation. Clamp to safe default (4096).
-    let _api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
-
-    // Build request
-    let api_max_tokens = if profile.max_tokens > 16384 { 4096 } else { profile.max_tokens };
+    // Determine generation token limit.
+    // Context Window in UI represents input capacity (e.g. 1M for Qwen3-Coder),
+    // not the generation limit. Use provider-specific defaults.
+    let api_max_tokens = if matches!(profile.provider, LLMProvider::QwenCli) {
+        // Qwen3-Coder supports up to 65536 generation tokens
+        32768u32
+    } else if profile.max_tokens > 16384 {
+        // Other providers: large value likely means "context window", clamp to safe default
+        4096
+    } else {
+        profile.max_tokens
+    };
 
     let request_body = ChatRequest {
         model: profile.model.clone(),

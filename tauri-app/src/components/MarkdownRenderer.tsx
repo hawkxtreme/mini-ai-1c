@@ -299,6 +299,15 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
     );
 });
 
+// Fix unclosed code blocks during streaming — prevents content from "falling into" a code block
+function fixStreamingMarkdown(content: string): string {
+    const codeBlockCount = (content.match(/```/g) || []).length;
+    if (codeBlockCount % 2 !== 0) {
+        return content + '\n```';
+    }
+    return content;
+}
+
 export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStreaming = false, onApplyCode, originalCode }: MarkdownRendererProps) {
     const components = useMemo(() => ({
         // Handle <thought> or <thinking> tags as collapsible sections
@@ -359,13 +368,17 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStre
         },
     }), [isStreaming, onApplyCode, originalCode]);
 
+    const processedContent = isStreaming
+        ? fixStreamingMarkdown(cleanDiffArtifacts(content, originalCode))
+        : cleanDiffArtifacts(content, originalCode);
+
     return (
         <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeRaw]}
             components={components as any}
         >
-            {cleanDiffArtifacts(content, originalCode)}
+            {processedContent}
         </ReactMarkdown>
     );
 });
