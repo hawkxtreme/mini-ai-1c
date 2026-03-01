@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen } from 'lucide-react';
+import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown } from 'lucide-react';
 
 export type McpTransport = 'http' | 'stdio' | 'internal';
 
@@ -51,6 +51,35 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [isLoadingLogs, setIsLoadingLogs] = useState(false);
     const [smartImportId, setSmartImportId] = useState<string | null>(null);
     const [smartImportUrl, setSmartImportUrl] = useState('');
+    const [searchPathHistory, setSearchPathHistory] = useState<string[]>(() => {
+        try {
+            const stored: string[] = JSON.parse(localStorage.getItem('mcp_search_path_history') || '[]');
+            const currentPath = servers.find(s => s.id === BUILTIN_1C_SEARCH_ID)?.env?.['ONEC_CONFIG_PATH'];
+            if (currentPath && !stored.includes(currentPath)) {
+                const seeded = [currentPath, ...stored].slice(0, 10);
+                localStorage.setItem('mcp_search_path_history', JSON.stringify(seeded));
+                return seeded;
+            }
+            return stored;
+        } catch { return []; }
+    });
+    const [showSearchHistory, setShowSearchHistory] = useState(false);
+
+    const addToSearchHistory = (path: string) => {
+        if (!path.trim()) return;
+        setSearchPathHistory(prev => {
+            const updated = [path, ...prev.filter(p => p !== path)].slice(0, 10);
+            localStorage.setItem('mcp_search_path_history', JSON.stringify(updated));
+            return updated;
+        });
+    };
+    const removeFromSearchHistory = (path: string) => {
+        setSearchPathHistory(prev => {
+            const updated = prev.filter(p => p !== path);
+            localStorage.setItem('mcp_search_path_history', JSON.stringify(updated));
+            return updated;
+        });
+    };
 
     // Ensure pre-installed servers exist
     useEffect(() => {
@@ -537,10 +566,16 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                             if (dir && typeof dir === 'string') {
                                                                 const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': dir };
                                                                 handleUpdateServer(server.id, { env: newEnv });
+                                                                addToSearchHistory(dir);
                                                             }
                                                         } catch (e) {
                                                             console.error('Failed to open directory dialog:', e);
                                                         }
+                                                    };
+                                                    const selectFromHistory = (p: string) => {
+                                                        const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': p };
+                                                        handleUpdateServer(server.id, { env: newEnv });
+                                                        setShowSearchHistory(false);
                                                     };
                                                     return (
                                                         <div className="space-y-3">
@@ -548,7 +583,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                 <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
                                                                     <Terminal className="w-3 h-3" /> Путь к выгрузке конфигурации 1С
                                                                 </label>
-                                                                <div className="flex gap-2">
+                                                                <div className="flex gap-2 relative">
                                                                     <input
                                                                         type="text"
                                                                         value={configPath}
@@ -556,6 +591,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                             const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': e.target.value };
                                                                             handleUpdateServer(server.id, { env: newEnv });
                                                                         }}
+                                                                        onBlur={() => { if (configPath) addToSearchHistory(configPath); }}
+                                                                        onKeyDown={(e) => { if (e.key === 'Enter' && configPath) addToSearchHistory(configPath); }}
                                                                         className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none font-mono min-w-0"
                                                                         placeholder="C:\1C\configs\MyConfig"
                                                                     />
@@ -566,7 +603,41 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                     >
                                                                         <FolderOpen className="w-3.5 h-3.5" />
                                                                     </button>
+                                                                    {searchPathHistory.length > 0 && (
+                                                                        <button
+                                                                            onClick={() => setShowSearchHistory(v => !v)}
+                                                                            className="flex items-center gap-1 px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded-lg text-xs transition shrink-0"
+                                                                            title="История путей"
+                                                                        >
+                                                                            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSearchHistory ? 'rotate-180' : ''}`} />
+                                                                        </button>
+                                                                    )}
                                                                 </div>
+                                                                {showSearchHistory && searchPathHistory.length > 0 && (
+                                                                    <div className="mt-1 rounded-lg overflow-hidden border border-zinc-700/50">
+                                                                        {searchPathHistory.map((p) => (
+                                                                            <div key={p} className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-700/50 group">
+                                                                                <button
+                                                                                    onClick={() => selectFromHistory(p)}
+                                                                                    className="flex-1 flex items-center gap-1.5 text-left min-w-0"
+                                                                                >
+                                                                                    {p === configPath
+                                                                                        ? <CheckCircle2 className="w-3 h-3 text-green-500 shrink-0" />
+                                                                                        : <div className="w-3 h-3 shrink-0" />
+                                                                                    }
+                                                                                    <span className="text-xs font-mono text-zinc-300 truncate">{p}</span>
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={(e) => { e.stopPropagation(); removeFromSearchHistory(p); }}
+                                                                                    className="opacity-0 group-hover:opacity-100 p-0.5 text-zinc-500 hover:text-red-400 transition shrink-0"
+                                                                                    title="Удалить из истории"
+                                                                                >
+                                                                                    <X className="w-3 h-3" />
+                                                                                </button>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
                                                                 <p className="text-[10px] text-zinc-600 mt-1">Корневая директория выгруженной конфигурации (содержит папки CommonModules, Documents и т.д.)</p>
                                                             </div>
                                                             {searchSt === 'unavailable' ? (
@@ -577,18 +648,35 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                         <p className="text-[10px] text-zinc-500 mt-1">Укажите путь к директории выгрузки конфигурации 1С выше.</p>
                                                                     </div>
                                                                 </div>
+                                                            ) : searchSt === 'indexing' ? (
+                                                                <div className="space-y-2">
+                                                                    <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                                                                        <span className="flex items-center gap-1">
+                                                                            <Activity className="w-3 h-3 animate-pulse text-blue-400" />
+                                                                            Построение символьного индекса...
+                                                                        </span>
+                                                                        <span className="font-mono text-blue-400">{status?.index_progress || 0}%</span>
+                                                                    </div>
+                                                                    <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                                                                        <div
+                                                                            className="bg-gradient-to-r from-blue-600 to-blue-400 h-1.5 rounded-full transition-all duration-500"
+                                                                            style={{ width: `${Math.max(2, status?.index_progress || 0)}%` }}
+                                                                        />
+                                                                    </div>
+                                                                    {status?.index_message && <p className="text-[10px] text-zinc-500 truncate">{status.index_message}</p>}
+                                                                </div>
                                                             ) : searchSt === 'ready' ? (
                                                                 <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center gap-3">
                                                                     <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
                                                                     <div>
                                                                         <p className="text-xs text-green-300 font-medium">Поиск готов к работе</p>
-                                                                        <p className="text-[10px] text-zinc-500 mt-0.5 font-mono truncate">{configPath}</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-0.5 truncate">{status?.index_message || configPath}</p>
                                                                     </div>
                                                                 </div>
                                                             ) : (
                                                                 <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
-                                                                    Быстрый поиск по исходному коду конфигурации 1С (BSL и XML файлы).
-                                                                    Поддерживает литеральный и regex-поиск с контекстом строк.
+                                                                    Быстрый поиск и символьный индекс процедур/функций конфигурации 1С (BSL файлы).
+                                                                    Поддерживает поиск по коду и навигацию к определениям.
                                                                 </div>
                                                             )}
                                                         </div>

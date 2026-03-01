@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 mod search;
 mod tools;
+mod parser;
+mod index;
 
 use crate::search::count_files_and_size;
 
@@ -21,11 +23,15 @@ async fn main() {
         None
     };
 
-    // Report status via stderr — parsed by mcp_client.rs (same as HELP_STATUS)
-    match &config_path {
+    // Derive db_path for symbol index (always Some when config_path is Some)
+    let db_path: Option<PathBuf> = config_path.as_ref().map(|p| index::get_db_path(p));
+
+    // Report status via stderr — parsed by mcp_client.rs
+    let (file_count, size_mb) = match &config_path {
         Some(path) => {
             let (count, size_mb) = count_files_and_size(path);
             eprintln!("SEARCH_STATUS:ready:{}:{:.2}", count, size_mb);
+            (count, size_mb)
         }
         None => {
             if config_path_str.is_empty() {
@@ -33,6 +39,27 @@ async fn main() {
             } else {
                 eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", config_path_str);
             }
+            (0, 0.0)
+        }
+    };
+
+    // Spawn background symbol indexing if config path is set and index is not ready
+    if let (Some(root), Some(db)) = (&config_path, &db_path) {
+        if !index::index_exists(db) {
+            let root_clone = root.clone();
+            let db_clone = db.clone();
+            // Detached background task — JoinHandle intentionally dropped
+            let _ = tokio::task::spawn_blocking(move || {
+                match index::build_index(&root_clone, &db_clone) {
+                    Ok(_) => {
+                        // Re-emit ready after indexing to update UI status
+                        eprintln!("SEARCH_STATUS:ready:{}:{:.2}", file_count, size_mb);
+                    }
+                    Err(e) => {
+                        eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации: {}", e);
+                    }
+                }
+            });
         }
     }
 
@@ -68,7 +95,7 @@ async fn main() {
                 let method = request["method"].as_str().unwrap_or("");
                 let params = request.get("params").cloned().unwrap_or(json!({}));
 
-                let result = handle_method(method, &params, &config_path).await;
+                let result = handle_method(method, &params, &config_path, &db_path).await;
 
                 let response = match result {
                     Ok(res) => json!({
@@ -103,6 +130,7 @@ async fn handle_method(
     method: &str,
     params: &Value,
     config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
 ) -> Result<Value, String> {
     match method {
         "initialize" => Ok(json!({
@@ -114,7 +142,7 @@ async fn handle_method(
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            tools::call_tool(tool_name, &arguments, config_path).await
+            tools::call_tool(tool_name, &arguments, config_path, db_path).await
         }
         "ping" => Ok(json!({})),
         _ => Err(format!("Method not found: {}", method)),

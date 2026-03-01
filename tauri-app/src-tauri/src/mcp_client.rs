@@ -242,8 +242,8 @@ impl McpManager {
 
              crate::app_log!("[DEBUG] MCP Server status for {}: {}", config.id, status);
              
-             // Извлекаем прогресс индексации для 1С:Справка
-             let (index_progress, index_message, help_status_str) = if config.id == "builtin-1c-help" {
+             // Извлекаем прогресс индексации для 1С:Справка и 1С:Поиск
+             let (index_progress, index_message, help_status_str) = if config.id == "builtin-1c-help" || config.id == "builtin-1c-search" {
                  if let Some((_, session)) = sessions.get(&config.id) {
                      let progress = *session.help_progress.lock().await;
                      let message = session.help_message.lock().await.clone();
@@ -780,6 +780,16 @@ impl McpSession {
                                              *help_progress_writer.lock().await = 0;
                                              let reason = parts.get(1).unwrap_or(&"Путь не задан");
                                              *help_message_writer.lock().await = reason.to_string();
+                                         }
+                                         "indexing" => {
+                                             if let Some(pct_str) = parts.get(1) {
+                                                 if let Ok(pct) = pct_str.parse::<u32>() {
+                                                     *help_progress_writer.lock().await = pct;
+                                                 }
+                                             }
+                                             if let Some(msg) = parts.get(2) {
+                                                 *help_message_writer.lock().await = msg.to_string();
+                                             }
                                          }
                                          _ => {}
                                      }
