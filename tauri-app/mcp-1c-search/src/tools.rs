@@ -245,21 +245,28 @@ pub async fn call_tool(
     config_path: &Option<PathBuf>,
     db_path: &Option<PathBuf>,
 ) -> Result<Value, String> {
-    match name {
-        "search_code" => handle_search_code(args, config_path).await,
+    let start = std::time::Instant::now();
+    let result = match name {
+        "search_code" => handle_search_code(args, config_path, db_path).await,
         "get_file_context" => handle_get_file_context(args, config_path).await,
         "find_symbol" => handle_find_symbol(args, db_path).await,
         "get_symbol_context" => handle_get_symbol_context(args, config_path, db_path).await,
         "list_objects" => handle_list_objects(args, db_path).await,
-        "get_object_structure" => handle_get_object_structure(args, db_path).await,
+        "get_object_structure" => handle_get_object_structure(args, db_path, config_path).await,
         "find_references" => handle_find_references(args, config_path).await,
         "impact_analysis" => handle_impact_analysis(args, config_path, db_path).await,
         "sync_index" => handle_sync_index(config_path, db_path).await,
         _ => Err(format!("Неизвестный инструмент: {}", name)),
-    }
+    };
+    eprintln!("[PERF] {} in {}ms", name, start.elapsed().as_millis());
+    result
 }
 
-async fn handle_search_code(args: &Value, config_path: &Option<PathBuf>) -> Result<Value, String> {
+async fn handle_search_code(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
     let root = config_path
         .as_ref()
         .ok_or("Конфигурация не настроена. Укажите путь в настройках MCP сервера.")?;
@@ -289,12 +296,56 @@ async fn handle_search_code(args: &Value, config_path: &Option<PathBuf>) -> Resu
     });
 
     let root_clone = root.clone();
+    let db_clone = db_path.clone();
     let query_owned = query.to_string();
+    let query_lower = query.to_lowercase();
+    // Index-guided conditions:
+    // - full-config search only (no scope)
+    // - not a regex
+    // - no spaces in query (symbol names never contain spaces — hint would return 0 results)
+    let use_index_hint = sub_path.is_none() && !use_regex && !query.contains(' ');
+    let sub_path_clone = sub_path.clone();
 
     let start_time = std::time::Instant::now();
 
     let results = tokio::task::spawn_blocking(move || {
-        search::search_code(&root_clone, sub_path.as_deref(), &query_owned, use_regex, limit)
+        // Phase 1: SQLite-guided search
+        // Query the symbols table for files that DECLARE symbols matching the query.
+        // These files are the most likely to also contain usages — grep only them first.
+        // If limit is reached → return without touching the rest of the 25K-file config.
+        //
+        // Smart hint for qualified names: "Справочники.СтавкиНДС" → hint on "ставкиндс"
+        // Symbol names never include the "Справочники." prefix, so stripping it gives hits.
+        if use_index_hint {
+            if let Some(db) = db_clone.as_deref() {
+                let hint_query = if query_lower.contains('.') {
+                    // Use only the last segment after the final dot
+                    query_lower.rsplit('.').next().unwrap_or(&query_lower).to_string()
+                } else {
+                    query_lower.clone()
+                };
+                let hot_files = index::find_files_by_symbol_query(db, &hint_query, 100);
+                if !hot_files.is_empty() {
+                    let hot = search::search_code_in_file_set(
+                        &root_clone, &hot_files, &query_owned, false, limit,
+                    );
+                    // Return index-guided results regardless of count.
+                    // A full-config fallback scan on cold HDD takes minutes — unacceptable.
+                    // If the symbol exists in the index, hint files are the most relevant.
+                    // When hot is empty (symbol truly not in hint files), fall through below.
+                    if !hot.is_empty() {
+                        eprintln!(
+                            "[1c-search] index-guided: {} results from {} hint files",
+                            hot.len(), hot_files.len()
+                        );
+                        return hot;
+                    }
+                }
+            }
+        }
+        // Phase 2: no index hint (regex, scoped, spaces in query, or no db)
+        // BSL-first two-pass streaming scan — stops as soon as limit is reached.
+        search::search_code(&root_clone, sub_path_clone.as_deref(), &query_owned, use_regex, limit)
     })
     .await
     .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
@@ -519,6 +570,7 @@ async fn handle_list_objects(args: &Value, db_path: &Option<PathBuf>) -> Result<
 async fn handle_get_object_structure(
     args: &Value,
     db_path: &Option<PathBuf>,
+    config_path: &Option<PathBuf>,
 ) -> Result<Value, String> {
     let db = db_path
         .as_ref()
@@ -599,13 +651,101 @@ async fn handle_get_object_structure(
         && d.commands.is_empty()
         && d.modules.is_empty()
     {
-        text.push_str(
-            "*Детальная структура недоступна — ConfigDumpInfo.xml не проиндексирован.*\n\
-             Используйте search_code для поиска кода этого объекта.\n",
-        );
+        // ConfigDumpInfo.xml not available — fall back to scanning the object folder
+        text.push_str("*ConfigDumpInfo.xml не проиндексирован — данные получены из файловой структуры.*\n\n");
+        if let Some(fallback) = scan_object_folder_fallback(&d.obj_type, &d.name, config_path) {
+            text.push_str(&fallback);
+        } else {
+            text.push_str("*Папка объекта не найдена в выгрузке конфигурации.*\n");
+            text.push_str("Используйте `search_code` для поиска кода этого объекта.\n");
+        }
     }
 
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+/// Scan the object's folder in the config dump to collect forms, modules, templates, commands.
+fn scan_object_folder_fallback(
+    obj_type: &str,
+    obj_name: &str,
+    config_path: &Option<std::path::PathBuf>,
+) -> Option<String> {
+    let root = config_path.as_ref()?;
+    let folder_type = object_type_to_folder(obj_type)?;
+
+    // Try exact name match and case-insensitive match
+    let obj_dir = root.join(folder_type).join(obj_name);
+    let obj_dir = if obj_dir.is_dir() {
+        obj_dir
+    } else {
+        // case-insensitive scan
+        let parent = root.join(folder_type);
+        let lower = obj_name.to_lowercase();
+        std::fs::read_dir(&parent).ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().to_lowercase() == lower)
+            .map(|e| e.path())?
+    };
+
+    let mut forms: Vec<String> = Vec::new();
+    let mut modules: Vec<String> = Vec::new();
+    let mut templates: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
+    let mut has_module = false;
+
+    if let Ok(entries) = std::fs::read_dir(&obj_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if path.is_dir() {
+                match name.as_str() {
+                    "Forms"     => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { forms.push(n); } } } }
+                    "Templates" => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { templates.push(n); } } } }
+                    "Commands"  => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { commands.push(n); } } } }
+                    "Ext"       => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { modules.push(n); } } } }
+                    _ => {}
+                }
+            } else if name == "Module.bsl" {
+                has_module = true;
+            }
+        }
+    }
+
+    let mut out = String::new();
+
+    // Check for Module.bsl (CommonModule or object module)
+    if has_module {
+        let rel = format!("{}/{}/Module.bsl", folder_type, obj_name);
+        out.push_str(&format!("### Модуль\n- [Module.bsl]({rel})\n\n"));
+    }
+    if !modules.is_empty() {
+        out.push_str(&format!("### Модули ({})\n", modules.len()));
+        for m in &modules { out.push_str(&format!("- {m}\n")); }
+        out.push('\n');
+    }
+    if !forms.is_empty() {
+        out.push_str(&format!("### Формы ({})\n", forms.len()));
+        for f in &forms { out.push_str(&format!("- {f}\n")); }
+        out.push('\n');
+    }
+    if !commands.is_empty() {
+        out.push_str(&format!("### Команды ({})\n", commands.len()));
+        for c in &commands { out.push_str(&format!("- {c}\n")); }
+        out.push('\n');
+    }
+    if !templates.is_empty() {
+        out.push_str(&format!("### Макеты ({})\n", templates.len()));
+        for t in &templates { out.push_str(&format!("- {t}\n")); }
+        out.push('\n');
+    }
+
+    if out.is_empty() {
+        out.push_str("*Структура объекта не определена. BSL-код доступен через `search_code`.*\n");
+    } else {
+        out.push_str(&format!("\n*Данные получены из файловой структуры `{folder_type}/{obj_name}/`.*\n"));
+    }
+
+    Some(out)
 }
 
 async fn handle_find_references(
@@ -712,13 +852,26 @@ async fn handle_impact_analysis(
     let search_term_clone = search_term.clone();
     let object_name_owned = object_name.to_string();
 
-    let (details, refs): (Option<index::ObjectDetails>, Vec<search::SearchResult>) =
+    // Use search_files_summary instead of search_code:
+    // - stops after MAX_FILES files with matches (not 500 individual line matches)
+    // - for widely-used symbols this is drastically faster: O(matched_files) vs O(all_files)
+    // - collects 3 example lines per file inline, no second pass needed
+    const MAX_FILES: usize = 50;
+    const EXAMPLES_PER_FILE: usize = 3;
+
+    let (details, hits): (Option<index::ObjectDetails>, Vec<search::FileHits>) =
         tokio::task::spawn_blocking(move || {
             let details = db_clone
                 .as_deref()
                 .and_then(|db| index::get_object_details(db, &object_name_owned));
-            let refs = search::search_code(&root_clone, None, &search_term_clone, false, 500);
-            (details, refs)
+            let hits = search::search_files_summary(
+                &root_clone,
+                &search_term_clone,
+                false,
+                MAX_FILES,
+                EXAMPLES_PER_FILE,
+            );
+            (details, hits)
         })
         .await
         .map_err(|e| format!("Ошибка выполнения: {}", e))?;
@@ -736,41 +889,42 @@ async fn handle_impact_analysis(
         text.push('\n');
     }
 
-    if refs.is_empty() {
+    if hits.is_empty() {
         text.push_str(&format!(
             "Ссылок на \"{}\" в коде конфигурации не найдено.\n",
             search_term
         ));
     } else {
-        let mut by_file: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for r in &refs {
-            *by_file.entry(r.file.clone()).or_default() += 1;
-        }
-        let mut file_list: Vec<(String, usize)> = by_file.into_iter().collect();
-        file_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
+        let total_count: usize = hits.iter().map(|h| h.count).sum();
         text.push_str(&format!(
             "**{} вхождений в {} файлах:**\n\n",
-            refs.len(), file_list.len()
+            total_count, hits.len()
         ));
-        for (file, count) in file_list.iter().take(20) {
-            text.push_str(&format!("- `{}` — {} вхождений\n", file, count));
+        for h in hits.iter().take(20) {
+            text.push_str(&format!("- `{}` — {} вхождений\n", h.file, h.count));
         }
-        if file_list.len() > 20 {
-            text.push_str(&format!("- *...ещё {} файлов*\n", file_list.len() - 20));
+        if hits.len() > 20 {
+            text.push_str(&format!("- *...ещё {} файлов*\n", hits.len() - 20));
         }
 
         text.push_str("\n**Примеры использования:**\n");
-        for r in refs.iter().take(5) {
-            let ext = r.file.rsplit('.').next().unwrap_or("bsl");
-            text.push_str(&format!(
-                "```{}\n// {}:{}\n{}\n```\n",
-                ext, r.file, r.line, r.snippet.trim()
-            ));
+        let mut example_count = 0;
+        'outer: for h in &hits {
+            for (line, snippet) in &h.examples {
+                let ext = h.file.rsplit('.').next().unwrap_or("bsl");
+                text.push_str(&format!(
+                    "```{}\n// {}:{}\n{}\n```\n",
+                    ext, h.file, line, snippet.trim()
+                ));
+                example_count += 1;
+                if example_count >= 5 {
+                    break 'outer;
+                }
+            }
         }
-        if refs.len() >= 500 {
+        if hits.len() >= MAX_FILES {
             text.push_str(
-                "\n*Поиск ограничен 500 результатами. Объект широко используется в конфигурации.*",
+                "\n*Поиск ограничен первыми 50 файлами. Объект широко используется в конфигурации.*",
             );
         }
     }

@@ -459,41 +459,105 @@ pub fn find_symbols(
     let conn = Connection::open(db_path).map_err(|e| format!("Ошибка БД: {}", e))?;
     let query_lower = query.to_lowercase();
 
-    let (sql, pattern) = if exact {
-        (
-            "SELECT name, kind, file, start_line, end_line, is_export \
-             FROM symbols WHERE name_lower = ?1 LIMIT ?2",
-            query_lower,
-        )
-    } else {
-        (
+    if exact {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, kind, file, start_line, end_line, is_export \
+                 FROM symbols WHERE name_lower = ?1 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        return collect_symbol_rows(&mut stmt, &query_lower, limit);
+    }
+
+    // Two-phase substring search to avoid slow full-table scans:
+    //
+    // Phase 1: prefix match  — `name_lower LIKE 'query%'`
+    //   Uses the idx_name_lower B-tree index → O(log n + k), fast on cold HDD.
+    //   Covers the common case: user types the start of a function name.
+    //
+    // Phase 2: mid-string match — `name_lower LIKE '%query%'`
+    //   Full table scan, O(n). Only runs when Phase 1 produced fewer than `limit` results,
+    //   and only fetches the remaining gap (deduplicating Phase 1 results).
+    //   On cold HDD this is slow (10-12s for 642K rows), but it's the minority case.
+
+    let prefix_pattern = format!("{}%", query_lower);
+    let mut stmt = conn
+        .prepare(
             "SELECT name, kind, file, start_line, end_line, is_export \
              FROM symbols WHERE name_lower LIKE ?1 LIMIT ?2",
-            format!("%{}%", query_lower),
         )
-    };
-
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![pattern, limit as i64], |row| {
-            Ok(SymbolMatch {
-                name: row.get(0)?,
-                kind: row.get(1)?,
-                file: row.get(2)?,
-                start_line: row.get::<_, u32>(3)?,
-                end_line: row.get::<_, u32>(4)?,
-                is_export: row.get::<_, i32>(5)? != 0,
-            })
-        })
         .map_err(|e| e.to_string())?;
+    let mut results = collect_symbol_rows(&mut stmt, &prefix_pattern, limit)?;
 
-    let mut results = Vec::new();
-    for row in rows {
-        if let Ok(r) = row {
-            results.push(r);
+    if results.len() < limit {
+        // Phase 2: find mid-string matches not already returned by prefix search
+        let mid_pattern = format!("%{}%", query_lower);
+        let remaining = limit - results.len();
+        let prefix_set: std::collections::HashSet<String> =
+            results.iter().map(|r| r.name.to_lowercase()).collect();
+        let mut stmt2 = conn
+            .prepare(
+                "SELECT name, kind, file, start_line, end_line, is_export \
+                 FROM symbols WHERE name_lower LIKE ?1 AND name_lower NOT LIKE ?2 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let extra = stmt2
+            .query_map(
+                params![mid_pattern, prefix_pattern, remaining as i64],
+                symbol_row_mapper,
+            )
+            .map_err(|e| e.to_string())?;
+        for row in extra.flatten() {
+            if !prefix_set.contains(&row.name.to_lowercase()) {
+                results.push(row);
+            }
         }
     }
+
     Ok(results)
+}
+
+fn symbol_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolMatch> {
+    Ok(SymbolMatch {
+        name: row.get(0)?,
+        kind: row.get(1)?,
+        file: row.get(2)?,
+        start_line: row.get::<_, u32>(3)?,
+        end_line: row.get::<_, u32>(4)?,
+        is_export: row.get::<_, i32>(5)? != 0,
+    })
+}
+
+fn collect_symbol_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    pattern: &str,
+    limit: usize,
+) -> Result<Vec<SymbolMatch>, String> {
+    let rows = stmt
+        .query_map(params![pattern, limit as i64], symbol_row_mapper)
+        .map_err(|e| e.to_string())?;
+    Ok(rows.flatten().collect())
+}
+
+/// Return distinct file paths that declare symbols matching `query_lower` (LIKE %query%).
+/// Used by index-guided search in `search_code`: instead of scanning all 25K files,
+/// the caller first greps only these "hot" files where the symbol is likely to appear.
+pub fn find_files_by_symbol_query(db_path: &Path, query_lower: &str, limit: usize) -> Vec<String> {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let pattern = format!("%{}%", query_lower);
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT file FROM symbols WHERE name_lower LIKE ?1 LIMIT ?2",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map(params![pattern, limit as i64], |row| row.get(0))
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
 }
 
 /// Find which symbol (if any) contains the given line in the given file.

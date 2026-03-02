@@ -53,14 +53,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [smartImportUrl, setSmartImportUrl] = useState('');
     const [searchPathHistory, setSearchPathHistory] = useState<string[]>(() => {
         try {
-            const stored: string[] = JSON.parse(localStorage.getItem('mcp_search_path_history') || '[]');
-            const currentPath = servers.find(s => s.id === BUILTIN_1C_SEARCH_ID)?.env?.['ONEC_CONFIG_PATH'];
-            if (currentPath && !stored.includes(currentPath)) {
-                const seeded = [currentPath, ...stored].slice(0, 10);
-                localStorage.setItem('mcp_search_path_history', JSON.stringify(seeded));
-                return seeded;
-            }
-            return stored;
+            return JSON.parse(localStorage.getItem('mcp_search_path_history') || '[]');
         } catch { return []; }
     });
     const [showSearchHistory, setShowSearchHistory] = useState(false);
@@ -500,7 +493,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                     index_message: 'Запуск индексации...'
                                                                 }
                                                             }));
-                                                            await invoke('call_mcp_tool', { serverId: server.id, toolName: 'reindex_1c_help', args: {} });
+                                                            await invoke('call_mcp_tool', { serverId: server.id, name: 'reindex_1c_help', arguments: {} });
                                                             // Принудительно запрашиваем обновленный статус сразу после вызова
                                                             setTimeout(fetchStatuses, 500);
                                                         } catch { /* UI обновится через статус */ }
@@ -639,6 +632,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                     <span className="text-xs font-mono text-zinc-300 truncate">{p}</span>
                                                                                 </button>
                                                                                 <button
+                                                                                    onMouseDown={(e) => e.preventDefault()}
                                                                                     onClick={(e) => { e.stopPropagation(); removeFromSearchHistory(p); }}
                                                                                     className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition shrink-0"
                                                                                     title="Удалить из истории"
@@ -697,7 +691,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                         index_message: 'Анализ изменённых файлов...'
                                                                                     }
                                                                                 }));
-                                                                                await invoke('call_mcp_tool', { serverId: server.id, toolName: 'sync_index', args: {} });
+                                                                                await invoke('call_mcp_tool', { serverId: server.id, name: 'sync_index', arguments: {} });
                                                                                 // Принудительно запрашиваем обновленный статус сразу после синхронизации (даем бэкенду полсекунды на парсинг STDERR)
                                                                                 setTimeout(fetchStatuses, 500);
                                                                             } catch { /* UI обновится сам */ }
