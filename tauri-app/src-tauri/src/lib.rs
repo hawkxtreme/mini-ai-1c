@@ -15,6 +15,7 @@ mod crypto;
 // mod hotkeys;
 mod llm_profiles;
 mod llm;
+mod job_guard;
 mod mcp_client;
 mod settings;
 

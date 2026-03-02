@@ -649,6 +649,12 @@ impl McpSession {
         let mut child = cmd.spawn()
             .map_err(|e| format!("Failed to spawn {}: {}", command, e))?;
 
+        // Assign child to Windows Job Object so it's killed when Mini AI 1C exits
+        // (even on crash). JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE does this at kernel level.
+        if let Some(pid) = child.id() {
+            crate::job_guard::assign_to_job(pid);
+        }
+
         let mut stdin = child.stdin.take().ok_or("Failed to open stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to open stdout")?;
         let stderr = child.stderr.take().ok_or("Failed to open stderr")?;
