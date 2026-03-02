@@ -29,7 +29,9 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
         }
     };
 
-    const hasContent = toolCall.arguments && toolCall.arguments.trim().length > 0;
+    const hasArgs = toolCall.arguments && toolCall.arguments.trim().length > 0;
+    const hasResult = toolCall.result && toolCall.result.trim().length > 0;
+    const hasContent = hasArgs || hasResult;
 
     // Design for Pending / Executing
     if (toolCall.status === 'pending' || toolCall.status === 'executing') {
@@ -43,6 +45,8 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
         );
     }
 
+    const statusLabel = toolCall.status === 'error' ? '(Ошибка)' : toolCall.status === 'rejected' ? '(Отклонено)' : '';
+
     // Design for Done / Error / Rejected
     return (
         <div className="flex flex-col gap-0.5 mb-2 w-full animate-in fade-in duration-300">
@@ -53,7 +57,7 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
             >
                 {getStatusIcon()}
                 <span className={`text-[11px] font-mono group-hover:text-zinc-300 transition-colors ${toolCall.status === 'error' ? 'text-red-400/80' : 'text-zinc-500'}`}>
-                    {toolCall.name} {toolCall.status === 'error' ? '(Ошибка)' : toolCall.status === 'rejected' ? '(Отклонено)' : toolCall.status === 'done' ? '(Завершено)' : ''}
+                    {toolCall.name}{statusLabel && ` ${statusLabel}`}
                 </span>
                 {hasContent && (
                     <ChevronRight size={14} className={`text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
@@ -61,10 +65,23 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
             </button>
 
             {isExpanded && hasContent && (
-                <div className="ml-6 mr-4 mt-1 p-2.5 rounded border border-zinc-800/50 bg-[#121214] overflow-x-auto shadow-inner">
-                    <pre className="font-mono text-[10px] text-zinc-400 whitespace-pre-wrap break-words">
-                        {formatJSON(toolCall.arguments)}
-                    </pre>
+                <div className="ml-6 mr-4 mt-1 flex flex-col gap-1.5">
+                    {hasArgs && (
+                        <div className="p-2.5 rounded border border-zinc-800/50 bg-[#121214] overflow-x-auto shadow-inner">
+                            <div className="text-[9px] text-zinc-600 uppercase tracking-wider mb-1 font-semibold">Аргументы</div>
+                            <pre className="font-mono text-[10px] text-zinc-400 whitespace-pre-wrap break-words">
+                                {formatJSON(toolCall.arguments)}
+                            </pre>
+                        </div>
+                    )}
+                    {hasResult && (
+                        <div className="p-2.5 rounded border border-zinc-800/50 bg-[#121214] overflow-x-auto shadow-inner">
+                            <div className="text-[9px] text-zinc-600 uppercase tracking-wider mb-1 font-semibold">Результат</div>
+                            <pre className="font-mono text-[10px] text-zinc-400 whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto">
+                                {formatJSON(toolCall.result!)}
+                            </pre>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
