@@ -348,6 +348,15 @@ export function ChatArea({
                     }
                 }
 
+                // Проверка для команд поиска по конфигурации
+                if (['search-1c', 'refs-1c', 'struct-1c'].includes(foundCmd.id)) {
+                    const searchServer = settings?.mcp_servers.find(s => s.id === 'builtin-1c-search');
+                    if (!searchServer || !searchServer.enabled) {
+                        alert('Для использования этой команды необходимо включить MCP сервер "1С:Поиск по конфигурации" в настройках и указать путь к выгрузке конфигурации.');
+                        return;
+                    }
+                }
+
                 let expanded = foundCmd.template;
                 const diagStringsText = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`).join('\n');
                 expanded = expanded.replace('{diagnostics}', diagStringsText || 'Ошибок не обнаружено');

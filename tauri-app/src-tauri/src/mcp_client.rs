@@ -346,7 +346,10 @@ impl McpClient {
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
-        match tokio::time::timeout(Duration::from_secs(60), self.session.list_tools()).await {
+        // builtin-1c-search processes requests sequentially; a heavy find_references
+        // may block the queue for tens of seconds, so match the call_tool timeout
+        let timeout_secs = if self.session.config.id == "builtin-1c-search" { 120 } else { 60 };
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.list_tools()).await {
             Ok(res) => res,
             Err(_) => Err("Timeout listing tools".to_string()),
         }
@@ -760,28 +763,54 @@ impl McpSession {
                                  }
                              }
                              // Парсим SEARCH_STATUS строки от 1С:Поиск (mcp-1c-search)
+                             // Format: SEARCH_STATUS:{state}:{sym_count}:{db_size_mb}:{built_at_unix}
                              if is_search_server && line.starts_with("SEARCH_STATUS:") {
-                                 let parts: Vec<&str> = line.trim_start_matches("SEARCH_STATUS:").splitn(3, ':').collect();
+                                 let parts: Vec<&str> = line.trim_start_matches("SEARCH_STATUS:").splitn(5, ':').collect();
                                  if !parts.is_empty() {
                                      let state = parts[0];
                                      *help_status_writer.lock().await = state.to_string();
                                      match state {
                                          "ready" => {
                                              *help_progress_writer.lock().await = 100;
-                                             let count = parts.get(1).unwrap_or(&"");
-                                             let size_mb = parts.get(2).unwrap_or(&"");
-                                             
-                                             *help_message_writer.lock().await =
-                                                 if count.is_empty() { "Готово".to_string() }
-                                                 else if size_mb.is_empty() { format!("Готово: {} файлов", count) }
-                                                 else { format!("Готово: {} файлов ({} МБ)", count, size_mb) };
+                                             let sym_count = parts.get(1).unwrap_or(&"").trim();
+                                             let db_size   = parts.get(2).unwrap_or(&"").trim();
+                                             let built_at_unix: u64 = parts.get(3).unwrap_or(&"0").trim().parse().unwrap_or(0);
+
+                                             // Format timestamp as ДД.ММ.ГГГГ ЧЧ:ММ (UTC+3 Moscow)
+                                             let date_str = if built_at_unix > 0 {
+                                                 let msk = built_at_unix as i64 + 3 * 3600;
+                                                 let days = msk / 86400;
+                                                 let h = (msk % 86400) / 3600;
+                                                 let m = (msk % 3600) / 60;
+                                                 let z = days + 719468;
+                                                 let era = if z >= 0 { z } else { z - 146096 } / 146097;
+                                                 let doe = z - era * 146097;
+                                                 let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+                                                 let y = yoe + era * 400;
+                                                 let doy = doe - (365*yoe + yoe/4 - yoe/100);
+                                                 let mp = (5*doy + 2) / 153;
+                                                 let d = doy - (153*mp + 2)/5 + 1;
+                                                 let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+                                                 let y = if mo <= 2 { y + 1 } else { y };
+                                                 format!("{:02}.{:02}.{} {:02}:{:02}", d, mo, y, h, m)
+                                             } else {
+                                                 String::new()
+                                             };
+
+                                             *help_message_writer.lock().await = match (sym_count, db_size, date_str.as_str()) {
+                                                 ("", _, _) | ("0", _, _) => "Готово".to_string(),
+                                                 (c, s, "") if s.is_empty() || s == "0.00" => format!("{} символов", c),
+                                                 (c, s, dt) if dt.is_empty() => format!("{} символов • {} МБ", c, s),
+                                                 (c, s, dt) if s.is_empty() || s == "0.00" => format!("{} символов • {}", c, dt),
+                                                 (c, s, dt) => format!("{} символов • {} МБ • {}", c, s, dt),
+                                             };
                                          }
                                          "unavailable" => {
                                              *help_progress_writer.lock().await = 0;
                                              let reason = parts.get(1).unwrap_or(&"Путь не задан");
                                              *help_message_writer.lock().await = reason.to_string();
                                          }
-                                         "indexing" => {
+                                         "indexing" | "syncing" => {
                                              if let Some(pct_str) = parts.get(1) {
                                                  if let Ok(pct) = pct_str.parse::<u32>() {
                                                      *help_progress_writer.lock().await = pct;
@@ -870,7 +899,9 @@ impl McpSession {
                 crate::app_log!("[MCP][{}] >>> Sending: {}", self.config.id, serde_json::to_string(&req).unwrap_or_default());
                 tx.send(req).await.map_err(|_| "Failed to send request to MCP process".to_string())?;
 
-                match tokio::time::timeout(Duration::from_secs(30), auth_rx).await {
+                // builtin-1c-search may do ripgrep over large 5GB+ configs → need longer timeout
+                let timeout_secs = if self.config.id == "builtin-1c-search" { 120 } else { 30 };
+                match tokio::time::timeout(Duration::from_secs(timeout_secs), auth_rx).await {
                     Ok(Ok(result)) => {
                         crate::app_log!("[MCP][{}] <<< Received result for id {}", self.config.id, id);
                         result

@@ -17,6 +17,7 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 tree-sitter = "0.25"
 tree-sitter-bsl = { git = "https://github.com/alkoleft/tree-sitter-bsl", tag = "v0.1.4" }
 dirs = "5.0.1"
+rayon = "1"
 
 
 [profile.release]

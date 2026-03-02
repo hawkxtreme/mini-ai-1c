@@ -10,9 +10,16 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
-/// Search for `query` in all .bsl and .xml files under `root`.
+/// Search for `query` in .bsl and .xml files under `root` (or `root/sub_path` if given).
 /// `use_regex` — treat query as regex; otherwise literal case-insensitive.
-pub fn search_code(root: &Path, query: &str, use_regex: bool, limit: usize) -> Vec<SearchResult> {
+/// `sub_path` — optional relative sub-directory to restrict the search scope.
+pub fn search_code(
+    root: &Path,
+    sub_path: Option<&Path>,
+    query: &str,
+    use_regex: bool,
+    limit: usize,
+) -> Vec<SearchResult> {
     let pattern = if use_regex {
         match Regex::new(query) {
             Ok(r) => r,
@@ -32,9 +39,21 @@ pub fn search_code(root: &Path, query: &str, use_regex: bool, limit: usize) -> V
         }
     };
 
+    let search_root = match sub_path {
+        Some(sub) => {
+            let p = root.join(sub);
+            if !p.exists() {
+                eprintln!("[1c-search] Scope path not found: {}", p.display());
+                return vec![];
+            }
+            p
+        }
+        None => root.to_path_buf(),
+    };
+
     let mut results = Vec::new();
 
-    let walker = WalkBuilder::new(root)
+    let walker = WalkBuilder::new(&search_root)
         .standard_filters(true) // respects .gitignore, skips hidden
         .follow_links(false)
         .build();

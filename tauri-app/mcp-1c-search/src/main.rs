@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde_json::{json, Value};
 
@@ -6,8 +7,14 @@ mod search;
 mod tools;
 mod parser;
 mod index;
+mod metadata;
 
-use crate::search::count_files_and_size;
+/// Returns SQLite DB file size in MB (0.0 if not found).
+pub fn db_size_mb(path: &std::path::Path) -> f64 {
+    std::fs::metadata(path)
+        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+        .unwrap_or(0.0)
+}
 
 #[tokio::main]
 async fn main() {
@@ -27,11 +34,14 @@ async fn main() {
     let db_path: Option<PathBuf> = config_path.as_ref().map(|p| index::get_db_path(p));
 
     // Report status via stderr — parsed by mcp_client.rs
-    let (file_count, size_mb) = match &config_path {
-        Some(path) => {
-            let (count, size_mb) = count_files_and_size(path);
-            eprintln!("SEARCH_STATUS:ready:{}:{:.2}", count, size_mb);
-            (count, size_mb)
+    // IMPORTANT: Do NOT call count_files_and_size() here synchronously.
+    // On large configs (5GB+, 100k+ files) it blocks the async main for 30+ seconds,
+    // preventing the JSON-RPC event loop from starting and causing tools/list timeouts.
+    match &config_path {
+        Some(_) => {
+            // Emit preliminary ready immediately so the event loop can start.
+            // Background task below will emit an updated status with actual counts.
+            eprintln!("SEARCH_STATUS:ready:0:0.00");
         }
         None => {
             if config_path_str.is_empty() {
@@ -39,32 +49,71 @@ async fn main() {
             } else {
                 eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", config_path_str);
             }
-            (0, 0.0)
         }
-    };
+    }
 
-    // Spawn background symbol indexing if config path is set and index is not ready
-    if let (Some(root), Some(db)) = (&config_path, &db_path) {
-        if !index::index_exists(db) {
-            let root_clone = root.clone();
-            let db_clone = db.clone();
-            // Detached background task — JoinHandle intentionally dropped
-            let _ = tokio::task::spawn_blocking(move || {
-                match index::build_index(&root_clone, &db_clone) {
-                    Ok(_) => {
-                        // Re-emit ready after indexing to update UI status
-                        eprintln!("SEARCH_STATUS:ready:{}:{:.2}", file_count, size_mb);
+    // Background: build or sync symbol index, then emit accurate status.
+    // Runs in spawn_blocking so it doesn't block the async event loop.
+    if let (Some(root), Some(db)) = (config_path.clone(), db_path.clone()) {
+        let db_for_index = db.clone();
+        // Detached background task — JoinHandle intentionally dropped
+        let _ = tokio::task::spawn_blocking(move || {
+            // Ensure DB schema exists before anything else
+            if let Err(e) = index::ensure_schema(&db_for_index) {
+                eprintln!("[1c-search] Schema init failed: {}", e);
+            }
+
+            // Always build metadata if missing (Configuration.xml may exist even without BSL files)
+            if !index::metadata_exists(&db_for_index) {
+                match metadata::build_metadata(&root, &db_for_index) {
+                    Ok(n) => eprintln!("[1c-search] Metadata indexed: {} objects", n),
+                    Err(e) => eprintln!("[1c-search] Metadata skipped: {}", e),
+                }
+            }
+
+            if index::index_exists(&db_for_index) {
+                // ─── Incremental sync (mtime-based) ─────────────────────────
+                eprintln!("[1c-search] Index found — running incremental sync...");
+                match index::sync_index(&root, &db_for_index) {
+                    Ok(stats) => {
+                        let size = db_size_mb(&db_for_index);
+                        let built_at = index::get_built_at(&db_for_index).unwrap_or(0);
+                        eprintln!(
+                            "[1c-search] Sync done: +{} ~{} -{} total={}",
+                            stats.added, stats.updated, stats.removed, stats.total_symbols
+                        );
+                        eprintln!(
+                            "SEARCH_STATUS:ready:{}:{:.2}:{}",
+                            stats.total_symbols, size, built_at
+                        );
+                    }
+                    Err(e) => eprintln!("[1c-search] Sync error: {}", e),
+                }
+            } else {
+                // ─── Full build ─────────────────────────────────────────────
+                eprintln!("[1c-search] No index found — starting full build...");
+                match index::build_index(&root, &db_for_index) {
+                    Ok(sym_count) => {
+                        let size = db_size_mb(&db_for_index);
+                        let built_at = index::get_built_at(&db_for_index).unwrap_or(0);
+                        eprintln!(
+                            "SEARCH_STATUS:ready:{}:{:.2}:{}",
+                            sym_count, size, built_at
+                        );
                     }
                     Err(e) => {
                         eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации: {}", e);
                     }
                 }
-            });
-        }
+            }
+        });
     }
 
     let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    let stdout = tokio::io::stdout();
+    // Wrap stdout in Arc<Mutex<>> so concurrent tasks can write responses safely
+    let stdout = Arc::new(tokio::sync::Mutex::new(stdout));
+
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
 
@@ -92,31 +141,41 @@ async fn main() {
                     None => continue,
                 };
 
-                let method = request["method"].as_str().unwrap_or("");
+                let method = request["method"].as_str().unwrap_or("").to_string();
                 let params = request.get("params").cloned().unwrap_or(json!({}));
 
-                let result = handle_method(method, &params, &config_path, &db_path).await;
+                // Spawn each request as an independent async task so that
+                // heavy tools (find_references, search_code on large configs)
+                // don't block subsequent tools/list or initialize responses.
+                let config_path_task = config_path.clone();
+                let db_path_task = db_path.clone();
+                let stdout_task = Arc::clone(&stdout);
 
-                let response = match result {
-                    Ok(res) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": res
-                    }),
-                    Err(msg) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32603,
-                            "message": msg
-                        }
-                    }),
-                };
+                tokio::spawn(async move {
+                    let result = handle_method(&method, &params, &config_path_task, &db_path_task).await;
 
-                let resp_str = serde_json::to_string(&response).unwrap_or_default();
-                let _ = stdout.write_all(resp_str.as_bytes()).await;
-                let _ = stdout.write_all(b"\n").await;
-                let _ = stdout.flush().await;
+                    let response = match result {
+                        Ok(res) => json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": res
+                        }),
+                        Err(msg) => json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32603,
+                                "message": msg
+                            }
+                        }),
+                    };
+
+                    let resp_str = serde_json::to_string(&response).unwrap_or_default();
+                    let mut out = stdout_task.lock().await;
+                    let _ = out.write_all(resp_str.as_bytes()).await;
+                    let _ = out.write_all(b"\n").await;
+                    let _ = out.flush().await;
+                });
             }
             Err(e) => {
                 eprintln!("[1c-search] Read error: {}", e);

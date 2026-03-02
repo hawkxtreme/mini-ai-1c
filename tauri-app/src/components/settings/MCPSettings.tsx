@@ -216,17 +216,17 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         }
     }, [servers, onUpdate]);
 
-    useEffect(() => {
-        const fetchStatuses = async () => {
-            try {
-                const result = await invoke<McpServerStatus[]>('get_mcp_server_statuses');
-                const statusMap = result.reduce((acc, s) => ({ ...acc, [s.id]: s }), {} as Record<string, McpServerStatus>);
-                setStatuses(statusMap);
-            } catch (e) {
-                console.error("Failed to fetch statuses", e);
-            }
-        };
+    const fetchStatuses = async () => {
+        try {
+            const result = await invoke<McpServerStatus[]>('get_mcp_server_statuses');
+            const statusMap = result.reduce((acc, s) => ({ ...acc, [s.id]: s }), {} as Record<string, McpServerStatus>);
+            setStatuses(statusMap);
+        } catch (e) {
+            console.error("Failed to fetch statuses", e);
+        }
+    };
 
+    useEffect(() => {
         fetchStatuses();
         const interval = setInterval(fetchStatuses, 5000);
         return () => clearInterval(interval);
@@ -491,7 +491,18 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                     }
                                                     const handleReindex = async () => {
                                                         try {
+                                                            setStatuses(prev => ({
+                                                                ...prev,
+                                                                [server.id]: {
+                                                                    ...prev[server.id],
+                                                                    help_status: 'indexing',
+                                                                    index_progress: 0,
+                                                                    index_message: 'Запуск индексации...'
+                                                                }
+                                                            }));
                                                             await invoke('call_mcp_tool', { serverId: server.id, toolName: 'reindex_1c_help', args: {} });
+                                                            // Принудительно запрашиваем обновленный статус сразу после вызова
+                                                            setTimeout(fetchStatuses, 500);
                                                         } catch { /* UI обновится через статус */ }
                                                     };
                                                     if (helpSt === 'unavailable') {
@@ -616,7 +627,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                 {showSearchHistory && searchPathHistory.length > 0 && (
                                                                     <div className="mt-1 rounded-lg overflow-hidden border border-zinc-700/50">
                                                                         {searchPathHistory.map((p) => (
-                                                                            <div key={p} className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-700/50 group">
+                                                                            <div key={p} className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-700/50">
                                                                                 <button
                                                                                     onClick={() => selectFromHistory(p)}
                                                                                     className="flex-1 flex items-center gap-1.5 text-left min-w-0"
@@ -629,10 +640,10 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                 </button>
                                                                                 <button
                                                                                     onClick={(e) => { e.stopPropagation(); removeFromSearchHistory(p); }}
-                                                                                    className="opacity-0 group-hover:opacity-100 p-0.5 text-zinc-500 hover:text-red-400 transition shrink-0"
+                                                                                    className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition shrink-0"
                                                                                     title="Удалить из истории"
                                                                                 >
-                                                                                    <X className="w-3 h-3" />
+                                                                                    <Trash2 className="w-3 h-3" />
                                                                                 </button>
                                                                             </div>
                                                                         ))}
@@ -648,12 +659,12 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                         <p className="text-[10px] text-zinc-500 mt-1">Укажите путь к директории выгрузки конфигурации 1С выше.</p>
                                                                     </div>
                                                                 </div>
-                                                            ) : searchSt === 'indexing' ? (
+                                                            ) : (searchSt === 'indexing' || searchSt === 'syncing') ? (
                                                                 <div className="space-y-2">
                                                                     <div className="flex items-center justify-between text-[10px] text-zinc-400">
                                                                         <span className="flex items-center gap-1">
                                                                             <Activity className="w-3 h-3 animate-pulse text-blue-400" />
-                                                                            Построение символьного индекса...
+                                                                            {searchSt === 'syncing' ? 'Синхронизация индекса...' : 'Построение символьного индекса...'}
                                                                         </span>
                                                                         <span className="font-mono text-blue-400">{status?.index_progress || 0}%</span>
                                                                     </div>
@@ -663,15 +674,39 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                             style={{ width: `${Math.max(2, status?.index_progress || 0)}%` }}
                                                                         />
                                                                     </div>
-                                                                    {status?.index_message && <p className="text-[10px] text-zinc-500 truncate">{status.index_message}</p>}
+                                                                    {status?.index_message && <p className="text-[10px] text-zinc-500 truncate" title={status.index_message}>{status.index_message}</p>}
                                                                 </div>
                                                             ) : searchSt === 'ready' ? (
-                                                                <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center gap-3">
-                                                                    <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
-                                                                    <div>
-                                                                        <p className="text-xs text-green-300 font-medium">Поиск готов к работе</p>
-                                                                        <p className="text-[10px] text-zinc-500 mt-0.5 truncate">{status?.index_message || configPath}</p>
+                                                                <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center justify-between gap-3">
+                                                                    <div className="flex items-center gap-3 min-w-0">
+                                                                        <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
+                                                                        <div className="min-w-0">
+                                                                            <p className="text-xs text-green-300 font-medium">Поиск готов к работе</p>
+                                                                            <p className="text-[10px] text-zinc-500 mt-0.5 truncate" title={status?.index_message}>{status?.index_message || configPath}</p>
+                                                                        </div>
                                                                     </div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            try {
+                                                                                setStatuses(prev => ({
+                                                                                    ...prev,
+                                                                                    [server.id]: {
+                                                                                        ...prev[server.id],
+                                                                                        help_status: 'syncing',
+                                                                                        index_progress: 0,
+                                                                                        index_message: 'Анализ изменённых файлов...'
+                                                                                    }
+                                                                                }));
+                                                                                await invoke('call_mcp_tool', { serverId: server.id, toolName: 'sync_index', args: {} });
+                                                                                // Принудительно запрашиваем обновленный статус сразу после синхронизации (даем бэкенду полсекунды на парсинг STDERR)
+                                                                                setTimeout(fetchStatuses, 500);
+                                                                            } catch { /* UI обновится сам */ }
+                                                                        }}
+                                                                        className="flex items-center gap-1 px-2 py-1 bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-400 hover:text-zinc-200 rounded text-[10px] font-medium transition shrink-0"
+                                                                        title="Обновить индекс (по дате изменения файлов)"
+                                                                    >
+                                                                        <Activity className="w-3 h-3" /> Обновить
+                                                                    </button>
                                                                 </div>
                                                             ) : (
                                                                 <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
