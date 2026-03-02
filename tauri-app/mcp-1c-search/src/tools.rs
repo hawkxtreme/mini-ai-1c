@@ -1,7 +1,68 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use crate::search;
 use crate::index;
+
+/// Maps a 1C object type to its plural folder name in the config dump.
+fn object_type_to_folder(obj_type: &str) -> Option<&'static str> {
+    match obj_type {
+        "Catalog"                    => Some("Catalogs"),
+        "Document"                   => Some("Documents"),
+        "CommonModule"               => Some("CommonModules"),
+        "InformationRegister"        => Some("InformationRegisters"),
+        "AccumulationRegister"       => Some("AccumulationRegisters"),
+        "AccountingRegister"         => Some("AccountingRegisters"),
+        "CalculationRegister"        => Some("CalculationRegisters"),
+        "ExchangePlan"               => Some("ExchangePlans"),
+        "BusinessProcess"            => Some("BusinessProcesses"),
+        "Task"                       => Some("Tasks"),
+        "ChartOfCharacteristicTypes" => Some("ChartsOfCharacteristicTypes"),
+        "ChartOfAccounts"            => Some("ChartsOfAccounts"),
+        "ChartOfCalculationTypes"    => Some("ChartsOfCalculationTypes"),
+        "DataProcessor"              => Some("DataProcessors"),
+        "Report"                     => Some("Reports"),
+        "Enum"                       => Some("Enums"),
+        "Constant"                   => Some("Constants"),
+        "DocumentJournal"            => Some("DocumentJournals"),
+        "FilterCriterion"            => Some("FilterCriteria"),
+        "ScheduledJob"               => Some("ScheduledJobs"),
+        "WebService"                 => Some("WebServices"),
+        "HTTPService"                => Some("HTTPServices"),
+        "CommonForm"                 => Some("CommonForms"),
+        "CommonTemplate"             => Some("CommonTemplates"),
+        "CommonAttribute"            => Some("CommonAttributes"),
+        "CommonCommand"              => Some("CommonCommands"),
+        "Role"                       => Some("Roles"),
+        "Subsystem"                  => Some("Subsystems"),
+        "Language"                   => Some("Languages"),
+        _ => None,
+    }
+}
+
+/// Resolve a `scope` string to a relative sub-path within the config root.
+///
+/// Accepts two forms:
+///   1. `"CommonModule.МодульИмя"` → `CommonModules/МодульИмя`
+///   2. `"CommonModules/МодульИмя"` → `CommonModules/МодульИмя` (raw path, used as-is)
+///
+/// Returns `None` if the type is unknown.
+fn resolve_scope(scope: &str) -> Option<PathBuf> {
+    // Form 1: "Type.Name" — contains exactly one dot and first part is a known type
+    if let Some(dot) = scope.find('.') {
+        let type_part = &scope[..dot];
+        let name_part = &scope[dot + 1..];
+        if !name_part.is_empty() {
+            if let Some(folder) = object_type_to_folder(type_part) {
+                return Some(Path::new(folder).join(name_part));
+            }
+        }
+    }
+    // Form 2: raw relative path (forward or back slashes)
+    if !scope.is_empty() {
+        return Some(PathBuf::from(scope.replace('\\', "/")));
+    }
+    None
+}
 
 pub fn list_tools() -> Vec<Value> {
     vec![
@@ -24,6 +85,10 @@ pub fn list_tools() -> Vec<Value> {
                         "type": "boolean",
                         "description": "Использовать регулярное выражение (по умолчанию false — регистронезависимый литеральный поиск)",
                         "default": false
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Ограничить поиск конкретным объектом 1С. Форматы: 'CommonModule.МодульИмя', 'Catalog.СправочникИмя', 'Document.ДокументИмя' и т.д. Можно также передать относительный путь: 'CommonModules/МодульИмя'. Если не указан — поиск по всей конфигурации."
                     }
                 },
                 "required": ["query"]
@@ -94,6 +159,83 @@ pub fn list_tools() -> Vec<Value> {
                 "required": ["file", "line"]
             }
         }),
+        json!({
+            "name": "list_objects",
+            "description": "Список объектов конфигурации 1С (справочники, документы, общие модули и т.д.). Требует предварительной индексации метаданных.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "Фильтр по типу объекта: Catalog, Document, CommonModule, InformationRegister, AccumulationRegister, Report, DataProcessor и т.д. Если не указан — возвращает все типы."
+                    },
+                    "name_filter": {
+                        "type": "string",
+                        "description": "Фильтр по части имени объекта (регистронезависимый). Например: 'файл' найдёт РаботаСФайлами, ФайлыСервер и т.д."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Максимум результатов (по умолчанию 100, максимум 500)",
+                        "default": 100
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": "get_object_structure",
+            "description": "Получить полную структуру объекта конфигурации 1С: реквизиты, табличные части, формы, команды, модули.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": {
+                        "type": "string",
+                        "description": "Имя объекта или полный идентификатор (например: РеализацияТоваров или Document.РеализацияТоваров)"
+                    }
+                },
+                "required": ["object"]
+            }
+        }),
+        json!({
+            "name": "find_references",
+            "description": "Найти все вхождения символа (процедуры, функции, переменной) в коде конфигурации. Показывает где и как используется символ.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Имя символа для поиска"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Максимум результатов (по умолчанию 50)",
+                        "default": 50
+                    }
+                },
+                "required": ["symbol"]
+            }
+        }),
+        json!({
+            "name": "impact_analysis",
+            "description": "Анализ влияния: показывает какие модули и файлы используют данный объект или символ. Помогает понять последствия изменений.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": {
+                        "type": "string",
+                        "description": "Имя объекта или символа для анализа влияния (например: РеализацияТоваров, НачислитьНДС)"
+                    }
+                },
+                "required": ["object"]
+            }
+        }),
+        json!({
+            "name": "sync_index",
+            "description": "Инкрементальная синхронизация поискового индекса. Проверяет дату изменения файлов и перепарсит только изменённые, новые или удалённые BSL файлы. Запускать после изменений в конфигурации (коммит, смена ветки, редактирование). Обычно занимает секунды даже для больших конфигураций.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
     ]
 }
 
@@ -108,6 +250,11 @@ pub async fn call_tool(
         "get_file_context" => handle_get_file_context(args, config_path).await,
         "find_symbol" => handle_find_symbol(args, db_path).await,
         "get_symbol_context" => handle_get_symbol_context(args, config_path, db_path).await,
+        "list_objects" => handle_list_objects(args, db_path).await,
+        "get_object_structure" => handle_get_object_structure(args, db_path).await,
+        "find_references" => handle_find_references(args, config_path).await,
+        "impact_analysis" => handle_impact_analysis(args, config_path, db_path).await,
+        "sync_index" => handle_sync_index(config_path, db_path).await,
         _ => Err(format!("Неизвестный инструмент: {}", name)),
     }
 }
@@ -125,26 +272,53 @@ async fn handle_search_code(args: &Value, config_path: &Option<PathBuf>) -> Resu
     let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
     let use_regex = args["regex"].as_bool().unwrap_or(false);
 
+    // Resolve scope → relative sub-path within config root
+    let sub_path: Option<PathBuf> = args["scope"].as_str().and_then(|s| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            match resolve_scope(s) {
+                Some(p) => Some(p),
+                None => {
+                    eprintln!("[1c-search] Unknown scope '{}', searching full config", s);
+                    None
+                }
+            }
+        }
+    });
+
     let root_clone = root.clone();
     let query_owned = query.to_string();
 
     let start_time = std::time::Instant::now();
 
     let results = tokio::task::spawn_blocking(move || {
-        search::search_code(&root_clone, &query_owned, use_regex, limit)
+        search::search_code(&root_clone, sub_path.as_deref(), &query_owned, use_regex, limit)
     })
     .await
     .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
 
     let elapsed = start_time.elapsed().as_millis();
 
+    let scope_label = args["scope"].as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" в «{}»", s))
+        .unwrap_or_default();
+
     if results.is_empty() {
         return Ok(json!({
-            "content": [{ "type": "text", "text": format!("По запросу \"{}\" ничего не найдено. (Поиск занял: {}мс)", query, elapsed) }]
+            "content": [{ "type": "text", "text": format!(
+                "По запросу \"{}\"{}  ничего не найдено. ({}мс)",
+                query, scope_label, elapsed
+            )}]
         }));
     }
 
-    let mut text = format!("Найдено {} результат(ов) по запросу \"{}\" (Поиск занял: {}мс):\n\n", results.len(), query, elapsed);
+    let mut text = format!(
+        "Найдено {} результат(ов) по запросу \"{}\"{} ({}мс):\n\n",
+        results.len(), query, scope_label, elapsed
+    );
     for r in &results {
         let ext = r.file.rsplit('.').next().unwrap_or("bsl");
         text.push_str(&format!(
@@ -252,37 +426,394 @@ async fn handle_get_symbol_context(
     let result = tokio::task::spawn_blocking(move || {
         // Normalize path separators to forward slash (stored in index as /)
         let file_normalized = file_owned.replace('\\', "/");
-
-        // Find enclosing symbol at given line
-        let sym = index::find_symbol_at_line(&db_clone, &file_normalized, line)
-            .ok_or_else(|| format!(
-                "Символ не найден в строке {} файла {}. Используйте find_symbol для поиска по имени.",
-                line, file_normalized
-            ))?;
-
-        // Read the source file
         let file_path = root_clone.join(file_normalized.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| format!("Ошибка чтения файла {}: {}", sym.file, e))?;
 
-        let lines: Vec<&str> = content.lines().collect();
-        let start = (sym.start_line as usize).saturating_sub(1);
-        let end = (sym.end_line as usize).min(lines.len());
+        // Try to find the enclosing symbol in the index
+        if let Some(sym) = index::find_symbol_at_line(&db_clone, &file_normalized, line) {
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| format!("Ошибка чтения файла {}: {}", sym.file, e))?;
 
-        if start >= lines.len() {
-            return Err(format!("Строка {} выходит за пределы файла (всего {} строк)", sym.start_line, lines.len()));
+            let lines: Vec<&str> = content.lines().collect();
+            let start = (sym.start_line as usize).saturating_sub(1);
+            let end = (sym.end_line as usize).min(lines.len());
+
+            if start < lines.len() {
+                let body = lines[start..end].join("\n");
+                let export_mark = if sym.is_export { " Экспорт" } else { "" };
+                return Ok::<String, String>(format!(
+                    "**{}** ({}{}) — `{}` строки {}-{}\n\n```bsl\n{}\n```",
+                    sym.name, sym.kind, export_mark, sym.file, sym.start_line, sym.end_line, body
+                ));
+            }
         }
 
-        let body = lines[start..end].join("\n");
-        let export_mark = if sym.is_export { " Экспорт" } else { "" };
-
-        Ok::<String, String>(format!(
-            "**{}** ({}{}) — `{}` строки {}-{}\n\n```bsl\n{}\n```",
-            sym.name, sym.kind, export_mark, sym.file, sym.start_line, sym.end_line, body
-        ))
+        // Fallback: symbol not found in index (top-level code, form modules, etc.)
+        // Return a context window around the requested line
+        match search::get_file_context(&file_path, line as usize, 40) {
+            Ok(ctx) => Ok(format!(
+                "⚠️ Символ в индексе не найден — возможно, это код вне процедуры/функции.\nПоказан контекст файла:\n\n```bsl\n{}\n```",
+                ctx
+            )),
+            Err(e) => Err(format!(
+                "Символ не найден в строке {} файла {}, и файл не читается: {}",
+                line, file_normalized, e
+            )),
+        }
     })
     .await
     .map_err(|e| format!("Ошибка выполнения: {}", e))??;
 
     Ok(json!({ "content": [{ "type": "text", "text": result }] }))
+}
+
+async fn handle_list_objects(args: &Value, db_path: &Option<PathBuf>) -> Result<Value, String> {
+    let db = db_path
+        .as_ref()
+        .ok_or("Индекс не готов. Укажите путь к конфигурации в настройках MCP сервера.")?;
+
+    let type_filter = args["type"].as_str().map(|s| s.to_string());
+    let name_filter = args["name_filter"].as_str().map(|s| s.to_string());
+    let limit = args["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
+    let db_clone = db.clone();
+
+    let objects = tokio::task::spawn_blocking(move || {
+        index::list_objects(&db_clone, type_filter.as_deref(), name_filter.as_deref(), limit)
+    })
+    .await
+    .map_err(|e| format!("Ошибка выполнения: {}", e))??;
+
+    if objects.is_empty() {
+        let hint = if args["type"].is_string() {
+            "Проверьте правильность типа объекта (Catalog, Document, CommonModule и т.д.) или запустите переиндексацию."
+        } else {
+            "Метаданные не проиндексированы. Убедитесь, что в директории конфигурации есть Configuration.xml и индексация завершена."
+        };
+        return Ok(json!({
+            "content": [{ "type": "text", "text": format!("Объекты не найдены. {}", hint) }]
+        }));
+    }
+
+    let mut by_type: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for obj in &objects {
+        by_type.entry(obj.obj_type.clone()).or_default().push(obj.name.clone());
+    }
+
+    let mut text = format!("**Объекты конфигурации** ({} шт.):\n\n", objects.len());
+    for (obj_type, names) in &by_type {
+        text.push_str(&format!("### {} ({})\n", obj_type, names.len()));
+        for name in names {
+            text.push_str(&format!("- {}\n", name));
+        }
+        text.push('\n');
+    }
+    if objects.len() >= limit {
+        text.push_str(&format!(
+            "\n*Показано {} объектов. Используйте параметр `type` для фильтрации.*",
+            limit
+        ));
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+async fn handle_get_object_structure(
+    args: &Value,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let db = db_path
+        .as_ref()
+        .ok_or("Индекс не готов. Укажите путь к конфигурации в настройках MCP сервера.")?;
+
+    let object_name = args["object"].as_str().ok_or("Параметр 'object' обязателен")?;
+    if object_name.trim().is_empty() {
+        return Err("Параметр 'object' не может быть пустым".to_string());
+    }
+
+    let db_clone = db.clone();
+    let name_owned = object_name.to_string();
+
+    let details = tokio::task::spawn_blocking(move || index::get_object_details(&db_clone, &name_owned))
+        .await
+        .map_err(|e| format!("Ошибка выполнения: {}", e))?;
+
+    let d = match details {
+        Some(d) => d,
+        None => {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Объект \"{}\" не найден в индексе метаданных.\n\
+                         Попробуйте list_objects для просмотра доступных объектов.",
+                        object_name
+                    )
+                }]
+            }))
+        }
+    };
+
+    let mut text = format!("## {}.{}\n\n", d.obj_type, d.name);
+
+    if !d.attributes.is_empty() {
+        text.push_str(&format!("### Реквизиты ({})\n", d.attributes.len()));
+        for attr in &d.attributes {
+            text.push_str(&format!("- {}\n", attr));
+        }
+        text.push('\n');
+    }
+    if !d.tabular_sections.is_empty() {
+        text.push_str(&format!("### Табличные части ({})\n", d.tabular_sections.len()));
+        for (section, attrs) in &d.tabular_sections {
+            if attrs.is_empty() {
+                text.push_str(&format!("- **{}**\n", section));
+            } else {
+                text.push_str(&format!("- **{}**: {}\n", section, attrs.join(", ")));
+            }
+        }
+        text.push('\n');
+    }
+    if !d.forms.is_empty() {
+        text.push_str(&format!("### Формы ({})\n", d.forms.len()));
+        for form in &d.forms {
+            text.push_str(&format!("- {}\n", form));
+        }
+        text.push('\n');
+    }
+    if !d.commands.is_empty() {
+        text.push_str(&format!("### Команды ({})\n", d.commands.len()));
+        for cmd in &d.commands {
+            text.push_str(&format!("- {}\n", cmd));
+        }
+        text.push('\n');
+    }
+    if !d.modules.is_empty() {
+        text.push_str(&format!("### Модули ({})\n", d.modules.len()));
+        for m in &d.modules {
+            text.push_str(&format!("- {}\n", m));
+        }
+        text.push('\n');
+    }
+    if d.attributes.is_empty()
+        && d.tabular_sections.is_empty()
+        && d.forms.is_empty()
+        && d.commands.is_empty()
+        && d.modules.is_empty()
+    {
+        text.push_str(
+            "*Детальная структура недоступна — ConfigDumpInfo.xml не проиндексирован.*\n\
+             Используйте search_code для поиска кода этого объекта.\n",
+        );
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+async fn handle_find_references(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let root = config_path
+        .as_ref()
+        .ok_or("Конфигурация не настроена. Укажите путь в настройках MCP сервера.")?;
+
+    let symbol = args["symbol"].as_str().ok_or("Параметр 'symbol' обязателен")?;
+    if symbol.trim().is_empty() {
+        return Err("Параметр 'symbol' не может быть пустым".to_string());
+    }
+
+    let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+    let root_clone = root.clone();
+    let symbol_owned = symbol.to_string();
+
+    let start = std::time::Instant::now();
+    let results = tokio::task::spawn_blocking(move || {
+        search::search_code(&root_clone, None, &symbol_owned, false, limit)
+    })
+    .await
+    .map_err(|e| format!("Ошибка поиска: {}", e))?;
+    let elapsed = start.elapsed().as_millis();
+
+    if results.is_empty() {
+        return Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Символ \"{}\" не найден в коде конфигурации. ({}мс)", symbol, elapsed)
+            }]
+        }));
+    }
+
+    // Group by file preserving insertion order
+    let mut file_order: Vec<String> = Vec::new();
+    let mut by_file: std::collections::HashMap<String, Vec<(u32, String)>> =
+        std::collections::HashMap::new();
+    for r in &results {
+        if !by_file.contains_key(&r.file) {
+            file_order.push(r.file.clone());
+        }
+        by_file
+            .entry(r.file.clone())
+            .or_default()
+            .push((r.line, r.snippet.trim().to_string()));
+    }
+
+    let mut text = format!(
+        "**Ссылки на \"{}\"** — {} вхождений в {} файлах ({}мс):\n\n",
+        symbol, results.len(), file_order.len(), elapsed
+    );
+    for file in &file_order {
+        let lines = &by_file[file];
+        let ext = file.rsplit('.').next().unwrap_or("bsl");
+        text.push_str(&format!("**{}** ({} вхожд.)\n", file, lines.len()));
+        for (line_no, snippet) in lines.iter().take(5) {
+            text.push_str(&format!(
+                "  ```{}\n  // строка {}\n  {}\n  ```\n",
+                ext, line_no, snippet
+            ));
+        }
+        if lines.len() > 5 {
+            text.push_str(&format!("  *...ещё {} вхождений*\n", lines.len() - 5));
+        }
+        text.push('\n');
+    }
+    if results.len() >= limit {
+
+        text.push_str(&format!(
+            "*Показано {} результатов. Увеличьте `limit` для большего количества.*",
+            limit
+        ));
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+async fn handle_impact_analysis(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let root = config_path
+        .as_ref()
+        .ok_or("Конфигурация не настроена. Укажите путь в настройках MCP сервера.")?;
+
+    let object_name = args["object"].as_str().ok_or("Параметр 'object' обязателен")?;
+    if object_name.trim().is_empty() {
+        return Err("Параметр 'object' не может быть пустым".to_string());
+    }
+
+    // Strip "Type." prefix for text search
+    let search_term = if let Some(dot) = object_name.find('.') {
+        object_name[dot + 1..].to_string()
+    } else {
+        object_name.to_string()
+    };
+
+    let root_clone = root.clone();
+    let db_clone = db_path.clone();
+    let search_term_clone = search_term.clone();
+    let object_name_owned = object_name.to_string();
+
+    let (details, refs): (Option<index::ObjectDetails>, Vec<search::SearchResult>) =
+        tokio::task::spawn_blocking(move || {
+            let details = db_clone
+                .as_deref()
+                .and_then(|db| index::get_object_details(db, &object_name_owned));
+            let refs = search::search_code(&root_clone, None, &search_term_clone, false, 500);
+            (details, refs)
+        })
+        .await
+        .map_err(|e| format!("Ошибка выполнения: {}", e))?;
+
+    let mut text = format!("## Анализ влияния: {}\n\n", object_name);
+
+    if let Some(d) = &details {
+        text.push_str(&format!("**Тип**: {}\n", d.obj_type));
+        if !d.attributes.is_empty() {
+            text.push_str(&format!("**Реквизитов**: {}\n", d.attributes.len()));
+        }
+        if !d.tabular_sections.is_empty() {
+            text.push_str(&format!("**Табличных частей**: {}\n", d.tabular_sections.len()));
+        }
+        text.push('\n');
+    }
+
+    if refs.is_empty() {
+        text.push_str(&format!(
+            "Ссылок на \"{}\" в коде конфигурации не найдено.\n",
+            search_term
+        ));
+    } else {
+        let mut by_file: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for r in &refs {
+            *by_file.entry(r.file.clone()).or_default() += 1;
+        }
+        let mut file_list: Vec<(String, usize)> = by_file.into_iter().collect();
+        file_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        text.push_str(&format!(
+            "**{} вхождений в {} файлах:**\n\n",
+            refs.len(), file_list.len()
+        ));
+        for (file, count) in file_list.iter().take(20) {
+            text.push_str(&format!("- `{}` — {} вхождений\n", file, count));
+        }
+        if file_list.len() > 20 {
+            text.push_str(&format!("- *...ещё {} файлов*\n", file_list.len() - 20));
+        }
+
+        text.push_str("\n**Примеры использования:**\n");
+        for r in refs.iter().take(5) {
+            let ext = r.file.rsplit('.').next().unwrap_or("bsl");
+            text.push_str(&format!(
+                "```{}\n// {}:{}\n{}\n```\n",
+                ext, r.file, r.line, r.snippet.trim()
+            ));
+        }
+        if refs.len() >= 500 {
+            text.push_str(
+                "\n*Поиск ограничен 500 результатами. Объект широко используется в конфигурации.*",
+            );
+        }
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+async fn handle_sync_index(
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let root = config_path
+        .as_ref()
+        .ok_or("Конфигурация не настроена. Укажите путь в настройках MCP сервера.")?;
+    let db = db_path
+        .as_ref()
+        .ok_or("Нет пути к базе данных индекса")?;
+
+    let root = root.clone();
+    let db = db.clone();
+
+    let stats = tokio::task::spawn_blocking(move || index::sync_index(&root, &db))
+        .await
+        .map_err(|e| format!("Паника spawn_blocking: {}", e))?
+        .map_err(|e| format!("Ошибка синхронизации: {}", e))?;
+
+    let db_for_index = db_path.as_ref().unwrap();
+    let size = crate::db_size_mb(db_for_index);
+    // Use current time directly — avoids SQLite WAL caching issues when reading back built_at
+    let built_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    eprintln!("SEARCH_STATUS:ready:{}:{:.2}:{}", stats.total_symbols, size, built_at);
+
+    let text = if stats.added == 0 && stats.updated == 0 && stats.removed == 0 {
+        "✅ Индекс актуален. Изменённых BSL файлов не обнаружено.".to_string()
+    } else {
+        format!(
+            "✅ Синхронизация завершена:\n- Новых файлов: {}\n- Изменённых: {}\n- Удалённых: {}\n- Итого символов в индексе: {}",
+            stats.added, stats.updated, stats.removed, stats.total_symbols
+        )
+    };
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }

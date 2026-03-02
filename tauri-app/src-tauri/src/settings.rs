@@ -102,6 +102,33 @@ fn default_slash_commands() -> Vec<SlashCommand> {
             is_enabled: true,
             is_system: true,
         },
+        SlashCommand {
+            id: "search-1c".to_string(),
+            command: "найти".to_string(),
+            name: "1С:Найти".to_string(),
+            description: "Поиск кода в конфигурации 1С".to_string(),
+            template: "Выполни поиск в конфигурации 1С по запросу: \"{query}\".\n\nИнструкции:\n1. Если запрос содержит имя процедуры или функции — используй find_symbol для точного поиска по символьному индексу.\n2. Если ищешь текст, переменную или фрагмент кода — используй search_code.\n3. Если в запросе упоминается конкретный объект (\"в модуле X\", \"в справочнике Y\") — передай scope в search_code.\n4. Для найденных символов — вызови get_symbol_context чтобы показать полный код.\nПокажи результаты с объяснением.".to_string(),
+            is_enabled: true,
+            is_system: true,
+        },
+        SlashCommand {
+            id: "refs-1c".to_string(),
+            command: "где".to_string(),
+            name: "1С:Где используется".to_string(),
+            description: "Найти все места использования символа в конфигурации".to_string(),
+            template: "Найди все места использования \"{query}\" в конфигурации 1С.\nИспользуй инструмент find_references для поиска всех вхождений.\nПокажи результаты, сгруппированные по модулям, с краткой аннотацией к каждому месту использования.".to_string(),
+            is_enabled: true,
+            is_system: true,
+        },
+        SlashCommand {
+            id: "struct-1c".to_string(),
+            command: "объект".to_string(),
+            name: "1С:Структура объекта".to_string(),
+            description: "Показать структуру объекта конфигурации (реквизиты, ТЧ, формы)".to_string(),
+            template: "Покажи структуру объекта конфигурации 1С: \"{query}\".\n1. Используй get_object_structure для получения реквизитов, табличных частей, форм и модулей.\n2. Если объект не найден — используй list_objects с name_filter для поиска похожих объектов.\n3. Опиши структуру понятно для разработчика.".to_string(),
+            is_enabled: true,
+            is_system: true,
+        },
     ]
 }
 
@@ -469,6 +496,20 @@ pub fn load_settings() -> AppSettings {
     if settings.slash_commands.is_empty() {
         settings.slash_commands = default_slash_commands();
         modified = true;
+    } else {
+        // Inject new system commands that may be missing in existing settings
+        let new_system_ids = ["search-1c", "refs-1c", "struct-1c"];
+        let existing_ids: std::collections::HashSet<String> = settings.slash_commands.iter()
+            .map(|c| c.id.clone())
+            .collect();
+        let to_add: Vec<SlashCommand> = default_slash_commands()
+            .into_iter()
+            .filter(|cmd| new_system_ids.contains(&cmd.id.as_str()) && !existing_ids.contains(&cmd.id))
+            .collect();
+        if !to_add.is_empty() {
+            settings.slash_commands.extend(to_add);
+            modified = true;
+        }
     }
 
     if modified {
