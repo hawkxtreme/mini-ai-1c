@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../api';
 
@@ -7,6 +7,7 @@ export interface ToolCall {
     name: string;
     arguments: string;
     status: 'pending' | 'executing' | 'done' | 'error' | 'rejected';
+    result?: string;
 }
 
 export interface BSLDiagnostic {
@@ -16,6 +17,12 @@ export interface BSLDiagnostic {
     severity: 'error' | 'warning' | 'info' | 'hint';
 }
 
+export interface MessagePart {
+    type: 'text' | 'thinking' | 'tool';
+    content?: string;
+    toolCallId?: string;
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant' | 'tool';
@@ -23,6 +30,7 @@ export interface ChatMessage {
     displayContent?: string;
     thinking?: string;
     toolCalls?: ToolCall[];
+    parts?: MessagePart[];
     diagnostics?: BSLDiagnostic[];
     timestamp: number;
 }
@@ -48,6 +56,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(false);
     const [chatStatus, setChatStatus] = useState('');
     const [currentIteration, setCurrentIteration] = useState(0);
+    // Маппинг index→id для tool-call-progress (сбрасывается при новом запросе)
+    const currentBatchToolIds = useRef<string[]>([]);
 
     useEffect(() => {
         let isMounted = true;
@@ -58,25 +68,60 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const results = await Promise.all([
                     listen<string>('chat-chunk', (event) => {
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (last && last.role === 'assistant') {
-                                return [...prev.slice(0, -1), { ...last, content: last.content + event.payload }];
+                            // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
+                            let lastAssistantIdx = -1;
+                            for (let i = prev.length - 1; i >= 0; i--) {
+                                if (prev[i].role === 'user') break;
+                                if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
                             }
-                            return [...prev, { id: generateId(), role: 'assistant', content: event.payload, timestamp: Date.now() }];
+
+                            if (lastAssistantIdx !== -1) {
+                                const last = prev[lastAssistantIdx];
+                                const newParts = [...(last.parts || [])];
+                                const lastPart = newParts[newParts.length - 1];
+                                if (lastPart && lastPart.type === 'text') {
+                                    newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + event.payload };
+                                } else {
+                                    newParts.push({ type: 'text', content: event.payload });
+                                }
+                                return [
+                                    ...prev.slice(0, lastAssistantIdx),
+                                    { ...last, content: last.content + event.payload, parts: newParts },
+                                    ...prev.slice(lastAssistantIdx + 1)
+                                ];
+                            }
+                            return [...prev, { id: generateId(), role: 'assistant', content: event.payload, parts: [{ type: 'text', content: event.payload }], timestamp: Date.now() }];
                         });
                     }),
                     listen<string>('chat-thinking-chunk', (event) => {
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (last && last.role === 'assistant') {
-                                return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + event.payload }];
+                            // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
+                            let lastAssistantIdx = -1;
+                            for (let i = prev.length - 1; i >= 0; i--) {
+                                if (prev[i].role === 'user') break;
+                                if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
                             }
-                            return [...prev, { id: generateId(), role: 'assistant', content: '', thinking: event.payload, timestamp: Date.now() }];
+
+                            if (lastAssistantIdx !== -1) {
+                                const last = prev[lastAssistantIdx];
+                                const newParts = [...(last.parts || [])];
+                                const lastPart = newParts[newParts.length - 1];
+                                if (lastPart && lastPart.type === 'thinking') {
+                                    newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + event.payload };
+                                } else {
+                                    newParts.push({ type: 'thinking', content: event.payload });
+                                }
+                                return [
+                                    ...prev.slice(0, lastAssistantIdx),
+                                    { ...last, thinking: (last.thinking || '') + event.payload, parts: newParts },
+                                    ...prev.slice(lastAssistantIdx + 1)
+                                ];
+                            }
+                            return [...prev, { id: generateId(), role: 'assistant', content: '', thinking: event.payload, parts: [{ type: 'thinking', content: event.payload }], timestamp: Date.now() }];
                         });
                     }),
                     listen<{ index: number, id: string, name: string }>('tool-call-started', (event) => {
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
                             const newToolCall = {
                                 id: event.payload.id,
                                 name: event.payload.name,
@@ -84,52 +129,92 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                 status: 'pending' as const
                             };
 
-                            if (!last || last.role !== 'assistant') {
+                            // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
+                            let lastAssistantIdx = -1;
+                            for (let i = prev.length - 1; i >= 0; i--) {
+                                if (prev[i].role === 'user') break;
+                                if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                            }
+
+                            if (lastAssistantIdx === -1) {
                                 return [...prev, {
                                     id: generateId(),
                                     role: 'assistant',
                                     content: '',
                                     timestamp: Date.now(),
-                                    toolCalls: [newToolCall]
+                                    toolCalls: [newToolCall],
+                                    parts: [{ type: 'tool' as const, toolCallId: event.payload.id }]
                                 }];
                             }
 
-                            const toolCalls = [...(last.toolCalls || [])];
-                            toolCalls[event.payload.index] = newToolCall;
+                            // Сохраняем ID в ref для tool-call-progress
+                            currentBatchToolIds.current[event.payload.index] = event.payload.id;
 
-                            return [...prev.slice(0, -1), { ...last, toolCalls }];
+                            const last = prev[lastAssistantIdx];
+                            // Push вместо index-assign — не перезаписываем tool calls из предыдущих итераций
+                            const toolCalls = [...(last.toolCalls || []), newToolCall];
+                            const newParts = [...(last.parts || []), { type: 'tool' as const, toolCallId: event.payload.id }];
+
+                            return [
+                                ...prev.slice(0, lastAssistantIdx),
+                                { ...last, toolCalls, parts: newParts },
+                                ...prev.slice(lastAssistantIdx + 1)
+                            ];
                         });
                     }),
                     listen<{ index: number, arguments: string }>('tool-call-progress', (event) => {
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (!last || last.role !== 'assistant' || !last.toolCalls) return prev;
+                            // Ищем последнее assistant-сообщение с toolCalls, не пересекая границу хода
+                            let lastAssistantIdx = -1;
+                            for (let i = prev.length - 1; i >= 0; i--) {
+                                if (prev[i].role === 'user') break;
+                                if (prev[i].role === 'assistant' && prev[i].toolCalls) { lastAssistantIdx = i; break; }
+                            }
+                            if (lastAssistantIdx === -1) return prev;
 
-                            const toolCalls = [...last.toolCalls];
-                            if (toolCalls[event.payload.index]) {
-                                toolCalls[event.payload.index] = {
-                                    ...toolCalls[event.payload.index],
-                                    arguments: toolCalls[event.payload.index].arguments + event.payload.arguments
+                            const last = prev[lastAssistantIdx];
+                            const toolCalls = [...last.toolCalls!];
+                            // Ищем по ID из ref (индекс — позиция в текущей итерации, не в массиве)
+                            const toolId = currentBatchToolIds.current[event.payload.index];
+                            const tcIdx = toolId ? toolCalls.findIndex(tc => tc.id === toolId) : -1;
+                            if (tcIdx !== -1) {
+                                toolCalls[tcIdx] = {
+                                    ...toolCalls[tcIdx],
+                                    arguments: toolCalls[tcIdx].arguments + event.payload.arguments
                                 };
                             }
 
-                            return [...prev.slice(0, -1), { ...last, toolCalls }];
+                            return [
+                                ...prev.slice(0, lastAssistantIdx),
+                                { ...last, toolCalls },
+                                ...prev.slice(lastAssistantIdx + 1)
+                            ];
                         });
                     }),
                     listen<{ id: string, status: 'done' | 'error', result: string }>('tool-call-completed', (event) => {
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            if (!last || last.role !== 'assistant' || !last.toolCalls) return prev;
+                            // Ищем assistant-сообщение с нужным tool call по ID
+                            let targetIdx = -1;
+                            for (let i = prev.length - 1; i >= 0; i--) {
+                                if (prev[i].role === 'assistant' && prev[i].toolCalls?.some(tc => tc.id === event.payload.id)) {
+                                    targetIdx = i; break;
+                                }
+                            }
+                            if (targetIdx === -1) return prev;
 
-                            // Find tool call by ID
-                            const toolCalls = last.toolCalls.map(tc => {
+                            const last = prev[targetIdx];
+                            const toolCalls = last.toolCalls!.map(tc => {
                                 if (tc.id === event.payload.id) {
-                                    return { ...tc, status: event.payload.status };
+                                    return { ...tc, status: event.payload.status, result: event.payload.result };
                                 }
                                 return tc;
                             });
 
-                            return [...prev.slice(0, -1), { ...last, toolCalls }];
+                            return [
+                                ...prev.slice(0, targetIdx),
+                                { ...last, toolCalls },
+                                ...prev.slice(targetIdx + 1)
+                            ];
                         });
                     }),
                     listen<any>('waiting-for-approval', async () => {
@@ -195,9 +280,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             role: 'user',
             content,
             displayContent,
+            parts: [{ type: 'text', content: displayContent || content }],
             timestamp: Date.now()
         };
         setMessages(prev => [...prev, userMessage]);
+        currentBatchToolIds.current = [];
         setIsLoading(true);
 
         // 2. Backend: Prepare payload
@@ -219,7 +306,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
             await api.streamChat(payloadMessages);
         } catch (err) {
-            setMessages(prev => [...prev, { id: generateId(), role: 'assistant', content: `❌ Ошибка: ${err}`, timestamp: Date.now() }]);
+            setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    // Append error to the existing assistant message
+                    const errorStr = `\n\n❌ **Ошибка:** ${err}`;
+                    const newParts = [...(last.parts || [])];
+                    const lastPart = newParts[newParts.length - 1];
+                    if (lastPart && lastPart.type === 'text') {
+                        newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + errorStr };
+                    } else {
+                        newParts.push({ type: 'text', content: errorStr });
+                    }
+                    return [
+                        ...prev.slice(0, -1),
+                        { ...last, content: last.content + errorStr, parts: newParts }
+                    ];
+                }
+                // Fallback: create a new message
+                const errorStr = `❌ Ошибка: ${err}`;
+                return [...prev, { id: generateId(), role: 'assistant', content: errorStr, parts: [{ type: 'text', content: errorStr }], timestamp: Date.now() }];
+            });
             setIsLoading(false);
         }
     }, [isLoading, messages]);
@@ -252,11 +359,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             ...messages[messageIndex],
             content: newContent,
             displayContent,
+            parts: [{ type: 'text', content: displayContent || newContent }],
             timestamp: Date.now()
         };
 
         // 3. Set messages to truncated + edited
         setMessages([...truncatedMessages, editedMessage]);
+        currentBatchToolIds.current = [];
         setIsLoading(true);
 
         // 4. Prepare payload
@@ -278,8 +387,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
             await api.streamChat(payloadMessages);
         } catch (err) {
-            const errorMsg = `❌ Ошибка: ${err} `;
-            setMessages(prev => [...prev, { id: generateId(), role: 'assistant', content: errorMsg, timestamp: Date.now() }]);
+            setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === 'assistant') {
+                    // Append error to the existing assistant message
+                    const errorStr = `\n\n❌ **Ошибка:** ${err}`;
+                    const newParts = [...(last.parts || [])];
+                    const lastPart = newParts[newParts.length - 1];
+                    if (lastPart && lastPart.type === 'text') {
+                        newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + errorStr };
+                    } else {
+                        newParts.push({ type: 'text', content: errorStr });
+                    }
+                    return [
+                        ...prev.slice(0, -1),
+                        { ...last, content: last.content + errorStr, parts: newParts }
+                    ];
+                }
+                const errorMsg = `❌ Ошибка: ${err} `;
+                return [...prev, { id: generateId(), role: 'assistant', content: errorMsg, parts: [{ type: 'text', content: errorMsg }], timestamp: Date.now() }];
+            });
             setIsLoading(false);
         }
     }, [isLoading, messages]);

@@ -103,7 +103,7 @@ export function ChatArea({
     const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
     const [cliStatuses, setCliStatuses] = useState<Record<string, CliStatus>>({});
     const [showGetCodeDropdown, setShowGetCodeDropdown] = useState(false);
-    const [expandedThinking, setExpandedThinking] = useState<Record<number, boolean>>({});
+    const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
     const [contextCode, setContextCode] = useState('');
     const [isContextSelection, setIsContextSelection] = useState(false);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -226,37 +226,65 @@ export function ChatArea({
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const wasAtBottom = useRef(true);
+    const autoScrollRaf = useRef<number | null>(null);
 
-    // Обработчик скролла для отслеживания ручной прокрутки вверх
+    // Обработчик скролла — отслеживаем ручную прокрутку вверх
     const handleScroll = () => {
         if (scrollRef.current) {
             const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-            // Проверяем, находится ли пользователь внизу (с допуском 100px для надежности)
             const isAtBottom = scrollHeight - scrollTop <= clientHeight + 100;
             wasAtBottom.current = isAtBottom;
+            // Пользователь прокрутил вверх — останавливаем автоскролл
+            if (!isAtBottom && autoScrollRaf.current) {
+                cancelAnimationFrame(autoScrollRaf.current);
+                autoScrollRaf.current = null;
+            }
         }
     };
 
+    // RAF-цикл плавной прокрутки во время стриминга
     useEffect(() => {
-        // Автопрокрутка только во время стриминга или при получении нового сообщения
-        if (!isLoading && messages.length > 0 && messages[messages.length - 1].role !== 'user') return;
-
-        const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
-            if (wasAtBottom.current && scrollRef.current) {
-                scrollRef.current.scrollTo({
-                    top: scrollRef.current.scrollHeight,
-                    behavior
-                });
+        if (!isLoading) {
+            if (autoScrollRaf.current) {
+                cancelAnimationFrame(autoScrollRaf.current);
+                autoScrollRaf.current = null;
             }
+            // Финальная плавная прокрутка после завершения генерации
+            if (wasAtBottom.current && scrollRef.current) {
+                scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }
+            return;
+        }
+
+        // При старте генерации всегда следуем за контентом
+        wasAtBottom.current = true;
+
+        const tick = () => {
+            const el = scrollRef.current;
+            if (!el || !wasAtBottom.current) {
+                autoScrollRaf.current = null;
+                return;
+            }
+            const maxScroll = el.scrollHeight - el.clientHeight;
+            const diff = maxScroll - el.scrollTop;
+            if (diff > 1) {
+                // Догоняем с ускорением: чем дальше — тем быстрее
+                el.scrollTop += Math.ceil(Math.max(3, diff * 0.2));
+            }
+            autoScrollRaf.current = requestAnimationFrame(tick);
         };
 
-        // При стриминге используем smooth, но для первого скролла можно auto
-        scrollToBottom('smooth');
+        if (!autoScrollRaf.current) {
+            autoScrollRaf.current = requestAnimationFrame(tick);
+        }
 
-        // Дополнительный скролл для компенсации динамического контента (Markdown)
-        const timer = setTimeout(() => scrollToBottom('smooth'), 100);
-        return () => clearTimeout(timer);
-    }, [messages, isLoading]);
+        return () => {
+            if (autoScrollRaf.current) {
+                cancelAnimationFrame(autoScrollRaf.current);
+                autoScrollRaf.current = null;
+            }
+        };
+    }, [isLoading]);
 
     // Блок ДУМАЮ по умолчанию свёрнут — пользователь разворачивает вручную.
     // (Авторасширение во время стриминга отключено)
@@ -474,8 +502,8 @@ export function ChatArea({
         }
     };
 
-    const toggleThinking = (index: number) => {
-        setExpandedThinking(prev => ({ ...prev, [index]: !prev[index] }));
+    const toggleThinking = (key: string) => {
+        setExpandedThinking(prev => ({ ...prev, [key]: !prev[key] }));
     };
 
     const handleLoadCode = async (isSelection: boolean) => {
@@ -618,27 +646,7 @@ export function ChatArea({
                             <div className={`p-4 rounded-xl border text-[13px] leading-relaxed group ${msg.role === 'user' ? 'bg-[#1b1b1f] border-zinc-800/80 text-zinc-300 max-w-[90%]' : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300 shadow-sm w-full max-w-full'}`}>
                                 <div className="min-w-0 flex flex-col gap-3">
                                     {/* Message Header with Actions */}
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div className="flex-1 min-w-0">
-                                            {/* Thinking Section */}
-                                            {msg.thinking && (
-                                                <div className="my-1 mb-3">
-                                                    <button
-                                                        onClick={() => toggleThinking(i)}
-                                                        className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
-                                                    >
-                                                        <BrainCircuit className="w-3.5 h-3.5" />
-                                                        <span>{msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Размышления'}</span>
-                                                        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expandedThinking[i] ? 'rotate-90' : ''}`} />
-                                                    </button>
-                                                    {expandedThinking[i] && (
-                                                        <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
-                                                            {msg.thinking}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
+                                    <div className="flex items-start justify-end gap-2 mb-2">
                                         {/* Actions */}
                                         <MessageActions
                                             content={msg.content}
@@ -648,25 +656,114 @@ export function ChatArea({
                                         />
                                     </div>
 
-                                    {/* Tool Calls */}
-                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                        <div className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
-                                            {msg.toolCalls.map((tc, idx) => (
-                                                <ToolCallBlock key={idx} toolCall={tc} />
-                                            ))}
-                                        </div>
-                                    )}
+                                    <div className="min-w-0 flex flex-col gap-3">
+                                        {msg.role === 'assistant' && msg.parts ? (
+                                            <>
+                                                {msg.parts.map((part, partIdx) => {
+                                                    if (part.type === 'thinking') {
+                                                        const thinkingKey = `${i}-${partIdx}`;
+                                                        const isThinkingStreaming = isLoading && i === messages.length - 1;
+                                                        const isExpanded = expandedThinking[thinkingKey] ?? false;
+                                                        return (
+                                                            <div key={partIdx} className="my-1 mb-2">
+                                                                <button
+                                                                    onClick={() => toggleThinking(thinkingKey)}
+                                                                    className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
+                                                                >
+                                                                    <BrainCircuit className="w-3.5 h-3.5" />
+                                                                    <span>{isThinkingStreaming && chatStatus ? chatStatus : 'Размышления'}</span>
+                                                                    <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                                                                </button>
+                                                                {isExpanded && (
+                                                                    <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
+                                                                        {part.content}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    } else if (part.type === 'tool') {
+                                                        const tc = msg.toolCalls?.find(t => t.id === part.toolCallId);
+                                                        if (!tc) return null;
+                                                        return (
+                                                            <div key={partIdx} className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
+                                                                <ToolCallBlock toolCall={tc} />
+                                                            </div>
+                                                        );
+                                                    } else {
+                                                        // text
+                                                        return (
+                                                            <div key={partIdx} className="min-w-0">
+                                                                <MarkdownRenderer
+                                                                    content={part.content || ''}
+                                                                    isStreaming={isLoading && i === messages.length - 1 && partIdx === msg.parts!.length - 1}
+                                                                    onApplyCode={onApplyCode}
+                                                                    originalCode={contextCode || modifiedCode || ""}
+                                                                />
+                                                            </div>
+                                                        );
+                                                    }
+                                                })}
+                                                {/* Статус выполнения — внутри пузыря, после всех parts */}
+                                                {isLoading && i === messages.length - 1 && (
+                                                    <div className="flex items-center gap-2 mt-1 pt-2 border-t border-zinc-800/40">
+                                                        <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 flex-shrink-0" />
+                                                        <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
+                                                        {currentIteration > 1 && (
+                                                            <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono ml-1">
+                                                                Шаг {currentIteration}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </>
+                                        ) : (
+                                            // Fallback for older messages or user messages
+                                            <>
+                                                {/* Thinking Section */}
+                                                {msg.thinking && (
+                                                    <div className="my-1 mb-3">
+                                                        <button
+                                                            onClick={() => toggleThinking(String(i))}
+                                                            className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
+                                                        >
+                                                            <BrainCircuit className="w-3.5 h-3.5" />
+                                                            <span>{msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Размышления'}</span>
+                                                            <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expandedThinking[String(i)] ? 'rotate-90' : ''}`} />
+                                                        </button>
+                                                        {expandedThinking[String(i)] && (
+                                                            <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
+                                                                {msg.thinking}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
 
-                                    {/* Content */}
-                                    <div className="min-w-0">
+                                                {/* Tool Calls */}
+                                                {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                                    <div className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
+                                                        {msg.toolCalls.map((tc, idx) => (
+                                                            <ToolCallBlock key={idx} toolCall={tc} />
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                {/* Content */}
+                                                <div className="min-w-0">
+                                                    {msg.role === 'assistant' ? (
+                                                        <MarkdownRenderer
+                                                            content={msg.content}
+                                                            isStreaming={isLoading && i === messages.length - 1}
+                                                            onApplyCode={onApplyCode}
+                                                            originalCode={contextCode || modifiedCode || ""}
+                                                        />
+                                                    ) : null}
+                                                </div>
+                                            </>
+                                        )}
+
                                         {msg.role === 'assistant' ? (
                                             <>
-                                                <MarkdownRenderer
-                                                    content={msg.content}
-                                                    isStreaming={isLoading && i === messages.length - 1}
-                                                    onApplyCode={onApplyCode}
-                                                    originalCode={contextCode || modifiedCode || ""}
-                                                />
+
                                                 {(() => {
                                                     const msgKey = msg.id || String(i);
                                                     const action = diffActions.get(msgKey);
@@ -765,24 +862,21 @@ export function ChatArea({
                                             <pre className="whitespace-pre-wrap font-sans break-words break-all overflow-hidden" style={{ fontFamily: 'Inter, sans-serif', overflowWrap: 'anywhere' }}>{msg.displayContent || msg.content}</pre>
                                         )}
                                     </div>
-
-
                                 </div>
                             </div>
                         </div>
                     ))}
-                    {isLoading && (
+                    {/* Индикатор ожидания первого ответа (пока нет assistant-сообщения) */}
+                    {isLoading && (messages.length === 0 || messages[messages.length - 1].role === 'user') && (
                         <div className="w-full px-0">
-                            <div className="p-4 rounded-xl border border-zinc-800/50 bg-transparent flex items-center gap-3">
+                            <div className="p-4 rounded-xl border border-zinc-800/50 bg-zinc-900/40 flex items-center gap-3">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <div className="flex items-center gap-2">
-                                    <span className="text-zinc-300 text-xs font-medium">{chatStatus || 'Думаю...'}</span>
-                                    {currentIteration > 1 && (
-                                        <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono">
-                                            Шаг {currentIteration}
-                                        </span>
-                                    )}
-                                </div>
+                                <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
+                                {currentIteration > 1 && (
+                                    <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono">
+                                        Шаг {currentIteration}
+                                    </span>
+                                )}
                             </div>
                         </div>
                     )}
