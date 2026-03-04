@@ -12,13 +12,6 @@ pub struct Model {
     pub cost_out: Option<f64>, // Cost per 1M output tokens
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Provider {
-    pub id: String,
-    pub name: String,
-    pub api_base: String,
-    pub models: Vec<Model>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryData {

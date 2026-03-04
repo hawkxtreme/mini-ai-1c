@@ -25,7 +25,7 @@ export interface MessagePart {
 
 export interface ChatMessage {
     id: string;
-    role: 'user' | 'assistant' | 'tool';
+    role: 'user' | 'assistant' | 'tool' | 'system';
     content: string;
     displayContent?: string;
     thinking?: string;
@@ -47,6 +47,7 @@ interface ChatContextType {
     stopChat: () => Promise<void>;
     clearChat: () => void;
     editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => Promise<void>;
+    addSystemMessage: (content: string) => void;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -297,11 +298,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
 
         try {
-            // Construct message history including the new simplified payload logic
-            const payloadMessages: api.ChatMessage[] = messages.map(m => ({
-                role: m.role,
-                content: m.content || ''
-            }));
+            // Construct message history (system messages are UI-only, not sent to backend)
+            const payloadMessages: api.ChatMessage[] = messages
+                .filter(m => m.role !== 'system')
+                .map(m => ({
+                    role: m.role as 'user' | 'assistant' | 'tool',
+                    content: m.content || ''
+                }));
             payloadMessages.push({ role: 'user', content: contextPayload });
 
             await api.streamChat(payloadMessages);
@@ -347,6 +350,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setIsLoading(false);
     }, []);
 
+    const addSystemMessage = useCallback((content: string) => {
+        setMessages(prev => [
+            ...prev,
+            { id: generateId(), role: 'system', content, parts: [{ type: 'text', content }], timestamp: Date.now() }
+        ]);
+    }, []);
+
     // Edit message and rerun from that point
     const editAndRerun = useCallback(async (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => {
         if (!newContent.trim() || isLoading) return;
@@ -378,11 +388,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
 
         try {
-            // Construct message history from truncated + edited
-            const payloadMessages: api.ChatMessage[] = [...truncatedMessages, editedMessage].map(m => ({
-                role: m.role,
-                content: m.content || ''
-            }));
+            // Construct message history from truncated + edited (filter system/UI messages)
+            const payloadMessages: api.ChatMessage[] = [...truncatedMessages, editedMessage]
+                .filter(m => m.role !== 'system')
+                .map(m => ({
+                    role: m.role as 'user' | 'assistant' | 'tool',
+                    content: m.content || ''
+                }));
             payloadMessages.push({ role: 'user', content: contextPayload });
 
             await api.streamChat(payloadMessages);
@@ -420,7 +432,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             sendMessage,
             stopChat,
             clearChat,
-            editAndRerun
+            editAndRerun,
+            addSystemMessage
         }}>
             {children}
         </ChatContext.Provider>

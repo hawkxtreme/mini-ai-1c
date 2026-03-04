@@ -69,6 +69,7 @@ pub struct Position {
     pub character: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Location {
     pub uri: String,
@@ -738,6 +739,7 @@ impl BSLClient {
     }
 
     /// Go to Definition
+    #[allow(dead_code)]
     pub async fn goto_definition(&self, uri: &str, line: u32, character: u32) -> Result<Option<crate::bsl_client::Location>, String> {
         // Build params
         let params = serde_json::json!({
@@ -792,6 +794,7 @@ impl BSLClient {
     }
 
     /// Resolve definition and return source code
+    #[allow(dead_code)]
     pub async fn resolve_definition(&self, code: &str, line: u32, character: u32) -> Result<String, String> {
         let uri = "file:///temp_definition.bsl";
 

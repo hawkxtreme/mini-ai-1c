@@ -222,10 +222,10 @@ export function MainLayout() {
                                 setSettingsTab(tab as any);
                                 setShowSettings(true);
                             }}
-                            onActiveDiffChange={(content) => {
+                            onActiveDiffChange={useCallback((content: string) => {
                                 setActiveDiffContent(content);
                                 // if (content && viewMode === 'assistant') setViewMode('split'); // Авто-открытие панели отключено
-                            }}
+                            }, [])}
                             activeDiffContent={activeDiffContent}
                         />
                     </div>

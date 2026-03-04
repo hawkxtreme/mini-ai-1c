@@ -2,7 +2,7 @@
 //!
 //! AI-ассистент для разработки на платформе 1С:Предприятие
 
-mod ai_client;
+mod ai;
 mod bsl_client;
 mod bsl_installer;
 mod commands;

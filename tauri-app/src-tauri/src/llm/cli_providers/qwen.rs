@@ -207,6 +207,10 @@ impl QwenCliProvider {
         crate::app_log!(force: true, "[DEBUG] Qwen refresh response {}: {}", status, body);
 
         if !status.is_success() {
+            if status.as_u16() == 400 {
+                crate::app_log!(force: true, "[Qwen] Refresh token invalid (400), logging out profile {}", profile_id);
+                let _ = Self::logout(profile_id);
+            }
             return Err(format!("Token refresh failed {}: {}", status.as_u16(), body));
         }
 
@@ -356,7 +360,7 @@ impl QwenCliProvider {
                             }
                         }
                         Err(e) => {
-                            crate::app_log!(force: true, "[Qwen] get_status: silent refresh FAILED for profile {}: {}", profile_id, e);
+                            crate::app_log!(force: false, "[Qwen] get_status: silent refresh FAILED for profile {}: {}", profile_id, e);
                             // Fall through — return not authenticated
                         }
                     }

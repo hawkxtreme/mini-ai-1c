@@ -125,7 +125,7 @@ impl McpManager {
 
     pub async fn reconfigure(new_settings: AppSettings, app_handle: &tauri::AppHandle) {
         crate::logger::set_debug_mode(new_settings.debug_mode);
-        crate::ai_client::clear_mcp_cache();
+        crate::ai::clear_mcp_cache();
         crate::app_log!("Reconfiguring MCP servers...");
         let mut sessions = MCP_MANAGER.sessions.lock().await;
 
@@ -580,7 +580,7 @@ impl McpSession {
             }
         }
 
-        let (mut command, mut args) = if cfg!(windows) {
+        let (command, args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
             let cmd_lower = command.to_lowercase();

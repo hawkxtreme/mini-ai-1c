@@ -10,7 +10,7 @@ import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
-import { applyDiff, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
+import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
 import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/settings';
@@ -89,7 +89,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun } = useChat();
+    const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun, addSystemMessage } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { settings, updateSettings } = useSettings();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
@@ -114,8 +114,16 @@ export function ChatArea({
     const [showCommands, setShowCommands] = useState(false);
     const [commandFilter, setCommandFilter] = useState('');
     const availableCommands = useMemo(() => {
-        const cmds = settings?.slash_commands || DEFAULT_SLASH_COMMANDS;
-        return cmds.filter(c => c.is_enabled);
+        const saved = settings?.slash_commands || DEFAULT_SLASH_COMMANDS;
+        // Системные команды всегда используют актуальный шаблон из дефолтов
+        const synced = saved.map(cmd => {
+            if (cmd.is_system) {
+                const def = DEFAULT_SLASH_COMMANDS.find(d => d.id === cmd.id);
+                if (def) return { ...cmd, template: def.template };
+            }
+            return cmd;
+        });
+        return synced.filter(c => c.is_enabled);
     }, [settings?.slash_commands]);
 
     const filteredCommands = useMemo(() => {
@@ -317,54 +325,37 @@ export function ChatArea({
     }, [messages.length]);
 
     useEffect(() => {
+        // Показываем предпросмотр диффов в боковой панели — НЕ применяем автоматически.
+        // Срабатывает сразу (в том числе во время стриминга), чтобы DiffEditor обновлялся в реальном времени.
+        if (messages.length === 0) return;
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg.role !== 'assistant' || !hasDiffBlocks(lastMsg.content)) return;
 
-        // Автоматически применяем дифф-блоки последнего ответа ассистента
-        if (!isLoading && messages.length > 0) {
-            const lastMsg = messages[messages.length - 1];
-            const currentOriginal = originalCode || modifiedCode || "";
+        const msgKey = lastMsg.id || String(messages.length - 1);
 
-            // Проверяем: есть ли маркеры SEARCH
-            console.log(`[ChatArea:diag] isLoading=${isLoading}, role=${lastMsg.role}, contextLen=${currentOriginal.length}, msgContentLen=${(lastMsg.content || '').length}`);
-            console.log(`[ChatArea:diag] msgContent(100)="${(lastMsg.content || '').substring(0, 100).replace(/\n/g, '↵')}"`);
-            console.log(`[ChatArea:diag] hasDiffBlocks=${lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)}`);
-            if (lastMsg.role === 'assistant' && hasDiffBlocks(lastMsg.content)) {
-                const msgKey = lastMsg.id || String(messages.length - 1);
+        // Если пользователь уже принял/отклонил изменения через баннер — не перебиваем его выбор
+        if (diffActions.has(msgKey)) return;
 
-                if (!appliedDiffMessages.has(msgKey)) {
-                    // Устанавливаем активный дифф ТОЛЬКО при первой встрече этого сообщения
-                    if (onActiveDiffChange) {
-                        onActiveDiffChange(lastMsg.content);
-                    }
-
-                    console.log("[ChatArea] Diff markers found in message", msgKey);
-
-                    const isApplicable = hasApplicableDiffBlocks(currentOriginal, lastMsg.content);
-                    if (isApplicable) {
-                        console.log("[ChatArea] Auto-applying diffs...");
-                        const newCode = applyDiff(currentOriginal, lastMsg.content);
-                        if (newCode !== currentOriginal) {
-                            if (onApplyCode) {
-                                onApplyCode(newCode);
-                            }
-                        }
-                        setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
-                    } else {
-                        console.warn("[ChatArea] Diff markers found but blocks are not applicable to current code. Check indentation/tabs or EOF.");
-                        // Даже если не применилось автоматически, мы помечаем как "обработанное", 
-                        // чтобы не спамить ворнингами при каждом рендере, 
-                        // но пользователь увидит ошибку в консоли если что.
-                        setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
-                    }
-                } else {
-                    // Синхронизируем activeDiffContent по мере докачки сообщения, 
-                    // если этот дифф-блок является текущим активным
-                    if (onActiveDiffChange && activeDiffContent && lastMsg.content.includes(activeDiffContent)) {
-                        onActiveDiffChange(lastMsg.content);
-                    }
-                }
+        // Если превью уже было показано, а затем явно очищено (например, через боковую панель) —
+        // не восстанавливаем его снова и помечаем как обработанное, чтобы баннер в чате
+        // переключился на badge "Изменения приняты" вместо кнопок "Принять / Отменить".
+        if (!activeDiffContent && appliedDiffMessages.has(msgKey)) {
+            if (!diffActions.has(msgKey)) {
+                setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
             }
+            return;
         }
-    }, [messages, isLoading, onActiveDiffChange, contextCode, modifiedCode, onApplyCode, appliedDiffMessages, activeDiffContent, onCodeLoaded]);
+
+        // Показываем diff-превью немедленно (включая стриминг)
+        if (onActiveDiffChange) {
+            onActiveDiffChange(lastMsg.content);
+        }
+
+        // После завершения стриминга — фиксируем как "показанное"
+        if (!isLoading && !appliedDiffMessages.has(msgKey)) {
+            setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+        }
+    }, [messages, isLoading, onActiveDiffChange, appliedDiffMessages, diffActions, activeDiffContent]);
 
     const handleSendMessage = (textOverride?: string) => {
         let textToSend = textOverride || input;
@@ -659,227 +650,236 @@ export function ChatArea({
                 <div className={`flex flex-col pb-4 gap-4 px-4 w-full pt-4`}>
                     {messages.map((msg, i) => (
                         <div key={msg.id || i} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`p-4 rounded-xl border text-[13px] leading-relaxed group ${msg.role === 'user' ? 'bg-[#1b1b1f] border-zinc-800/80 text-zinc-300 max-w-[90%]' : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300 shadow-sm w-full max-w-full'}`}>
-                                <div className="min-w-0 flex flex-col gap-3">
-                                    {/* Message Header with Actions */}
-                                    <div className="flex items-start justify-end gap-2 mb-2">
-                                        {/* Actions */}
-                                        <MessageActions
-                                            content={msg.content}
-                                            timestamp={msg.timestamp}
-                                            isUser={msg.role === 'user'}
-                                            onEdit={msg.role === 'user' ? () => handleStartEdit(i, msg.content) : undefined}
-                                        />
-                                    </div>
-
-                                    <div className="min-w-0 flex flex-col gap-3">
-                                        {msg.role === 'assistant' && msg.parts ? (
-                                            <>
-                                                {msg.parts.map((part, partIdx) => {
-                                                    if (part.type === 'thinking') {
-                                                        const thinkingKey = `${i}-${partIdx}`;
-                                                        const isThinkingStreaming = isLoading && i === messages.length - 1;
-                                                        const isExpanded = expandedThinking[thinkingKey] ?? false;
-                                                        return (
-                                                            <div key={partIdx} className="my-1 mb-2">
-                                                                <button
-                                                                    onClick={() => toggleThinking(thinkingKey)}
-                                                                    className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
-                                                                >
-                                                                    <BrainCircuit className="w-3.5 h-3.5" />
-                                                                    <span>{isThinkingStreaming && chatStatus ? chatStatus : 'Размышления'}</span>
-                                                                    <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
-                                                                </button>
-                                                                {isExpanded && (
-                                                                    <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
-                                                                        {part.content}
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    } else if (part.type === 'tool') {
-                                                        const tc = msg.toolCalls?.find(t => t.id === part.toolCallId);
-                                                        if (!tc) return null;
-                                                        return (
-                                                            <div key={partIdx} className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
-                                                                <ToolCallBlock toolCall={tc} />
-                                                            </div>
-                                                        );
-                                                    } else {
-                                                        // text
-                                                        return (
-                                                            <div key={partIdx} className="min-w-0">
-                                                                <MarkdownRenderer
-                                                                    content={part.content || ''}
-                                                                    isStreaming={isLoading && i === messages.length - 1 && partIdx === msg.parts!.length - 1}
-                                                                    onApplyCode={onApplyCode}
-                                                                    originalCode={contextCode || modifiedCode || ""}
-                                                                />
-                                                            </div>
-                                                        );
-                                                    }
-                                                })}
-                                                {/* Статус выполнения — внутри пузыря, после всех parts */}
-                                                {isLoading && i === messages.length - 1 && (
-                                                    <div className="flex items-center gap-2 mt-1 pt-2 border-t border-zinc-800/40">
-                                                        <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 flex-shrink-0" />
-                                                        <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
-                                                        {currentIteration > 1 && (
-                                                            <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono ml-1">
-                                                                Шаг {currentIteration}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                )}
-                                            </>
-                                        ) : (
-                                            // Fallback for older messages or user messages
-                                            <>
-                                                {/* Thinking Section */}
-                                                {msg.thinking && (
-                                                    <div className="my-1 mb-3">
-                                                        <button
-                                                            onClick={() => toggleThinking(String(i))}
-                                                            className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
-                                                        >
-                                                            <BrainCircuit className="w-3.5 h-3.5" />
-                                                            <span>{msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Размышления'}</span>
-                                                            <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expandedThinking[String(i)] ? 'rotate-90' : ''}`} />
-                                                        </button>
-                                                        {expandedThinking[String(i)] && (
-                                                            <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
-                                                                {msg.thinking}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                )}
-
-                                                {/* Tool Calls */}
-                                                {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                                    <div className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
-                                                        {msg.toolCalls.map((tc, idx) => (
-                                                            <ToolCallBlock key={idx} toolCall={tc} />
-                                                        ))}
-                                                    </div>
-                                                )}
-
-                                                {/* Content */}
-                                                <div className="min-w-0">
-                                                    {msg.role === 'assistant' ? (
-                                                        <MarkdownRenderer
-                                                            content={msg.content}
-                                                            isStreaming={isLoading && i === messages.length - 1}
-                                                            onApplyCode={onApplyCode}
-                                                            originalCode={contextCode || modifiedCode || ""}
-                                                        />
-                                                    ) : null}
-                                                </div>
-                                            </>
-                                        )}
-
-                                        {msg.role === 'assistant' ? (
-                                            <>
-
-                                                {(() => {
-                                                    const msgKey = msg.id || String(i);
-                                                    const action = diffActions.get(msgKey);
-
-                                                    // Если действие уже совершено — показываем badge
-                                                    if (action) {
-                                                        return (
-                                                            <div className={`flex items-center gap-1.5 mt-2 w-fit ml-auto px-2.5 py-1 rounded-full text-[11px] font-medium ${action === 'accepted'
-                                                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                                                : 'bg-zinc-800/60 text-zinc-500 border border-zinc-700/40'
-                                                                }`}>
-                                                                {action === 'accepted' ? (
-                                                                    <>
-                                                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                                                                        Изменения приняты
-                                                                    </>
-                                                                ) : (
-                                                                    <>
-                                                                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
-                                                                        Изменения отклонены
-                                                                    </>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    }
-
-                                                    const currentOriginalCode = contextCode || modifiedCode || "";
-                                                    const hasContext = currentOriginalCode.trim().length > 0;
-                                                    const isDiffActive = activeDiffContent && (activeDiffContent === msg.content || msg.content.includes(activeDiffContent.substring(0, 50)));
-                                                    const shouldShowBanner = hasContext &&
-                                                        hasDiffBlocks(msg.content) &&
-                                                        parseDiffBlocks(msg.content).length > 0 &&
-                                                        !dismissedDiffMessages.has(msgKey) &&
-                                                        isDiffActive;
-
-                                                    if (!shouldShowBanner) return null;
-
-                                                    return (
-                                                        <DiffSummaryBanner
-                                                            content={msg.content}
-                                                            onApply={() => {
-                                                                // modifiedCode уже содержит применённый дифф (auto-apply из useEffect).
-                                                                // Просто фиксируем его как новый бейзлайн — НЕ применяем дифф повторно.
-                                                                if (onCommitCode) {
-                                                                    onCommitCode(modifiedCode || '');
-                                                                } else if (onApplyCode) {
-                                                                    onApplyCode(modifiedCode || '');
-                                                                }
-                                                                if (onActiveDiffChange) onActiveDiffChange('');
-                                                                setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
-                                                            }}
-                                                            onReject={() => {
-                                                                if (originalCode) {
-                                                                    if (onCommitCode) {
-                                                                        onCommitCode(originalCode);
-                                                                    } else if (onApplyCode) {
-                                                                        onApplyCode(originalCode);
-                                                                    }
-                                                                }
-                                                                if (onActiveDiffChange) onActiveDiffChange('');
-                                                                setDiffActions(prev => new Map(prev).set(msgKey, 'rejected'));
-                                                            }}
-                                                        />
-                                                    );
-                                                })()}
-                                            </>
-                                        ) : editingIndex === i ? (
-
-                                            <div className="w-full">
-                                                <textarea
-                                                    value={editText}
-                                                    onChange={(e) => setEditText(e.target.value)}
-                                                    onKeyDown={(e) => handleEditKeyDown(e, i)}
-                                                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-zinc-300 text-[13px] font-sans resize-none focus:outline-none focus:border-blue-500/50 transition-colors"
-                                                    rows={Math.min(10, Math.max(3, editText.split('\n').length))}
-                                                    autoFocus
-                                                />
-                                                <div className="flex justify-end gap-2 mt-2">
-                                                    <button
-                                                        onClick={handleCancelEdit}
-                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700 transition-all"
-                                                    >
-                                                        <X size={14} />
-                                                        Отмена
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleSaveEdit(i)}
-                                                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-500 transition-all"
-                                                    >
-                                                        <Play size={14} />
-                                                        Сохранить и перезапустить
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <pre className="whitespace-pre-wrap font-sans break-words break-all overflow-hidden" style={{ fontFamily: 'Inter, sans-serif', overflowWrap: 'anywhere' }}>{msg.displayContent || msg.content}</pre>
-                                        )}
+                            {/* Системное сообщение (уведомление об ошибках применения диффов) */}
+                            {(msg.role as string) === 'system' ? (
+                                <div className="w-full max-w-full rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-[13px] text-amber-300/90 shadow-sm">
+                                    <div className="flex items-start gap-2">
+                                        <svg className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                        </svg>
+                                        <div className="flex-1 whitespace-pre-wrap leading-relaxed">
+                                            {msg.content}
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
+                            ) : (
+                                <div className={`p-4 rounded-xl border text-[13px] leading-relaxed group ${msg.role === 'user' ? 'bg-[#1b1b1f] border-zinc-800/80 text-zinc-300 max-w-[90%]' : 'bg-zinc-900/40 border-zinc-800/50 text-zinc-300 shadow-sm w-full max-w-full'}`}>
+                                    <div className="min-w-0 flex flex-col gap-3">
+                                        {/* Message Header with Actions */}
+                                        <div className="flex items-start justify-end gap-2 mb-2">
+                                            {/* Actions */}
+                                            <MessageActions
+                                                content={msg.content}
+                                                timestamp={msg.timestamp}
+                                                isUser={msg.role === 'user'}
+                                                onEdit={msg.role === 'user' ? () => handleStartEdit(i, msg.content) : undefined}
+                                            />
+                                        </div>
+
+                                        <div className="min-w-0 flex flex-col gap-3">
+                                            {msg.role === 'assistant' && msg.parts ? (
+                                                <>
+                                                    {msg.parts.map((part, partIdx) => {
+                                                        if (part.type === 'thinking') {
+                                                            const thinkingKey = `${i}-${partIdx}`;
+                                                            const isThinkingStreaming = isLoading && i === messages.length - 1;
+                                                            const isExpanded = expandedThinking[thinkingKey] ?? false;
+                                                            return (
+                                                                <div key={partIdx} className="my-1 mb-2">
+                                                                    <button
+                                                                        onClick={() => toggleThinking(thinkingKey)}
+                                                                        className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
+                                                                    >
+                                                                        <BrainCircuit className="w-3.5 h-3.5" />
+                                                                        <span>{isThinkingStreaming && chatStatus ? chatStatus : 'Размышления'}</span>
+                                                                        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                                                                    </button>
+                                                                    {isExpanded && (
+                                                                        <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
+                                                                            {part.content}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        } else if (part.type === 'tool') {
+                                                            const tc = msg.toolCalls?.find(t => t.id === part.toolCallId);
+                                                            if (!tc) return null;
+                                                            return (
+                                                                <div key={partIdx} className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
+                                                                    <ToolCallBlock toolCall={tc} />
+                                                                </div>
+                                                            );
+                                                        } else {
+                                                            // text
+                                                            return (
+                                                                <div key={partIdx} className="min-w-0">
+                                                                    <MarkdownRenderer
+                                                                        content={part.content || ''}
+                                                                        isStreaming={isLoading && i === messages.length - 1 && partIdx === msg.parts!.length - 1}
+                                                                        onApplyCode={onApplyCode}
+                                                                        originalCode={contextCode || modifiedCode || ""}
+                                                                    />
+                                                                </div>
+                                                            );
+                                                        }
+                                                    })}
+                                                    {/* Статус выполнения — внутри пузыря, после всех parts */}
+                                                    {isLoading && i === messages.length - 1 && (
+                                                        <div className="flex items-center gap-2 mt-1 pt-2 border-t border-zinc-800/40">
+                                                            <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 flex-shrink-0" />
+                                                            <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
+                                                            {currentIteration > 1 && (
+                                                                <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono ml-1">
+                                                                    Шаг {currentIteration}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                // Fallback for older messages or user messages
+                                                <>
+                                                    {/* Thinking Section */}
+                                                    {msg.thinking && (
+                                                        <div className="my-1 mb-3">
+                                                            <button
+                                                                onClick={() => toggleThinking(String(i))}
+                                                                className="flex items-center gap-2 text-[11px] text-white/40 hover:text-white/60 uppercase tracking-widest font-semibold transition-colors group mb-1.5"
+                                                            >
+                                                                <BrainCircuit className="w-3.5 h-3.5" />
+                                                                <span>{msg.thinking && isLoading && i === messages.length - 1 && chatStatus ? chatStatus : 'Размышления'}</span>
+                                                                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expandedThinking[String(i)] ? 'rotate-90' : ''}`} />
+                                                            </button>
+                                                            {expandedThinking[String(i)] && (
+                                                                <div className="text-[12px] italic text-white/40 leading-relaxed border-l-2 border-white/10 pl-3 py-1 my-2 animate-in fade-in slide-in-from-top-1 whitespace-pre-wrap">
+                                                                    {msg.thinking}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Tool Calls */}
+                                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                                        <div className="flex flex-col gap-0.5 mb-2 mt-1 -ml-1">
+                                                            {msg.toolCalls.map((tc, idx) => (
+                                                                <ToolCallBlock key={idx} toolCall={tc} />
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Content */}
+                                                    <div className="min-w-0">
+                                                        {msg.role === 'assistant' ? (
+                                                            <MarkdownRenderer
+                                                                content={msg.content}
+                                                                isStreaming={isLoading && i === messages.length - 1}
+                                                                onApplyCode={onApplyCode}
+                                                                originalCode={contextCode || modifiedCode || ""}
+                                                            />
+                                                        ) : null}
+                                                    </div>
+                                                </>
+                                            )}
+
+                                            {msg.role === 'assistant' ? (
+                                                <>
+
+                                                    {(() => {
+                                                        const msgKey = msg.id || String(i);
+                                                        const action = diffActions.get(msgKey);
+
+                                                        // Если действие уже совершено — показываем badge
+                                                        if (action) {
+                                                            return (
+                                                                <div className={`flex items-center gap-1.5 mt-2 w-fit ml-auto px-2.5 py-1 rounded-full text-[11px] font-medium ${action === 'accepted'
+                                                                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                                                    : 'bg-zinc-800/60 text-zinc-500 border border-zinc-700/40'
+                                                                    }`}>
+                                                                    {action === 'accepted' ? (
+                                                                        <>
+                                                                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                                                                            Изменения приняты
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                                                                            Изменения отклонены
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        }
+
+                                                        const currentOriginalCode = contextCode || modifiedCode || "";
+                                                        const hasContext = currentOriginalCode.trim().length > 0;
+                                                        const shouldShowBanner = hasContext &&
+                                                            hasDiffBlocks(msg.content) &&
+                                                            parseDiffBlocks(msg.content).length > 0 &&
+                                                            !dismissedDiffMessages.has(msgKey);
+
+                                                        if (!shouldShowBanner) return null;
+
+                                                        return (
+                                                            <DiffSummaryBanner
+                                                                content={msg.content}
+                                                                onApply={() => {
+                                                                    // Применяем дифф только сейчас — по явному подтверждению пользователя
+                                                                    const baseCode = originalCode || modifiedCode || "";
+                                                                    const diffResult = applyDiffWithDiagnostics(baseCode, msg.content);
+                                                                    if (onApplyCode) {
+                                                                        onApplyCode(diffResult.code);
+                                                                    }
+                                                                    if (diffResult.failedCount > 0 || diffResult.fuzzyCount > 0) {
+                                                                        const errorMsg = formatDiffErrorMessage(diffResult);
+                                                                        if (errorMsg) addSystemMessage(errorMsg);
+                                                                    }
+                                                                    if (onActiveDiffChange) onActiveDiffChange('');
+                                                                    setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                }}
+                                                                onReject={() => {
+                                                                    // Просто сбрасываем превью — код в редакторе не тронут
+                                                                    if (onActiveDiffChange) onActiveDiffChange('');
+                                                                    setDiffActions(prev => new Map(prev).set(msgKey, 'rejected'));
+                                                                }}
+                                                            />
+                                                        );
+                                                    })()}
+                                                </>
+                                            ) : editingIndex === i ? (
+
+                                                <div className="w-full">
+                                                    <textarea
+                                                        value={editText}
+                                                        onChange={(e) => setEditText(e.target.value)}
+                                                        onKeyDown={(e) => handleEditKeyDown(e, i)}
+                                                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-zinc-300 text-[13px] font-sans resize-none focus:outline-none focus:border-blue-500/50 transition-colors"
+                                                        rows={Math.min(10, Math.max(3, editText.split('\n').length))}
+                                                        autoFocus
+                                                    />
+                                                    <div className="flex justify-end gap-2 mt-2">
+                                                        <button
+                                                            onClick={handleCancelEdit}
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700 transition-all"
+                                                        >
+                                                            <X size={14} />
+                                                            Отмена
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleSaveEdit(i)}
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-500 transition-all"
+                                                        >
+                                                            <Play size={14} />
+                                                            Сохранить и перезапустить
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <pre className="whitespace-pre-wrap font-sans break-words break-all overflow-hidden" style={{ fontFamily: 'Inter, sans-serif', overflowWrap: 'anywhere' }}>{msg.displayContent || msg.content}</pre>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     ))}
                     {/* Индикатор ожидания первого ответа (пока нет assistant-сообщения) */}
