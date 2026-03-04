@@ -143,7 +143,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             api_key_encrypted: '',
             base_url: provider.defaultUrl,
             max_tokens: 4096,
-            temperature: 0.7
+            temperature: providerValue === 'QwenCli' ? 0.1 : 0.7
         };
         invoke('save_profile', { profile: newProfile, apiKey: null }).then(() => {
             onUpdate();
@@ -522,10 +522,10 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     />
                                 </div>
                                 <div className="flex-1 min-w-[120px]">
-                                    <label className="text-xs text-zinc-500 uppercase font-bold px-1">
+                                    <label className="text-xs text-zinc-500 uppercase font-bold px-1 whitespace-nowrap overflow-hidden text-ellipsis">
                                         Temperature
                                         {editForm.provider === 'QwenCli' && editForm.enable_thinking && (
-                                            <span className="ml-1 text-amber-600 normal-case font-normal">(→ 1.0 при thinking)</span>
+                                            <span className="ml-1 text-amber-600 normal-case font-normal">(Thinking → 1.0)</span>
                                         )}
                                     </label>
                                     <input
@@ -543,7 +543,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                     <div>
                                         <span className="text-xs text-zinc-400 font-medium">Режим размышлений</span>
                                         <p className="text-[10px] text-zinc-600 mt-0.5">
-                                            enable_thinking · budget 8192 токенов · temp → 1.0
+                                            enable_thinking · budget 8192 токенов · temp → 1.0 (возврат к настройке при генерации)
                                         </p>
                                     </div>
                                     <button

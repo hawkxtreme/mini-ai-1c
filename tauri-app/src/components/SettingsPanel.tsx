@@ -31,7 +31,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
         }
     }, [isOpen, initialTab]);
 
-    const { profiles, activeProfileId, loadProfiles } = useProfiles();
+    const { profiles, activeProfileId, activeProfile, loadProfiles } = useProfiles();
     const { loadSettings } = useSettings();
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
@@ -296,6 +296,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                             saveDebugLogs={async () => {
                                 try { await invoke('save_debug_logs'); } catch (e) { console.error(e); }
                             }}
+                            currentProvider={activeProfile?.provider}
                         />
                     )}
                 </div>

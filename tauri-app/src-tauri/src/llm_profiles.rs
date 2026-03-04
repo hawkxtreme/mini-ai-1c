@@ -123,6 +123,19 @@ pub fn load_profiles() -> ProfileStore {
             Ok(content) => {
                 match serde_json::from_str::<ProfileStore>(&content) {
                     Ok(mut store) => {
+                        let mut changed = false;
+                        for profile in &mut store.profiles {
+                            if matches!(profile.provider, LLMProvider::QwenCli) && (profile.temperature - 0.7).abs() < f32::EPSILON {
+                                crate::app_log!(force: true, "[LLM Profiles] Migrating QwenCli profile '{}' temperature from 0.7 to 0.1", profile.name);
+                                profile.temperature = 0.1;
+                                changed = true;
+                            }
+                        }
+                        
+                        if changed {
+                            let _ = save_profiles(&store);
+                        }
+
                         if store.profiles.is_empty() {
                             store.profiles.push(LLMProfile::default_profile());
                             store.active_profile_id = "default".to_string();
