@@ -3,7 +3,7 @@ import { useChat, ToolCall } from '../../contexts/ChatContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
-import { parseConfiguratorTitle } from '../../utils/configurator';
+import { parseConfiguratorTitle, ConfiguratorTitleContext } from '../../utils/configurator';
 import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
 import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal } from 'lucide-react';
 import { useVoiceInput } from '../../voice/useVoiceInput';
@@ -13,6 +13,7 @@ import { MessageActions } from './MessageActions';
 import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
+import { ContextChips } from './ContextChips';
 import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/settings';
 import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from '../settings/QwenAuthModal';
@@ -92,7 +93,7 @@ export function ChatArea({
     const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun, addSystemMessage } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { settings, updateSettings } = useSettings();
-    const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode } = useConfigurator();
+    const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode, parsedTitleContext } = useConfigurator();
 
     const [appliedDiffMessages, setAppliedDiffMessages] = useState<Set<string>>(new Set());
     const [dismissedDiffMessages, setDismissedDiffMessages] = useState<Set<string>>(new Set());
@@ -106,6 +107,7 @@ export function ChatArea({
     const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({});
     const [contextCode, setContextCode] = useState('');
     const [isContextSelection, setIsContextSelection] = useState(false);
+    const [configuratorTitleCtx, setConfiguratorTitleCtx] = useState<ConfiguratorTitleContext | null>(null);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [editText, setEditText] = useState('');
     const [showVoiceHint, setShowVoiceHint] = useState(false);
@@ -304,6 +306,11 @@ export function ChatArea({
                 behavior: 'smooth'
             });
         }
+        if (messages.length === 0) {
+            setContextCode('');
+            setIsContextSelection(false);
+            setConfiguratorTitleCtx(null);
+        }
     }, [messages.length]);
 
     useEffect(() => {
@@ -415,7 +422,7 @@ export function ChatArea({
         // так как он уже вставлен в expanded-шаблон через {code}
         const finalContext = isSlashCommand ? undefined : (contextCode || modifiedCode);
 
-        sendMessage(textToSend, finalContext, diagStrings, displayContent);
+        sendMessage(textToSend, finalContext, diagStrings, displayContent, configuratorTitleCtx);
         setInput('');
         // Clear context after sending
         setContextCode('');
@@ -528,6 +535,8 @@ export function ChatArea({
 
         setContextCode(code);
         setIsContextSelection(isSelection);
+        // Захватываем контекст заголовка конфигуратора в момент загрузки кода
+        setConfiguratorTitleCtx(parsedTitleContext);
         if (onCodeLoaded) {
             onCodeLoaded(code, isSelection);
         }
@@ -540,6 +549,7 @@ export function ChatArea({
     const handleRemoveCodeContext = () => {
         setContextCode('');
         setIsContextSelection(false);
+        setConfiguratorTitleCtx(null);
     };
 
     const handleStartEdit = (index: number, content: string) => {
@@ -555,7 +565,7 @@ export function ChatArea({
     const handleSaveEdit = (index: number) => {
         if (editText.trim()) {
             const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
-            editAndRerun(index, editText, contextCode || modifiedCode, diagStrings);
+            editAndRerun(index, editText, contextCode || modifiedCode, diagStrings, undefined, configuratorTitleCtx);
             setEditingIndex(null);
             setEditText('');
         }
@@ -944,9 +954,13 @@ export function ChatArea({
                         </div>
                     )}
 
-                    <div className="flex items-center gap-2 text-[10px] text-zinc-600 font-mono">
-                        {modifiedCode && modifiedCode.length > 0 && `CONTEXT: ${modifiedCode.length} chars`}
-                    </div>
+                    <ContextChips
+                        codeContext={contextCode || modifiedCode}
+                        isSelection={isContextSelection}
+                        diagnostics={diagnostics}
+                        configuratorCtx={configuratorTitleCtx}
+                        onRemoveCode={handleRemoveCodeContext}
+                    />
                 </div>
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
 
