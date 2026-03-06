@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import * as api from '../api';
 import { useSettings } from './SettingsContext';
-import { parseConfiguratorTitle } from '../utils/configurator';
+import { parseConfiguratorTitle, parseConfiguratorTitleFull, ConfiguratorTitleContext } from '../utils/configurator';
 
 export interface WindowInfo {
     hwnd: number;
@@ -18,6 +18,7 @@ interface ConfiguratorContextType {
     checkSelection: () => Promise<boolean>;
     snapToConfigurator: () => Promise<void>;
     activeConfigTitle: string;
+    parsedTitleContext: ConfiguratorTitleContext | null;
 }
 
 const ConfiguratorContext = createContext<ConfiguratorContextType | undefined>(undefined);
@@ -68,6 +69,13 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         const win = detectedWindows.find(w => w.hwnd === selectedHwnd);
         if (!win) return "Конфигуратор";
         return parseConfiguratorTitle(win.title);
+    }, [selectedHwnd, detectedWindows]);
+
+    const parsedTitleContext = useMemo<ConfiguratorTitleContext | null>(() => {
+        if (!selectedHwnd) return null;
+        const win = detectedWindows.find(w => w.hwnd === selectedHwnd);
+        if (!win) return null;
+        return parseConfiguratorTitleFull(win.title);
     }, [selectedHwnd, detectedWindows]);
 
     const getCode = useCallback(async (useSelectAll: boolean): Promise<string> => {
@@ -135,8 +143,9 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
         pasteCode,
         checkSelection,
         snapToConfigurator,
-        activeConfigTitle
-    }), [detectedWindows, selectedHwnd, refreshWindows, selectWindow, getCode, pasteCode, checkSelection, snapToConfigurator, activeConfigTitle]);
+        activeConfigTitle,
+        parsedTitleContext,
+    }), [detectedWindows, selectedHwnd, refreshWindows, selectWindow, getCode, pasteCode, checkSelection, snapToConfigurator, activeConfigTitle, parsedTitleContext]);
 
     return (
         <ConfiguratorContext.Provider value={contextValue}>

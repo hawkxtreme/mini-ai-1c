@@ -86,13 +86,28 @@ pub async fn stream_chat_completion(
     let thinking_enabled = force_thinking.unwrap_or_else(|| {
         matches!(profile.provider, LLMProvider::QwenCli) && profile.enable_thinking.unwrap_or(false)
     });
-    
+
     let effective_temperature = if let Some(t) = force_temperature {
         t
-    } else if thinking_enabled { 
-        1.0 
-    } else { 
-        profile.temperature 
+    } else if thinking_enabled {
+        1.0
+    } else {
+        profile.temperature
+    };
+
+    // Dynamic thinking budget: estimate total input tokens (chars / 4),
+    // then allocate ~30% for thinking, clamped to [8192, 32768].
+    // This prevents the model from "thinking without space" in long conversations.
+    let dynamic_thinking_budget: Option<u32> = if thinking_enabled {
+        let total_chars: usize = api_messages.iter()
+            .map(|m| m.content.as_deref().map(|c| c.len()).unwrap_or(0))
+            .sum();
+        let estimated_tokens = (total_chars / 4) as u32;
+        let budget = (estimated_tokens * 30 / 100).max(8192).min(32768);
+        crate::app_log!("[AI] Thinking budget: {}t (input ~{}t)", budget, estimated_tokens);
+        Some(budget)
+    } else {
+        None
     };
 
     let request_body = ChatRequest {
@@ -103,7 +118,7 @@ pub async fn stream_chat_completion(
         max_tokens: api_max_tokens,
         tools: tools_opt,
         enable_thinking: if thinking_enabled { Some(true) } else { None },
-        thinking_budget_tokens: if thinking_enabled { Some(8192) } else { None },
+        thinking_budget_tokens: dynamic_thinking_budget,
     };
     
     let mut headers = HeaderMap::new();

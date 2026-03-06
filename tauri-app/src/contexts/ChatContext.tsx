@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../api';
+import { ConfiguratorTitleContext, formatConfiguratorContextForLLM } from '../utils/configurator';
 
 export interface ToolCall {
     id: string;
@@ -43,10 +44,10 @@ interface ChatContextType {
     isLoading: boolean;
     chatStatus: string;
     currentIteration: number;
-    sendMessage: (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => Promise<void>;
+    sendMessage: (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     stopChat: () => Promise<void>;
     clearChat: () => void;
-    editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => Promise<void>;
+    editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     addSystemMessage: (content: string) => void;
 }
 
@@ -304,7 +305,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         };
     }, []);
 
-    const sendMessage = useCallback(async (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => {
+    const sendMessage = useCallback(async (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
         if (!content.trim() || isLoading) return;
 
         // 1. UI: Show clean user message (original slash command if available)
@@ -322,7 +323,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
         // 2. Backend: Prepare payload
         let contextPayload = content;
-        if (codeContext) {
+        if (configuratorCtx && codeContext) {
+            // Структурированный блок: SOURCE + PARSED CONTEXT + код
+            contextPayload += '\n\n' + formatConfiguratorContextForLLM(configuratorCtx);
+            contextPayload += `SELECTED CODE:\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
+            if (diagnostics && diagnostics.length > 0) {
+                contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
+            }
+        } else if (configuratorCtx && !codeContext) {
+            // Только контекст источника без кода (например, slash-команда со встроенным кодом)
+            contextPayload += '\n\n' + formatConfiguratorContextForLLM(configuratorCtx);
+        } else if (codeContext) {
+            // Старый формат без контекста конфигуратора
             contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
             if (diagnostics && diagnostics.length > 0) {
                 contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
@@ -415,7 +427,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     // Edit message and rerun from that point
-    const editAndRerun = useCallback(async (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string) => {
+    const editAndRerun = useCallback(async (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
         if (!newContent.trim() || isLoading) return;
 
         // 1. Truncate messages to the edited message
@@ -437,7 +449,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
         // 4. Prepare payload
         let contextPayload = newContent;
-        if (codeContext) {
+        if (configuratorCtx && codeContext) {
+            contextPayload += '\n\n' + formatConfiguratorContextForLLM(configuratorCtx);
+            contextPayload += `SELECTED CODE:\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
+            if (diagnostics && diagnostics.length > 0) {
+                contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
+            }
+        } else if (codeContext) {
             contextPayload += `\n\n=== CURRENT CODE CONTEXT ===\n\`\`\`bsl\n${codeContext}\n\`\`\`\n`;
             if (diagnostics && diagnostics.length > 0) {
                 contextPayload += `\n=== BSL DIAGNOSTICS (for context only) ===\n${diagnostics.join('\n')}\n`;
