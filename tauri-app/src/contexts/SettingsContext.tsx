@@ -14,16 +14,16 @@ const SettingsContext = createContext<SettingsContextType | undefined>(undefined
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
     const [settings, setSettings] = useState<AppSettings | null>(null);
 
-    const loadSettings = async () => {
+    const loadSettings = React.useCallback(async () => {
         try {
             const data = await api.getSettings();
             setSettings(data);
         } catch (e) {
             console.error("Failed to load settings:", e);
         }
-    };
+    }, []);
 
-    const updateSettings = async (newSettings: AppSettings) => {
+    const updateSettings = React.useCallback(async (newSettings: AppSettings) => {
         try {
             await api.saveSettings(newSettings);
             setSettings(newSettings);
@@ -31,14 +31,20 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
             console.error("Failed to save settings:", e);
             throw e;
         }
-    };
+    }, []);
 
     useEffect(() => {
         loadSettings();
-    }, []);
+    }, [loadSettings]);
+
+    const value = React.useMemo(() => ({
+        settings,
+        loadSettings,
+        updateSettings
+    }), [settings, loadSettings, updateSettings]);
 
     return (
-        <SettingsContext.Provider value={{ settings, loadSettings, updateSettings }}>
+        <SettingsContext.Provider value={value}>
             {children}
         </SettingsContext.Provider>
     );

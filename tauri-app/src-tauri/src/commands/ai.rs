@@ -3,11 +3,31 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use crate::ai::{extract_bsl_code, stream_chat_completion, ApiMessage};
 
+/// Simplified tool call structure from frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontendToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: FrontendToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontendToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
 /// Chat message structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<FrontendToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// State for managing active chat task
@@ -25,13 +45,24 @@ pub async fn stop_chat(
     state: tauri::State<'_, ChatState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
+    // Release the approval channel first to unblock approve_tool waiters
+    {
+        let mut tx_guard = state.approval_tx.lock().await;
+        if let Some(tx) = tx_guard.take() {
+            // Send reject to unblock any pending rx.recv() in the streaming loop
+            let _ = tx.send(false).await;
+        }
+    }
     let mut handle_guard = state.abort_handle.lock().await;
     if let Some(handle) = handle_guard.take() {
         handle.abort();
-        let _ = app_handle.emit("chat-status", "Generation stopped by user");
     }
+    // Always emit chat-done so the frontend isLoading state is reset
+    let _ = app_handle.emit("chat-status", "");
+    let _ = app_handle.emit("chat-done", ());
     Ok(())
 }
+
 
 /// Approve the pending tool call
 #[tauri::command]
@@ -79,12 +110,31 @@ pub async fn stream_chat(
     // Convert to API messages
     let mut api_messages: Vec<ApiMessage> = messages
         .into_iter()
-        .map(|m| ApiMessage {
-            role: m.role,
-            content: Some(m.content),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
+        .map(|m| {
+            // Convert frontend tool_calls to backend ToolCall format
+            let tool_calls = m.tool_calls.map(|tcs| {
+                tcs.into_iter().map(|tc| crate::ai::models::ToolCall {
+                    id: tc.id,
+                    r#type: tc.r#type,
+                    function: crate::ai::models::ToolCallFunction {
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    },
+                }).collect::<Vec<_>>()
+            });
+
+            ApiMessage {
+                role: m.role,
+                content: if m.content.is_empty() && tool_calls.is_some() {
+                    // assistant message with tool_calls may have empty content (valid)
+                    None
+                } else {
+                    Some(m.content)
+                },
+                tool_calls,
+                tool_call_id: m.tool_call_id,
+                name: m.name,
+            }
         })
         .collect();
 
@@ -244,15 +294,28 @@ pub async fn stream_chat(
             // 1.5 If we were in planning phase and no tools were called, transition to execution phase
             if is_planning_phase {
                 is_planning_phase = false;
-                let _ = task_app_handle.emit("chat-status", "План составлен. Переход к генерации кода...");
-                api_messages.push(ApiMessage {
-                    role: "user".to_string(),
-                    content: Some("Отлично. План составлен и информация собрана. Теперь сгенерируй финальный 1С код на основе этого плана. Пиши только проверенный и рабочий BSL код.\nВНИМАНИЕ: Если код был запрошен, используй правила DIFF_FORMAT_INSTRUCTIONS.".to_string()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                });
-                continue; // Trigger the next loop iteration (Execution Phase)
+                
+                let full_text = assistant_msg.content.as_deref().unwrap_or("");
+                let has_diff = full_text.contains("<diff>") || full_text.contains("<<<<<<< SEARCH");
+                let has_bsl = !full_text.is_empty() && !extract_bsl_code(full_text).is_empty() && !has_diff;
+
+                if has_diff || has_bsl {
+                    // AI already provided the solution in the planning phase.
+                    // Skip adding the "Plan complete" message and don't emit "chat-new-iteration".
+                    let _ = task_app_handle.emit("chat-status", "Решение получено на этапе планирования. Переход к проверке...");
+                } else {
+                    let _ = task_app_handle.emit("chat-status", "План составлен. Переход к генерации кода...");
+                    // Signal frontend to create a NEW assistant block for the execution phase reply
+                    let _ = task_app_handle.emit("chat-new-iteration", ());
+                    api_messages.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: Some("Отлично. План составлен и информация собрана. Теперь сгенерируй финальный 1С код на основе этого плана. Пиши только проверенный и рабочий BSL код.\nВНИМАНИЕ: Если код был запрошен, используй правила DIFF_FORMAT_INSTRUCTIONS.".to_string()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    continue; // Trigger the next loop iteration (Execution Phase)
+                }
             }
 
             // 2. If no tool calls, check for BSL blocks

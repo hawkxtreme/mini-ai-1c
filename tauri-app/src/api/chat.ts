@@ -1,8 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export interface ChatToolCall {
+    id: string;
+    type: string;
+    function: {
+        name: string;
+        arguments: string;
+    };
+}
+
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'tool';
     content: string;
+    tool_calls?: ChatToolCall[];
+    tool_call_id?: string;
+    name?: string;
 }
 
 export interface ChatSession {

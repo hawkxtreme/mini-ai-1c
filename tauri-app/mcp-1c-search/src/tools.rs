@@ -575,26 +575,183 @@ async fn handle_get_object_structure(
     db_path: &Option<PathBuf>,
     config_path: &Option<PathBuf>,
 ) -> Result<Value, String> {
-    let db = db_path
-        .as_ref()
-        .ok_or("Индекс не готов. Укажите путь к конфигурации в настройках MCP сервера.")?;
-
     let object_name = args["object"].as_str().ok_or("Параметр 'object' обязателен")?;
     if object_name.trim().is_empty() {
         return Err("Параметр 'object' не может быть пустым".to_string());
     }
 
-    let db_clone = db.clone();
-    let name_owned = object_name.to_string();
+    // Try SQLite index first (if available)
+    let details = if let Some(db) = db_path.as_ref() {
+        let db_clone = db.clone();
+        let name_owned = object_name.to_string();
+        tokio::task::spawn_blocking(move || index::get_object_details(&db_clone, &name_owned))
+            .await
+            .map_err(|e| format!("Ошибка выполнения: {}", e))?
+    } else {
+        None
+    };
 
-    let details = tokio::task::spawn_blocking(move || index::get_object_details(&db_clone, &name_owned))
-        .await
-        .map_err(|e| format!("Ошибка выполнения: {}", e))?;
+    match details {
+        Some(d) => {
+            let mut text = format!("## {}.{}\n\n", d.obj_type, d.name);
 
-    let d = match details {
-        Some(d) => d,
+            if !d.attributes.is_empty() {
+                text.push_str(&format!("### Реквизиты ({})\n", d.attributes.len()));
+                for attr in &d.attributes { text.push_str(&format!("- {}\n", attr)); }
+                text.push('\n');
+            }
+            if !d.tabular_sections.is_empty() {
+                text.push_str(&format!("### Табличные части ({})\n", d.tabular_sections.len()));
+                for (section, attrs) in &d.tabular_sections {
+                    if attrs.is_empty() {
+                        text.push_str(&format!("- **{}**\n", section));
+                    } else {
+                        text.push_str(&format!("- **{}**: {}\n", section, attrs.join(", ")));
+                    }
+                }
+                text.push('\n');
+            }
+            if !d.forms.is_empty() {
+                text.push_str(&format!("### Формы ({})\n", d.forms.len()));
+                for form in &d.forms { text.push_str(&format!("- {}\n", form)); }
+                text.push('\n');
+            }
+            if !d.commands.is_empty() {
+                text.push_str(&format!("### Команды ({})\n", d.commands.len()));
+                for cmd in &d.commands { text.push_str(&format!("- {}\n", cmd)); }
+                text.push('\n');
+            }
+            if !d.modules.is_empty() {
+                text.push_str(&format!("### Модули ({})\n", d.modules.len()));
+                for m in &d.modules { text.push_str(&format!("- {}\n", m)); }
+                text.push('\n');
+            }
+            if d.attributes.is_empty()
+                && d.tabular_sections.is_empty()
+                && d.forms.is_empty()
+                && d.commands.is_empty()
+                && d.modules.is_empty()
+            {
+                // ConfigDumpInfo.xml not available — fall back to scanning the object folder
+                text.push_str("*ConfigDumpInfo.xml не проиндексирован — данные получены из файловой структуры.*\n\n");
+                if let Some(fallback) = scan_object_folder_fallback(&d.obj_type, &d.name, config_path) {
+                    text.push_str(&fallback);
+                } else {
+                    text.push_str("*Папка объекта не найдена в выгрузке конфигурации.*\n");
+                    text.push_str("Используйте `search_code` для поиска кода этого объекта.\n");
+                }
+            }
+
+            Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+        }
         None => {
-            return Ok(json!({
+            // Object not in index — try to resolve via filesystem directly
+            // Supports both "Type.Name" and plain "Name" forms
+            let (explicit_type, plain_name) = if let Some(dot) = object_name.find('.') {
+                let t = &object_name[..dot];
+                let n = &object_name[dot + 1..];
+                if object_type_to_folder(t).is_some() {
+                    (Some(t.to_string()), n.to_string())
+                } else {
+                    (None, object_name.to_string())
+                }
+            } else {
+                (None, object_name.to_string())
+            };
+
+            if let Some(root) = config_path.as_ref() {
+                // If type is explicit, try only that folder; otherwise try all known types
+                let types_to_try: Vec<(&str, &'static str)> = if let Some(ref t) = explicit_type {
+                    if let Some(folder) = object_type_to_folder(t.as_str()) {
+                        vec![(t.as_str(), folder)]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    // Try all known types - find first matching folder
+                    vec![
+                        ("CommonModule", "CommonModules"),
+                        ("Catalog", "Catalogs"),
+                        ("Document", "Documents"),
+                        ("DataProcessor", "DataProcessors"),
+                        ("Report", "Reports"),
+                        ("InformationRegister", "InformationRegisters"),
+                        ("AccumulationRegister", "AccumulationRegisters"),
+                        ("AccountingRegister", "AccountingRegisters"),
+                        ("ExchangePlan", "ExchangePlans"),
+                        ("Enum", "Enums"),
+                        ("BusinessProcess", "BusinessProcesses"),
+                        ("Task", "Tasks"),
+                        ("ChartOfCharacteristicTypes", "ChartsOfCharacteristicTypes"),
+                        ("ChartOfAccounts", "ChartsOfAccounts"),
+                        ("ChartOfCalculationTypes", "ChartsOfCalculationTypes"),
+                        ("CommonForm", "CommonForms"),
+                        ("CommonCommand", "CommonCommands"),
+                        ("ScheduledJob", "ScheduledJobs"),
+                        ("Constant", "Constants"),
+                        ("DocumentJournal", "DocumentJournals"),
+                        ("Role", "Roles"),
+                        ("Subsystem", "Subsystems"),
+                    ]
+                };
+
+                let plain_name_lower = plain_name.to_lowercase();
+                for (obj_type, folder) in &types_to_try {
+                    let parent = root.join(folder);
+                    if !parent.is_dir() { continue; }
+
+                    // Try exact match first, then case-insensitive
+                    let obj_dir = {
+                        let exact = parent.join(&plain_name);
+                        if exact.is_dir() {
+                            Some(exact)
+                        } else {
+                            std::fs::read_dir(&parent).ok()
+                                .and_then(|rd| {
+                                    rd.flatten()
+                                        .find(|e| e.file_name().to_string_lossy().to_lowercase() == plain_name_lower)
+                                        .map(|e| e.path())
+                                })
+                        }
+                    };
+
+                    if let Some(dir) = obj_dir {
+                        let actual_name = dir.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| plain_name.clone());
+
+                        let mut text = format!(
+                            "## {}.{}\n*Объект найден в файловой системе (не в индексе — запустите переиндексацию для полных данных).*\n\n",
+                            obj_type, actual_name
+                        );
+
+                        if let Some(fallback) = scan_object_folder_fallback(obj_type, &actual_name, config_path) {
+                            text.push_str(&fallback);
+                        } else {
+                            text.push_str("*Папка объекта пуста.*\n");
+                        }
+
+                        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+                    }
+                }
+
+                // Nothing found even in filesystem
+                return Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Объект \"{}\" не найден ни в индексе, ни в файловой системе конфигурации.\n\
+                             Попробуйте:\n\
+                             1. `list_objects` — список проиндексированных объектов\n\
+                             2. `sync_index` — переиндексировать конфигурацию\n\
+                             3. Проверьте правильность имени объекта (без пространства имён)",
+                            object_name
+                        )
+                    }]
+                }));
+            }
+
+            Ok(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
@@ -605,67 +762,9 @@ async fn handle_get_object_structure(
                 }]
             }))
         }
-    };
-
-    let mut text = format!("## {}.{}\n\n", d.obj_type, d.name);
-
-    if !d.attributes.is_empty() {
-        text.push_str(&format!("### Реквизиты ({})\n", d.attributes.len()));
-        for attr in &d.attributes {
-            text.push_str(&format!("- {}\n", attr));
-        }
-        text.push('\n');
     }
-    if !d.tabular_sections.is_empty() {
-        text.push_str(&format!("### Табличные части ({})\n", d.tabular_sections.len()));
-        for (section, attrs) in &d.tabular_sections {
-            if attrs.is_empty() {
-                text.push_str(&format!("- **{}**\n", section));
-            } else {
-                text.push_str(&format!("- **{}**: {}\n", section, attrs.join(", ")));
-            }
-        }
-        text.push('\n');
-    }
-    if !d.forms.is_empty() {
-        text.push_str(&format!("### Формы ({})\n", d.forms.len()));
-        for form in &d.forms {
-            text.push_str(&format!("- {}\n", form));
-        }
-        text.push('\n');
-    }
-    if !d.commands.is_empty() {
-        text.push_str(&format!("### Команды ({})\n", d.commands.len()));
-        for cmd in &d.commands {
-            text.push_str(&format!("- {}\n", cmd));
-        }
-        text.push('\n');
-    }
-    if !d.modules.is_empty() {
-        text.push_str(&format!("### Модули ({})\n", d.modules.len()));
-        for m in &d.modules {
-            text.push_str(&format!("- {}\n", m));
-        }
-        text.push('\n');
-    }
-    if d.attributes.is_empty()
-        && d.tabular_sections.is_empty()
-        && d.forms.is_empty()
-        && d.commands.is_empty()
-        && d.modules.is_empty()
-    {
-        // ConfigDumpInfo.xml not available — fall back to scanning the object folder
-        text.push_str("*ConfigDumpInfo.xml не проиндексирован — данные получены из файловой структуры.*\n\n");
-        if let Some(fallback) = scan_object_folder_fallback(&d.obj_type, &d.name, config_path) {
-            text.push_str(&fallback);
-        } else {
-            text.push_str("*Папка объекта не найдена в выгрузке конфигурации.*\n");
-            text.push_str("Используйте `search_code` для поиска кода этого объекта.\n");
-        }
-    }
-
-    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }
+
 
 /// Scan the object's folder in the config dump to collect forms, modules, templates, commands.
 fn scan_object_folder_fallback(

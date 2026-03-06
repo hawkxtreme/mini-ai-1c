@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { DiffEditor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
 
@@ -21,6 +21,8 @@ export function BslDiffEditor({
     className,
     hideBorder = false
 }: BslDiffEditorProps) {
+    const editorRef = useRef<any>(null);
+
     // Normalize line endings to LF to prevent Monaco from highlighting the entire file as changed
     const normalizedOriginal = original ? original.replace(/\r\n/g, '\n') : '';
     const normalizedModified = modified ? modified.replace(/\r\n/g, '\n') : '';
@@ -49,19 +51,58 @@ export function BslDiffEditor({
                 theme="vs-dark"
                 original={normalizedOriginal}
                 modified={normalizedModified}
-                loading={loading || defaultLoading}
+                onMount={(editor) => {
+                    editorRef.current = editor;
+
+                    const diffObserver = new ResizeObserver(() => {
+                        window.requestAnimationFrame(() => {
+                            if (editorRef.current) {
+                                editorRef.current.layout();
+                            }
+                        });
+                    });
+
+                    const container = editor.getContainerDomNode();
+                    if (container) {
+                        diffObserver.observe(container);
+                    }
+
+                    editor.onDidDispose(() => {
+                        diffObserver.disconnect();
+                    });
+
+                    // Первичный layout с ожиданием монтирования DOM
+                    let attempts = 0;
+                    const checkAndLayout = () => {
+                        if (attempts > 10) return;
+                        attempts++;
+                        if (container && container.clientWidth > 0) {
+                            editor.layout();
+                            return;
+                        }
+                        setTimeout(checkAndLayout, 50);
+                    };
+                    checkAndLayout();
+                }}
                 options={{
                     readOnly,
                     minimap: { enabled: false },
                     fontSize: 13,
                     lineNumbers: 'on',
                     scrollBeyondLastLine: false,
-                    automaticLayout: true,
+                    automaticLayout: false,
                     padding: { top: 8, bottom: 8 },
                     renderLineHighlight: 'none',
                     folding: true,
                     renderSideBySide: true,
                     enableSplitViewResizing: true,
+                    // Используем продвинутый алгоритм сравнения (Myers diff)
+                    // для лучшего сопоставления строк при добавлении/удалении блоков
+                    diffAlgorithm: 'advanced',
+                    // Игнорируем незначительные изменения пробелов
+                    ignoreTrimWhitespace: false,
+                    // Показываем только изменения
+                    renderIndicators: true,
                     scrollbar: {
                         vertical: 'auto',
                         horizontal: 'auto',

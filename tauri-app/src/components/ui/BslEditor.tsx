@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Editor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
 
@@ -12,6 +12,8 @@ interface BslEditorProps {
 }
 
 export function BslEditor({ code, height = '200px', readOnly = true, loading, className, hideBorder = false }: BslEditorProps) {
+    const editorRef = useRef<any>(null);
+
     // Register BSL language once
     useEffect(() => {
         loader.init().then(monaco => {
@@ -36,13 +38,46 @@ export function BslEditor({ code, height = '200px', readOnly = true, loading, cl
                 theme="vs-dark"
                 value={code}
                 loading={loading || defaultLoading}
+                onMount={(editor) => {
+                    editorRef.current = editor;
+
+                    const editorObserver = new ResizeObserver(() => {
+                        window.requestAnimationFrame(() => {
+                            if (editorRef.current) {
+                                editorRef.current.layout();
+                            }
+                        });
+                    });
+
+                    const container = editor.getContainerDomNode();
+                    if (container) {
+                        editorObserver.observe(container);
+                    }
+
+                    editor.onDidDispose(() => {
+                        editorObserver.disconnect();
+                    });
+
+                    // Первичный layout с ожиданием монтирования DOM
+                    let attempts = 0;
+                    const checkAndLayout = () => {
+                        if (attempts > 10) return;
+                        attempts++;
+                        if (container && container.clientWidth > 0) {
+                            editor.layout();
+                            return;
+                        }
+                        setTimeout(checkAndLayout, 50);
+                    };
+                    checkAndLayout();
+                }}
                 options={{
                     readOnly,
                     minimap: { enabled: false },
                     fontSize: 13,
                     lineNumbers: 'on',
                     scrollBeyondLastLine: false,
-                    automaticLayout: true,
+                    automaticLayout: false,
                     padding: { top: 8, bottom: 8 },
                     renderLineHighlight: 'none',
                     folding: true,

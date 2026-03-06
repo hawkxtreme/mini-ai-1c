@@ -17,5 +17,6 @@ export interface CodeSidePanelProps {
     activeDiffContent?: string;
     onActiveDiffChange?: (content: string) => void;
     onDiffRejected?: () => void;
+    onCommitCode?: (code: string) => void;
     isFullWidth?: boolean;
 }

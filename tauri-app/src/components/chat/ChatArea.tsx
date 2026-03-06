@@ -4,7 +4,7 @@ import { useProfiles } from '../../contexts/ProfileContext';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle } from '../../utils/configurator';
-import { MarkdownRenderer } from '../MarkdownRenderer';
+import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
 import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal } from 'lucide-react';
 import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
@@ -157,56 +157,38 @@ export function ChatArea({
 
     // CLI Statuses
     const fetchCliStatuses = async () => {
+        const activeProfile = profiles.find(p => p.id === activeProfileId);
+        if (activeProfile?.provider !== 'QwenCli') return;
+
         try {
-            const cliProfiles = profiles.filter(p => p.provider === 'QwenCli');
-            const newStatuses: Record<string, CliStatus> = {};
-
-            for (const p of cliProfiles) {
-                try {
-                    const status = await cliProvidersApi.getStatus(p.id, 'qwen');
-                    newStatuses[p.id] = status;
-                } catch (err) {
-                    console.error(`Failed to fetch CLI status for profile ${p.id}:`, err);
-                }
-            }
-
-            setCliStatuses(newStatuses);
+            const status = await cliProvidersApi.getStatus(activeProfile.id, 'qwen');
+            setCliStatuses(prev => ({ ...prev, [activeProfile.id]: status }));
         } catch (err) {
-            console.error('Failed to fetch CLI statuses:', err);
+            console.error(`Failed to fetch CLI status for profile ${activeProfile.id}:`, err);
         }
     };
 
+    // Consolidated CLI status effect
     useEffect(() => {
         fetchCliStatuses();
-    }, [profiles]);
-
-    // Обновляем лимиты когда активный профиль переключается на QwenCli
-    useEffect(() => {
-        const activeProfile = profiles.find(p => p.id === activeProfileId);
-        if (activeProfile?.provider === 'QwenCli') {
-            fetchCliStatuses();
-        }
     }, [activeProfileId]);
 
-    // Обновляем счётчик сразу после завершения генерации
+    // Update status when generation completed
     const prevIsLoadingRef = useRef(false);
     useEffect(() => {
         if (prevIsLoadingRef.current && !isLoading) {
-            const activeProfile = profiles.find(p => p.id === activeProfileId);
-            if (activeProfile?.provider === 'QwenCli') {
-                fetchCliStatuses();
-            }
+            fetchCliStatuses();
         }
         prevIsLoadingRef.current = isLoading;
     }, [isLoading]);
 
-    // Периодическое обновление лимитов Qwen каждые 60 секунд
+    // Periodic check ONLY for QwenCli
     useEffect(() => {
+        const activeProfile = profiles.find(p => p.id === activeProfileId);
+        if (activeProfile?.provider !== 'QwenCli') return;
+
         const interval = setInterval(() => {
-            const activeProfile = profiles.find(p => p.id === activeProfileId);
-            if (activeProfile?.provider === 'QwenCli') {
-                fetchCliStatuses();
-            }
+            fetchCliStatuses();
         }, 60_000);
         return () => clearInterval(interval);
     }, [activeProfileId, profiles]);
@@ -346,18 +328,19 @@ export function ChatArea({
             return;
         }
 
-        // Показываем diff-превью немедленно (включая стриминг)
-        if (onActiveDiffChange) {
-            onActiveDiffChange(lastMsg.content);
-        }
-
-        // После завершения стриминга — фиксируем как "показанное"
-        if (!isLoading && !appliedDiffMessages.has(msgKey)) {
-            setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+        // Показываем diff-превью только ПОСЛЕ завершения стриминга
+        if (!isLoading) {
+            if (onActiveDiffChange) {
+                onActiveDiffChange(lastMsg.content);
+            }
+            // Фиксируем как "показанное"
+            if (!appliedDiffMessages.has(msgKey)) {
+                setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
+            }
         }
     }, [messages, isLoading, onActiveDiffChange, appliedDiffMessages, diffActions, activeDiffContent]);
 
-    const handleSendMessage = (textOverride?: string) => {
+    const handleSendMessage = async (textOverride?: string) => {
         let textToSend = textOverride || input;
 
         // Автоматическое расширение слеш-команд
@@ -393,9 +376,30 @@ export function ChatArea({
                 }
 
                 let expanded = foundCmd.template;
+
+                // Если шаблон требует {code}, а у нас нет contextCode, 
+                // пытаемся автоматически получить выделенный текст из активного окна Конфигуратора
+                let activeCode = contextCode || modifiedCode || '';
+                if (expanded.includes('{code}') && !contextCode && selectedHwnd) {
+                    try {
+                        const fetchedCode = await getCode(true); // Запрашиваем только выделение
+                        if (fetchedCode && fetchedCode.trim().length > 0) {
+                            activeCode = fetchedCode;
+                        } else {
+                            // Если нет выделения, запрашиваем весь текст
+                            const fullCode = await getCode(false);
+                            if (fullCode && fullCode.trim().length > 0) {
+                                activeCode = fullCode;
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Failed to auto-fetch code context for slash command:', err);
+                    }
+                }
+
                 const diagStringsText = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`).join('\n');
                 expanded = expanded.replace('{diagnostics}', diagStringsText || 'Ошибок не обнаружено');
-                expanded = expanded.replace('{code}', contextCode || modifiedCode || '');
+                expanded = expanded.replace('{code}', activeCode);
                 expanded = expanded.replace('{query}', queryPart);
                 textToSend = expanded;
             }
@@ -564,6 +568,17 @@ export function ChatArea({
             handleCancelEdit();
         }
     };
+    // Индекс последнего assistant-сообщения с diff-блоками.
+    // Баннер "Принять/Отменить" показываем ТОЛЬКО там — иначе при chat-new-iteration
+    // два сообщения показывают кнопки одновременно.
+    const lastDiffMsgIndex = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i].role === 'assistant' && hasDiffBlocks(messages[i].content)) {
+                return i;
+            }
+        }
+        return -1;
+    }, [messages]);
 
     return (
         <div id="chat-area" className="flex flex-col flex-1 min-w-[300px] transition-all duration-300">
@@ -711,13 +726,17 @@ export function ChatArea({
                                                             );
                                                         } else {
                                                             // text
+                                                            const currentOriginalCode = contextCode || modifiedCode || "";
+                                                            const cleanedContent = cleanDiffArtifacts(part.content || '', currentOriginalCode);
+                                                            if (cleanedContent.trim().length === 0) return null;
+
                                                             return (
                                                                 <div key={partIdx} className="min-w-0">
                                                                     <MarkdownRenderer
                                                                         content={part.content || ''}
                                                                         isStreaming={isLoading && i === messages.length - 1 && partIdx === msg.parts!.length - 1}
                                                                         onApplyCode={onApplyCode}
-                                                                        originalCode={contextCode || modifiedCode || ""}
+                                                                        originalCode={currentOriginalCode}
                                                                     />
                                                                 </div>
                                                             );
@@ -768,16 +787,24 @@ export function ChatArea({
                                                     )}
 
                                                     {/* Content */}
-                                                    <div className="min-w-0">
-                                                        {msg.role === 'assistant' ? (
-                                                            <MarkdownRenderer
-                                                                content={msg.content}
-                                                                isStreaming={isLoading && i === messages.length - 1}
-                                                                onApplyCode={onApplyCode}
-                                                                originalCode={contextCode || modifiedCode || ""}
-                                                            />
-                                                        ) : null}
-                                                    </div>
+                                                    {(() => {
+                                                        const currentOriginalCode = contextCode || modifiedCode || "";
+                                                        const cleanedContent = cleanDiffArtifacts(msg.content || '', currentOriginalCode);
+                                                        const hasVisibleContent = cleanedContent.trim().length > 0;
+
+                                                        if (msg.role !== 'assistant' || !hasVisibleContent) return null;
+
+                                                        return (
+                                                            <div className="min-w-0">
+                                                                <MarkdownRenderer
+                                                                    content={msg.content}
+                                                                    isStreaming={isLoading && i === messages.length - 1}
+                                                                    onApplyCode={onApplyCode}
+                                                                    originalCode={currentOriginalCode}
+                                                                />
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </>
                                             )}
 
@@ -813,6 +840,8 @@ export function ChatArea({
                                                         const currentOriginalCode = contextCode || modifiedCode || "";
                                                         const hasContext = currentOriginalCode.trim().length > 0;
                                                         const shouldShowBanner = hasContext &&
+                                                            i === lastDiffMsgIndex &&
+                                                            !isLoading &&
                                                             hasDiffBlocks(msg.content) &&
                                                             parseDiffBlocks(msg.content).length > 0 &&
                                                             !dismissedDiffMessages.has(msgKey);

@@ -20,46 +20,51 @@ const ProfileContext = createContext<ProfileContextType | undefined>(undefined);
 export function ProfileProvider({ children }: { children: React.ReactNode }) {
     const [store, setStore] = useState<ProfileStore | null>(null);
 
-    const loadProfiles = async () => {
+    const loadProfiles = React.useCallback(async () => {
         try {
             const data = await api.getProfiles();
             setStore(data);
         } catch (e) {
             console.error("Failed to load profiles:", e);
         }
-    };
+    }, []);
 
     useEffect(() => {
         loadProfiles();
-    }, []);
+    }, [loadProfiles]);
 
-    const handleSetActiveProfile = async (id: string) => {
+    const handleSetActiveProfile = React.useCallback(async (id: string) => {
         await api.setActiveProfile(id);
         await loadProfiles();
-    };
+    }, [loadProfiles]);
 
-    const handleSaveProfile = async (profile: LLMProfile, apiKey?: string) => {
+    const handleSaveProfile = React.useCallback(async (profile: LLMProfile, apiKey?: string) => {
         await api.saveProfile(profile, apiKey);
         await loadProfiles();
-    };
+    }, [loadProfiles]);
 
-    const handleDeleteProfile = async (id: string) => {
+    const handleDeleteProfile = React.useCallback(async (id: string) => {
         await api.deleteProfile(id);
         await loadProfiles();
-    };
+    }, [loadProfiles]);
 
-    const activeProfile = store?.profiles.find(p => p.id === store.active_profile_id);
+    const activeProfile = React.useMemo(() =>
+        store?.profiles.find(p => p.id === store.active_profile_id),
+        [store]
+    );
+
+    const value = React.useMemo(() => ({
+        profiles: store?.profiles || [],
+        activeProfileId: store?.active_profile_id || 'default',
+        activeProfile,
+        loadProfiles,
+        setActiveProfile: handleSetActiveProfile,
+        saveProfile: handleSaveProfile,
+        deleteProfile: handleDeleteProfile
+    }), [store, activeProfile, loadProfiles, handleSetActiveProfile, handleSaveProfile, handleDeleteProfile]);
 
     return (
-        <ProfileContext.Provider value={{
-            profiles: store?.profiles || [],
-            activeProfileId: store?.active_profile_id || 'default',
-            activeProfile,
-            loadProfiles,
-            setActiveProfile: handleSetActiveProfile,
-            saveProfile: handleSaveProfile,
-            deleteProfile: handleDeleteProfile
-        }}>
+        <ProfileContext.Provider value={value}>
             {children}
         </ProfileContext.Provider>
     );

@@ -17,7 +17,7 @@ import logo from '../../assets/logo.png';
 export function MainLayout() {
     const { settings } = useSettings();
     const { status: bslStatus, analyzeCode } = useBsl();
-    const { clearChat } = useChat();
+    const { clearChat, isLoading } = useChat();
     const { pasteCode, checkSelection } = useConfigurator();
 
     const [viewMode, setViewMode] = useState<'assistant' | 'split' | 'code'>('assistant');
@@ -76,9 +76,9 @@ export function MainLayout() {
     }, []);
 
 
-    // Analysis effect — runs only when modifiedCode changes, not on viewMode switch
+    // Analysis effect — runs only when modifiedCode changes AND we are not streaming
     useEffect(() => {
-        if (!modifiedCode) return;
+        if (!modifiedCode || isLoading) return;
         const runAnalysis = async () => {
             setIsValidating(true);
             try {
@@ -91,9 +91,9 @@ export function MainLayout() {
             }
         };
 
-        const timer = setTimeout(runAnalysis, 1000);
+        const timer = setTimeout(runAnalysis, 2000); // 1. Увеличен debounce до 2000мс
         return () => clearTimeout(timer);
-    }, [modifiedCode, analyzeCode]);
+    }, [modifiedCode, analyzeCode, isLoading]);
 
     const handleApply = useCallback(async () => {
         setIsApplying(true);
@@ -154,6 +154,14 @@ export function MainLayout() {
         setViewMode(prev => prev === 'assistant' ? 'split' : prev);
     }, []);
 
+    const handleCommitCode = useCallback((code: string) => {
+        // "Принять" - значит сделать код НОВЫМ визуальным бейзлайном
+        // Но НЕ обновлять lastConfiguratorCode, так как в 1С код еще старый
+        setUiBaselineCode(code);
+        setModifiedCode(code);
+        setActiveDiffContent('');
+    }, []);
+
     const minimize = () => appWindow?.minimize();
     const maximize = async () => {
         const isMaximized = await appWindow?.isMaximized();
@@ -207,15 +215,9 @@ export function MainLayout() {
                             modifiedCode={modifiedCode}
                             onApplyCode={useCallback((code: string) => {
                                 setModifiedCode(code);
-                                // setViewMode(prev => prev === 'assistant' ? 'split' : prev); // Убрано авто-открытие
+                                setViewMode(prev => prev === 'assistant' ? 'split' : prev); // Возвращаем авто-открытие
                             }, [])}
-                            onCommitCode={useCallback((code: string) => {
-                                // "Принять" из чата - значит сделать код НОВЫМ визуальным бейзлайном
-                                // Но НЕ обновлять lastConfiguratorCode, так как в 1С код еще старый
-                                setUiBaselineCode(code);
-                                setModifiedCode(code);
-                                setActiveDiffContent('');
-                            }, [])}
+                            onCommitCode={handleCommitCode}
                             onCodeLoaded={handleCodeLoaded}
                             diagnostics={diagnostics}
                             onOpenSettings={(tab) => {
@@ -224,7 +226,9 @@ export function MainLayout() {
                             }}
                             onActiveDiffChange={useCallback((content: string) => {
                                 setActiveDiffContent(content);
-                                // if (content && viewMode === 'assistant') setViewMode('split'); // Авто-открытие панели отключено
+                                if (content) {
+                                    setViewMode(prev => prev === 'assistant' ? 'split' : prev); // Авто-открытие после завершения стриминга
+                                }
                             }, [])}
                             activeDiffContent={activeDiffContent}
                         />
@@ -244,6 +248,7 @@ export function MainLayout() {
                             isValidating={isValidating}
                             activeDiffContent={activeDiffContent}
                             onActiveDiffChange={setActiveDiffContent}
+                            onCommitCode={handleCommitCode}
                         />
                     </div>
                 </div>

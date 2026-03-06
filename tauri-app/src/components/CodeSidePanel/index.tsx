@@ -55,6 +55,7 @@ export function CodeSidePanel({
     const [currentDiffIndex, setCurrentDiffIndex] = useState(-1);
 
     // Рефы для актуального доступа к коду из замыканий Monaco (onMount вызывается один раз)
+    // Приоритет: localOriginalCode (state) > modifiedCode
     const baseCodeRef = useRef(localOriginalCode || modifiedCode);
     baseCodeRef.current = localOriginalCode || modifiedCode;
     const localOriginalCodeRef = useRef(localOriginalCode);
@@ -82,13 +83,14 @@ export function CodeSidePanel({
             setPreviewFrozenCode(null);
             return;
         }
-        // Используем originalCode (uiBaselineCode из MainLayout) если он задан,
-        // иначе modifiedCode — это предотвращает применение диффа к устаревшему
-        // localOriginalCode из прошлой сессии (до перезагрузки/сброса).
-        const baseForDiff = originalCode || modifiedCode;
+        // Используем актуальный код через рефы (НЕ через state в deps),
+        // чтобы previewFrozenCode вычислялся ОДИН РАЗ при смене activeDiffContent
+        // и НЕ пересчитывался при принятии чанков (setLocalOriginalCode не должен триггерить этот эффект).
+        const baseForDiff = localOriginalCodeRef.current || baseCodeRef.current;
         const result = applyDiffWithDiagnostics(baseForDiff, activeDiffContent);
         setPreviewFrozenCode(result.code);
-    }, [activeDiffContent, originalCode, modifiedCode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeDiffContent]);
 
     // Ref-флаг для блокировки onChange во время превью.
     // Устанавливаем СИНХРОННО во время рендера — Monaco стреляет onDidChangeModelContent
@@ -162,19 +164,25 @@ export function CodeSidePanel({
         }
     }, [activeDiffContent]);
 
-    useEffect(() => {
-        if (viewMode === 'diff' && diffEditorRef.current && diffEditorRef.current.updateInlineWidgetsRef) {
-            setTimeout(() => {
-                diffEditorRef.current.updateInlineWidgetsRef();
-            }, 100);
-        }
-    }, [activeDiffContent, viewMode, modifiedCode]);
 
     useEffect(() => {
         loader.init().then(monaco => {
             registerBSL(monaco);
         });
     }, []);
+
+    // Принудительно вызываем layout при смене вкладки, т.к. automaticLayout отключен
+    useEffect(() => {
+        if (!isOpen) return;
+
+        // При включенном automaticLayout дополнительный ручной поллинг не нужен
+        // Monaco Editor сам отследит изменение размеров контейнера
+        if (viewMode === 'editor' && editorRef.current) {
+            editorRef.current.layout();
+        } else if (viewMode === 'diff' && diffEditorRef.current) {
+            diffEditorRef.current.layout();
+        }
+    }, [viewMode, isOpen]);
 
     useEffect(() => {
         if (isOpen) {
@@ -235,13 +243,12 @@ export function CodeSidePanel({
                         onChange={(value) => onModifiedCodeChange(value || '')}
                         options={{
                             minimap: { enabled: false },
-                            fontSize: 12,
-                            wordWrap: 'on',
+                            fontSize: 13,
                             lineNumbers: 'on',
                             scrollBeyondLastLine: false,
                             automaticLayout: true,
-                            folding: true,
-                            showFoldingControls: 'always',
+                            wordWrap: 'on',
+                            readOnly: false,
                         }}
                     />
                 ) : (
@@ -271,21 +278,66 @@ export function CodeSidePanel({
                                     viewZoneIdsRef.current = [];
                                 });
 
+                                const getEffStart = (start: number, end: number) => end === 0 ? start + 1 : start;
+                                const getEffEnd = (start: number, end: number) => end === 0 ? start : end;
+
                                 const changes = editor.getLineChanges();
-                                setDiffChanges(changes || []);
+
+                                let mergedChanges: any[] = [];
+                                if (changes && changes.length > 0) {
+                                    // Конец визуального блока = последняя строка модифицированного чанка
+                                    const getEndLine = (raw: any) =>
+                                        raw.modifiedEndLineNumber || raw.modifiedStartLineNumber || 1;
+
+                                    let current = {
+                                        effOrigStart: getEffStart(changes[0].originalStartLineNumber, changes[0].originalEndLineNumber),
+                                        effOrigEnd: getEffEnd(changes[0].originalStartLineNumber, changes[0].originalEndLineNumber),
+                                        effModStart: getEffStart(changes[0].modifiedStartLineNumber, changes[0].modifiedEndLineNumber),
+                                        effModEnd: getEffEnd(changes[0].modifiedStartLineNumber, changes[0].modifiedEndLineNumber),
+                                        // Массив позиций кнопок: по одной после каждого визуального блока
+                                        viewZoneLines: [getEndLine(changes[0])]
+                                    };
+
+                                    for (let i = 1; i < changes.length; i++) {
+                                        const nextRaw = changes[i];
+                                        const nextEffModStart = getEffStart(nextRaw.modifiedStartLineNumber, nextRaw.modifiedEndLineNumber);
+                                        const nextEffModEnd = getEffEnd(nextRaw.modifiedStartLineNumber, nextRaw.modifiedEndLineNumber);
+                                        const next = {
+                                            effOrigStart: getEffStart(nextRaw.originalStartLineNumber, nextRaw.originalEndLineNumber),
+                                            effOrigEnd: getEffEnd(nextRaw.originalStartLineNumber, nextRaw.originalEndLineNumber),
+                                            effModStart: nextEffModStart,
+                                            effModEnd: nextEffModEnd,
+                                        };
+
+                                        const gapOrig = next.effOrigStart - current.effOrigEnd - 1;
+                                        const gapMod = next.effModStart - current.effModEnd - 1;
+                                        const gap = Math.max(gapOrig, gapMod);
+
+                                        if (gap <= 5) {
+                                            // Одна merged-группа (один Accept/Reject захватывает всё)
+                                            // Если визуальный разрыв в modified > 2 строк — добавляем кнопку
+                                            // после каждого визуального блока внутри группы
+                                            if (gapMod > 2) {
+                                                current.viewZoneLines.push(getEndLine(nextRaw));
+                                            } else {
+                                                current.viewZoneLines[current.viewZoneLines.length - 1] = getEndLine(nextRaw);
+                                            }
+                                            current.effOrigEnd = Math.max(current.effOrigEnd, next.effOrigEnd);
+                                            current.effModEnd = Math.max(current.effModEnd, next.effModEnd);
+                                        } else {
+                                            mergedChanges.push(current);
+                                            current = { ...next, viewZoneLines: [getEndLine(nextRaw)] };
+                                        }
+                                    }
+                                    mergedChanges.push(current);
+                                }
+
+                                setDiffChanges(mergedChanges);
 
                                 // Авто-скролл к первому изменению при первом появлении диффа.
-                                // Решает проблему: Monaco при вставке строк в начало файла
-                                // (originalStartLineNumber=0) скроллит к "оригинальной строке "
-                                // которая в modified стоит после вставленных строк → зелёные
-                                // строки уходят выше экрана и оказываются невидимы.
-                                if (changes && changes.length > 0 && !hasAutoScrolledRef.current) {
+                                if (mergedChanges.length > 0 && !hasAutoScrolledRef.current) {
                                     hasAutoScrolledRef.current = true;
-                                    const firstChange = changes[0];
-                                    const targetLine = firstChange.modifiedStartLineNumber
-                                        || firstChange.originalStartLineNumber
-                                        || 1;
-                                    modifiedEditor.revealLineInCenter(targetLine);
+                                    modifiedEditor.revealLineInCenter(mergedChanges[0].viewZoneLines[0]);
                                 }
 
                                 const currentContent = activeDiffContentRef.current;
@@ -311,7 +363,63 @@ export function CodeSidePanel({
                                 }
 
                                 modifiedEditor.changeViewZones((accessor: any) => {
-                                    changes.forEach((change: any) => {
+                                    mergedChanges.forEach((change: any) => {
+                                        const makeRevertHandler = () => (e: MouseEvent) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const originalEditor = editor.getOriginalEditor();
+                                            const currentModifiedCode = modifiedEditor.getModel()?.getValue() || '';
+                                            const currentOriginalCode = originalEditor.getModel()?.getValue() || '';
+                                            const sourceLines = currentOriginalCode.split('\n');
+                                            let targetLines = currentModifiedCode.split('\n');
+
+                                            const removeStartIndex = change.effModStart - 1;
+                                            const removeCount = Math.max(0, change.effModEnd - change.effModStart + 1);
+                                            const extractStartIndex = change.effOrigStart - 1;
+                                            const extractEndIndex = change.effOrigEnd;
+                                            const extractCount = Math.max(0, extractEndIndex - extractStartIndex);
+                                            const origBlock = extractCount > 0 ? sourceLines.slice(extractStartIndex, extractEndIndex) : [];
+
+                                            targetLines.splice(removeStartIndex, removeCount, ...origBlock);
+
+                                            anyChunkHandledRef.current = true;
+                                            if (previewFrozenCodeRef.current !== null) {
+                                                setPreviewFrozenCode(targetLines.join('\n'));
+                                            } else {
+                                                onModifiedCodeChange(targetLines.join('\n'));
+                                            }
+                                            setTimeout(updateInlineWidgets, 50);
+                                        };
+
+                                        const makeAcceptHandler = () => (e: MouseEvent) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const originalEditor = editor.getOriginalEditor();
+                                            const currentModifiedCode = modifiedEditor.getModel()?.getValue() || '';
+                                            const currentOriginalCode = originalEditor.getModel()?.getValue() || '';
+                                            let targetLines = currentOriginalCode.split('\n');
+                                            const sourceLines = currentModifiedCode.split('\n');
+
+                                            const removeStartIndex = change.effOrigStart - 1;
+                                            const removeCount = Math.max(0, change.effOrigEnd - change.effOrigStart + 1);
+                                            const extractStartIndex = change.effModStart - 1;
+                                            const extractEndIndex = change.effModEnd;
+                                            const extractCount = Math.max(0, extractEndIndex - extractStartIndex);
+                                            const modBlock = extractCount > 0 ? sourceLines.slice(extractStartIndex, extractEndIndex) : [];
+
+                                            targetLines.splice(removeStartIndex, removeCount, ...modBlock);
+
+                                            anyChunkHandledRef.current = true;
+                                            setLocalOriginalCode(targetLines.join('\n'));
+                                            modifiedEditor.changeViewZones((acc: any) => {
+                                                viewZoneIdsRef.current.forEach(id => acc.removeZone(id));
+                                                viewZoneIdsRef.current = [];
+                                            });
+                                            setTimeout(updateInlineWidgets, 50);
+                                        };
+
+                                        // Рендерим кнопки после каждого визуального блока внутри одной merged-группы
+                                        change.viewZoneLines.forEach((vzLine: number) => {
                                         const domNode = document.createElement('div');
                                         domNode.className = 'flex items-center justify-end pr-8 gap-2 z-50 pointer-events-none';
                                         domNode.style.height = '18px';
@@ -322,74 +430,27 @@ export function CodeSidePanel({
                                         const btnRevert = document.createElement('button');
                                         btnRevert.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg> Отменить</span>';
                                         btnRevert.className = 'px-1 py-0.5 text-[9px] font-bold text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-sm transition-all active:scale-95';
-                                        btnRevert.onclick = (e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            const originalEditor = editor.getOriginalEditor();
-                                            const currentModifiedCode = modifiedEditor.getModel()?.getValue() || '';
-                                            const currentOriginalCode = originalEditor.getModel()?.getValue() || '';
-                                            const origStart = change.originalStartLineNumber;
-                                            const origEnd = change.originalEndLineNumber;
-                                            const modStart = change.modifiedStartLineNumber;
-                                            const modEnd = change.modifiedEndLineNumber;
-                                            let targetLines = currentModifiedCode.split('\n');
-                                            const sourceLines = currentOriginalCode.split('\n');
-                                            const origBlock = (origStart === 0 || origEnd === 0) ? [] : sourceLines.slice(origStart - 1, origEnd);
-                                            const removeCount = modEnd === 0 ? 0 : (modEnd - modStart + 1);
-                                            const insertIndex = modEnd === 0 ? modStart : modStart - 1;
-                                            targetLines.splice(insertIndex, removeCount, ...origBlock);
-                                            // В режиме превью откатываем в замороженном превью-коде,
-                                            // не трогая modifiedCode (он обновится при завершении превью)
-                                            anyChunkHandledRef.current = true;
-                                            if (previewFrozenCodeRef.current !== null) {
-                                                setPreviewFrozenCode(targetLines.join('\n'));
-                                            } else {
-                                                onModifiedCodeChange(targetLines.join('\n'));
-                                            }
-                                            setTimeout(updateInlineWidgets, 50);
-                                        };
+                                        btnRevert.onclick = makeRevertHandler();
 
                                         const btnAccept = document.createElement('button');
                                         btnAccept.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg> Принять</span>';
                                         btnAccept.className = 'px-1 py-0.5 text-[9px] font-bold text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1';
-                                        btnAccept.onclick = (e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            const originalEditor = editor.getOriginalEditor();
-                                            const currentModifiedCode = modifiedEditor.getModel()?.getValue() || '';
-                                            const currentOriginalCode = originalEditor.getModel()?.getValue() || '';
-                                            const origStart = change.originalStartLineNumber;
-                                            const origEnd = change.originalEndLineNumber;
-                                            const modStart = change.modifiedStartLineNumber;
-                                            const modEnd = change.modifiedEndLineNumber;
-                                            let targetLines = currentOriginalCode.split('\n');
-                                            const sourceLines = currentModifiedCode.split('\n');
-                                            const modBlock = modEnd === 0 ? [] : sourceLines.slice(modStart - 1, modEnd);
-                                            const removeCount = (origStart === 0 || origEnd === 0) ? 0 : (origEnd - origStart + 1);
-                                            const insertIndex = (origStart === 0 || origEnd === 0) ? (modStart > 1 ? modStart - 1 : 0) : origStart - 1;
-                                            targetLines.splice(insertIndex, removeCount, ...modBlock);
-                                            anyChunkHandledRef.current = true;
-                                            setLocalOriginalCode(targetLines.join('\n'));
-                                            modifiedEditor.changeViewZones((acc: any) => {
-                                                viewZoneIdsRef.current.forEach(id => acc.removeZone(id));
-                                                viewZoneIdsRef.current = [];
-                                            });
-                                            setTimeout(updateInlineWidgets, 50);
-                                        };
+                                        btnAccept.onclick = makeAcceptHandler();
 
                                         toolbar.appendChild(btnRevert);
                                         toolbar.appendChild(btnAccept);
                                         domNode.appendChild(toolbar);
 
                                         const id = accessor.addZone({
-                                            afterLineNumber: change.modifiedEndLineNumber || change.modifiedStartLineNumber || 1,
+                                            afterLineNumber: vzLine,
                                             heightInPx: 18,
                                             domNode: domNode,
                                             suppressMouseDown: false
                                         });
                                         viewZoneIdsRef.current.push(id);
-                                    });
-                                });
+                                    });  // viewZoneLines.forEach
+                                });  // mergedChanges.forEach
+                                });  // changeViewZones
                             };
 
                             editor.onDidUpdateDiff(updateInlineWidgets);

@@ -14,7 +14,8 @@ interface MarkdownRendererProps {
 }
 
 // Утилита для очистки diff-артефактов и технических фраз
-function cleanDiffArtifacts(content: string, originalCode?: string): string {
+export function cleanDiffArtifacts(content: string, originalCode?: string): string {
+    if (!content) return '';
     let cleaned = content;
 
     // 0. Очищаем XML-формат вызова инструментов (Qwen / некоторые другие модели)
@@ -158,9 +159,11 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                         <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">{isBsl ? 'BSL (1C:Enterprise)' : (language || 'code')}</span>
                     </div>
                 </div>
-                <pre className="bg-[#1e1e1e] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300 text-[13px] font-mono min-h-[50px] whitespace-pre">
-                    {codeString}
-                </pre>
+                <div className="bg-[#1e1e1e] border border-[#27272a] rounded-b-lg overflow-hidden border-t-0 min-h-[50px] max-h-[400px] flex">
+                    <pre className="p-4 overflow-auto w-full text-zinc-300 text-[13px] font-mono whitespace-pre flex-1 custom-scrollbar">
+                        {codeString}
+                    </pre>
+                </div>
             </div>
         );
     }

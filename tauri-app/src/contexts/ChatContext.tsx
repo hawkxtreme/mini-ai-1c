@@ -241,15 +241,47 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     listen<number>('chat-iteration', (event) => {
                         setCurrentIteration(event.payload);
                     }),
+                    // New iteration started (e.g. planning → execution phase transition)
+                    // Create a fresh assistant message block so Шаг 2 doesn't append to Шаг 1
+                    listen('chat-new-iteration', () => {
+                        setMessages(prev => [
+                            ...prev,
+                            {
+                                id: generateId(),
+                                role: 'assistant',
+                                content: '',
+                                parts: [],
+                                timestamp: Date.now()
+                            }
+                        ]);
+                    }),
                     listen('chat-done', () => {
                         setIsLoading(false);
                         setChatStatus('');
                         setCurrentIteration(0);
                         setMessages(prev => {
-                            const last = prev[prev.length - 1];
-                            return prev;
+                            // Reset any lingering pending/executing tool calls (stream died before tool-call-completed)
+                            const withFixedTools = prev.map(msg =>
+                                msg.toolCalls?.some(tc => tc.status === 'pending' || tc.status === 'executing')
+                                    ? { ...msg, toolCalls: msg.toolCalls!.map(tc => tc.status === 'pending' || tc.status === 'executing' ? { ...tc, status: 'error' as const } : tc) }
+                                    : msg
+                            );
+                            // Remove trailing empty assistant messages (created by chat-new-iteration
+                            // but not filled if model produced no output in that phase)
+                            const filtered = [...withFixedTools];
+                            while (
+                                filtered.length > 0 &&
+                                filtered[filtered.length - 1].role === 'assistant' &&
+                                !filtered[filtered.length - 1].content &&
+                                (!filtered[filtered.length - 1].parts || filtered[filtered.length - 1].parts!.length === 0) &&
+                                !filtered[filtered.length - 1].toolCalls?.length
+                            ) {
+                                filtered.pop();
+                            }
+                            return filtered;
                         });
                     })
+
                 ]);
 
                 if (!isMounted) {
@@ -299,18 +331,43 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
         try {
             // Construct message history (system messages are UI-only, not sent to backend)
+            // IMPORTANT: tool_calls, tool_call_id and name must be preserved for LLM to
+            // correctly understand the history of tool usage in subsequent turns.
             const payloadMessages: api.ChatMessage[] = messages
                 .filter(m => m.role !== 'system')
-                .map(m => ({
-                    role: m.role as 'user' | 'assistant' | 'tool',
-                    content: m.content || ''
-                }));
+                .map(m => {
+                    const msg: api.ChatMessage = {
+                        role: m.role as 'user' | 'assistant' | 'tool',
+                        content: m.content || ''
+                    };
+                    // Preserve tool call history for proper LLM context
+                    if (m.toolCalls && m.toolCalls.length > 0 && m.role === 'assistant') {
+                        msg.tool_calls = m.toolCalls.map(tc => ({
+                            id: tc.id,
+                            type: 'function',
+                            function: {
+                                name: tc.name,
+                                arguments: tc.arguments || '{}'
+                            }
+                        }));
+                    }
+                    // For tool role messages, restore tool_call_id and name
+                    // This info is stored in the message content via the backend loop,
+                    // but for history reconstruction, we rely on UI state if available.
+                    return msg;
+                });
             payloadMessages.push({ role: 'user', content: contextPayload });
 
             await api.streamChat(payloadMessages);
         } catch (err) {
             setMessages(prev => {
-                const last = prev[prev.length - 1];
+                // Reset any pending/executing tool calls to 'error' (stream died mid-tool-call)
+                const withFixedTools = prev.map(msg =>
+                    msg.toolCalls?.some(tc => tc.status === 'pending' || tc.status === 'executing')
+                        ? { ...msg, toolCalls: msg.toolCalls!.map(tc => tc.status === 'pending' || tc.status === 'executing' ? { ...tc, status: 'error' as const } : tc) }
+                        : msg
+                );
+                const last = withFixedTools[withFixedTools.length - 1];
                 if (last && last.role === 'assistant') {
                     // Append error to the existing assistant message
                     const errorStr = `\n\n❌ **Ошибка:** ${err}`;
@@ -322,13 +379,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         newParts.push({ type: 'text', content: errorStr });
                     }
                     return [
-                        ...prev.slice(0, -1),
+                        ...withFixedTools.slice(0, -1),
                         { ...last, content: last.content + errorStr, parts: newParts }
                     ];
                 }
                 // Fallback: create a new message
                 const errorStr = `❌ Ошибка: ${err}`;
-                return [...prev, { id: generateId(), role: 'assistant', content: errorStr, parts: [{ type: 'text', content: errorStr }], timestamp: Date.now() }];
+                return [...withFixedTools, { id: generateId(), role: 'assistant', content: errorStr, parts: [{ type: 'text', content: errorStr }], timestamp: Date.now() }];
             });
             setIsLoading(false);
         }
@@ -391,16 +448,35 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             // Construct message history from truncated + edited (filter system/UI messages)
             const payloadMessages: api.ChatMessage[] = [...truncatedMessages, editedMessage]
                 .filter(m => m.role !== 'system')
-                .map(m => ({
-                    role: m.role as 'user' | 'assistant' | 'tool',
-                    content: m.content || ''
-                }));
+                .map(m => {
+                    const msg: api.ChatMessage = {
+                        role: m.role as 'user' | 'assistant' | 'tool',
+                        content: m.content || ''
+                    };
+                    if (m.toolCalls && m.toolCalls.length > 0 && m.role === 'assistant') {
+                        msg.tool_calls = m.toolCalls.map(tc => ({
+                            id: tc.id,
+                            type: 'function',
+                            function: {
+                                name: tc.name,
+                                arguments: tc.arguments || '{}'
+                            }
+                        }));
+                    }
+                    return msg;
+                });
             payloadMessages.push({ role: 'user', content: contextPayload });
 
             await api.streamChat(payloadMessages);
         } catch (err) {
             setMessages(prev => {
-                const last = prev[prev.length - 1];
+                // Reset any pending/executing tool calls to 'error' (stream died mid-tool-call)
+                const withFixedTools = prev.map(msg =>
+                    msg.toolCalls?.some(tc => tc.status === 'pending' || tc.status === 'executing')
+                        ? { ...msg, toolCalls: msg.toolCalls!.map(tc => tc.status === 'pending' || tc.status === 'executing' ? { ...tc, status: 'error' as const } : tc) }
+                        : msg
+                );
+                const last = withFixedTools[withFixedTools.length - 1];
                 if (last && last.role === 'assistant') {
                     // Append error to the existing assistant message
                     const errorStr = `\n\n❌ **Ошибка:** ${err}`;
@@ -412,12 +488,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         newParts.push({ type: 'text', content: errorStr });
                     }
                     return [
-                        ...prev.slice(0, -1),
+                        ...withFixedTools.slice(0, -1),
                         { ...last, content: last.content + errorStr, parts: newParts }
                     ];
                 }
                 const errorMsg = `❌ Ошибка: ${err} `;
-                return [...prev, { id: generateId(), role: 'assistant', content: errorMsg, parts: [{ type: 'text', content: errorMsg }], timestamp: Date.now() }];
+                return [...withFixedTools, { id: generateId(), role: 'assistant', content: errorMsg, parts: [{ type: 'text', content: errorMsg }], timestamp: Date.now() }];
             });
             setIsLoading(false);
         }

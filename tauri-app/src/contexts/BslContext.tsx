@@ -21,18 +21,28 @@ const BslContext = createContext<BslContextType | undefined>(undefined);
 export function BslProvider({ children }: { children: React.ReactNode }) {
     const [status, setStatus] = useState<BslStatus | null>(null);
 
+    const lastCheckTimeRef = React.useRef(0);
+
     const checkStatus = async () => {
+        const now = Date.now();
+        // Пропускаем проверку если уже подключены и прошло меньше 10с
+        if (status?.connected && now - lastCheckTimeRef.current < 10000) {
+            return;
+        }
         try {
             const data = await api.checkBslStatus();
             setStatus(data);
+            lastCheckTimeRef.current = Date.now();
         } catch (e) {
             console.error("Failed to check Bsl Status", e);
+            // При ошибке сбрасываем статус
+            setStatus(prev => prev ? { ...prev, connected: false } : null);
         }
     };
 
     useEffect(() => {
         checkStatus();
-        const interval = setInterval(checkStatus, 5000); // Polling every 5s
+        const interval = setInterval(checkStatus, 15000); // Polling every 15s instead of 5s
         return () => clearInterval(interval);
     }, []);
 
