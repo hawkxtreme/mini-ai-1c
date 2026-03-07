@@ -35,6 +35,29 @@ pub fn restart_app_cmd(app_handle: AppHandle) {
     app_handle.restart();
 }
 
+/// Check if Node.js is installed and return its version string, or None if not found
+#[tauri::command]
+pub fn check_node_version_cmd() -> Option<String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd")
+        .args(["/C", "node --version"])
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("node")
+        .arg("--version")
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Check if Java is installed and available in PATH
 #[tauri::command]
 pub fn check_java_cmd() -> bool {

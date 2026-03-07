@@ -66,6 +66,7 @@ pub fn run() {
             reconnect_bsl_ls_cmd,
             diagnose_bsl_ls_cmd,
             check_java_cmd,
+            check_node_version_cmd,
             complete_onboarding,
             reset_onboarding,
             restart_app_cmd,
