@@ -214,7 +214,7 @@ export function MainLayout() {
                         setDiagnostics([]);
                         setActiveDiffContent('');
                     }}
-                    onOpenSettings={() => setShowSettings(true)}
+                    onOpenSettings={(tab) => { if (tab) setSettingsTab(tab as any); setShowSettings(true); }}
                     onCodeLoaded={handleCodeLoaded}
                 />
 

@@ -294,8 +294,6 @@ pub async fn stream_chat(
                     break; // Already asked once, nothing to show
                 }
             }
-            asked_for_text_response = false; // Reset on non-empty response
-
             // Check for BSL blocks
             let bsl_blocks = extract_bsl_code(full_text);
 

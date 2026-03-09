@@ -608,6 +608,7 @@ impl McpSession {
             }
         }
 
+        #[allow(unused_mut)]
         let (mut command, mut args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
