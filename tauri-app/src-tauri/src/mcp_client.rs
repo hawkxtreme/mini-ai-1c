@@ -580,7 +580,7 @@ impl McpSession {
             }
         }
 
-        let (command, args) = if cfg!(windows) {
+        let (mut command, mut args) = if cfg!(windows) {
             // On Windows, if command is 'npx' or 'npm', we might need .cmd
             // Also avoid wrapping in cmd /C unless absolutely necessary, to keep PID correct.
             let cmd_lower = command.to_lowercase();
