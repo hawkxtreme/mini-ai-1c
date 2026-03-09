@@ -521,20 +521,45 @@ impl McpSession {
                 }
             }
 
-            // .exe binary resolution (Phase 2/3 — no embedded bytes for native binaries)
+            // .exe binary resolution
             let is_stdio_exe = cmd_lower.ends_with(".exe") && !is_stdio_node_launcher;
             if is_stdio_exe {
                 let exe_filename = command.clone();
                 let exe_subpath = format!("mcp-servers/{}", exe_filename);
                 let mut exe_resolved = false;
 
-                // Phase 2: Tauri resource (MSI/NSIS bundle)
-                if let Ok(path) = app_handle.path().resolve(&exe_subpath, tauri::path::BaseDirectory::Resource) {
-                    if path.exists() {
-                        let path_str = path.to_string_lossy().to_string();
+                // Phase 1: Embedded binary (True Portability — same approach as .cjs servers)
+                let embedded_exe_servers: &[(&str, &[u8])] = &[
+                    ("mcp-1c-search.exe", include_bytes!("../mcp-servers/mcp-1c-search.exe")),
+                ];
+                if let Some((_, bytes)) = embedded_exe_servers.iter().find(|(name, _)| *name == exe_filename) {
+                    let mcp_dir = crate::settings::get_settings_dir().join("mcp-servers");
+                    let _ = std::fs::create_dir_all(&mcp_dir);
+                    let target_path = mcp_dir.join(&exe_filename);
+                    let current_size = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
+                    if current_size != bytes.len() as u64 {
+                        crate::app_log!("[MCP] Extracting embedded .exe to: {:?}", target_path);
+                        if let Err(e) = std::fs::write(&target_path, bytes) {
+                            crate::app_log!("[ERROR] Failed to extract embedded .exe: {}", e);
+                        }
+                    }
+                    if target_path.exists() {
+                        let path_str = target_path.to_string_lossy().to_string();
                         command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                        crate::app_log!("[MCP] Resolved .exe to resource: {}", command);
+                        crate::app_log!("[MCP] Using embedded/extracted .exe: {}", command);
                         exe_resolved = true;
+                    }
+                }
+
+                // Phase 2: Tauri resource (MSI/NSIS bundle)
+                if !exe_resolved {
+                    if let Ok(path) = app_handle.path().resolve(&exe_subpath, tauri::path::BaseDirectory::Resource) {
+                        if path.exists() {
+                            let path_str = path.to_string_lossy().to_string();
+                            command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                            crate::app_log!("[MCP] Resolved .exe to resource: {}", command);
+                            exe_resolved = true;
+                        }
                     }
                 }
 
