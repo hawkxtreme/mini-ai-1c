@@ -97,6 +97,7 @@ export interface McpServerConfig {
     url?: string | null;
     login?: string | null;
     password?: string | null;
+    headers?: Record<string, string> | null;
     command?: string | null;
     args?: string[] | null;
     env?: Record<string, string> | null;

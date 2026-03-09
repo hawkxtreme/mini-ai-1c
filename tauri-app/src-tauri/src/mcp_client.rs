@@ -369,6 +369,7 @@ enum TransportImpl {
         url: String,
         login: Option<String>,
         password: Option<String>,
+        extra_headers: std::collections::HashMap<String, String>,
     },
     Stdio {
         tx: mpsc::Sender<JsonRpcRequest>,
@@ -394,6 +395,7 @@ pub struct McpSession {
 
 impl McpSession {
     fn new_http(config: McpServerConfig) -> Self {
+        let extra_headers = config.headers.clone().unwrap_or_default();
         Self {
             config: config.clone(),
             transport: TransportImpl::Http {
@@ -404,6 +406,7 @@ impl McpSession {
                 url: config.url.unwrap_or_default(),
                 login: config.login,
                 password: config.password,
+                extra_headers,
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -880,15 +883,50 @@ impl McpSession {
         };
 
         match &self.transport {
-            TransportImpl::Http { client, url, login, password } => {
-                let mut rb = client.post(url).json(&req);
+            TransportImpl::Http { client, url, login, password, extra_headers } => {
+                let mut rb = client.post(url)
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("Content-Type", "application/json")
+                    .json(&req);
                 if let Some(l) = login {
                     if !l.is_empty() {
                        rb = rb.basic_auth(l, password.as_deref());
                     }
                 }
+                for (k, v) in extra_headers {
+                    rb = rb.header(k.as_str(), v.as_str());
+                }
                 let resp = rb.send().await.map_err(|e| e.to_string())?;
-                let rpc_res: JsonRpcResponse = resp.json().await.map_err(|e| e.to_string())?;
+                let content_type = resp.headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+
+                let rpc_res: JsonRpcResponse = if content_type.contains("text/event-stream") {
+                    // Parse SSE: find first "data: {...}" line with a result or error
+                    let body = resp.text().await.map_err(|e| e.to_string())?;
+                    let mut found: Option<JsonRpcResponse> = None;
+                    for line in body.lines() {
+                        let line = line.trim();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            if data.is_empty() || data == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(data) {
+                                if parsed.result.is_some() || parsed.error.is_some() {
+                                    found = Some(parsed);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    found.ok_or_else(|| "No JSON-RPC response found in SSE stream".to_string())?
+                } else {
+                    resp.json().await.map_err(|e| e.to_string())?
+                };
+
                 if let Some(err) = rpc_res.error {
                     Err(format!("MCP Error {}: {}", err.code, err.message))
                 } else {

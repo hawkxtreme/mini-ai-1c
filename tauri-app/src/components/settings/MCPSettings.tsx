@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown } from 'lucide-react';
+import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code } from 'lucide-react';
 
 export type McpTransport = 'http' | 'stdio' | 'internal';
 
@@ -57,6 +57,9 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         } catch { return []; }
     });
     const [showSearchHistory, setShowSearchHistory] = useState(false);
+    const [showJsonImport, setShowJsonImport] = useState(false);
+    const [jsonImportText, setJsonImportText] = useState('');
+    const [jsonImportError, setJsonImportError] = useState<string | null>(null);
 
     const addToSearchHistory = (path: string) => {
         if (!path.trim()) return;
@@ -303,6 +306,67 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         }
     };
 
+    const handleJsonImport = () => {
+        setJsonImportError(null);
+        const text = jsonImportText.trim();
+        if (!text) return;
+
+        try {
+            const parsed = JSON.parse(text);
+            const toAdd: McpServerConfig[] = [];
+
+            // Detect format: { mcpServers: {...} } or { serverName: {...} } or single { command, args }
+            const serversMap: Record<string, any> = parsed.mcpServers ?? parsed;
+
+            if (typeof serversMap !== 'object' || Array.isArray(serversMap)) {
+                throw new Error('Ожидается объект с серверами');
+            }
+
+            // Single server config (has command or url directly, without a name key)
+            if ('command' in serversMap || 'url' in serversMap) {
+                toAdd.push({
+                    id: Math.random().toString(36).substring(2, 9),
+                    name: 'Imported MCP Server',
+                    enabled: false,
+                    transport: serversMap.url ? 'http' : 'stdio',
+                    command: serversMap.command ?? null,
+                    args: serversMap.args ?? null,
+                    env: serversMap.env ?? null,
+                    url: serversMap.url ?? null,
+                    headers: serversMap.headers ?? null,
+                });
+            } else {
+                // Map of servers: { "server-name": { command, args, env } }
+                for (const [name, config] of Object.entries(serversMap)) {
+                    if (typeof config !== 'object' || config === null) continue;
+                    const c = config as any;
+                    toAdd.push({
+                        id: Math.random().toString(36).substring(2, 9),
+                        name,
+                        enabled: false,
+                        transport: c.url ? 'http' : 'stdio',
+                        command: c.command ?? null,
+                        args: c.args ?? null,
+                        env: c.env ?? null,
+                        url: c.url ?? null,
+                        headers: c.headers ?? null,
+                    });
+                }
+            }
+
+            if (toAdd.length === 0) {
+                throw new Error('Не найдено ни одного сервера в JSON');
+            }
+
+            onUpdate([...servers, ...toAdd]);
+            setShowJsonImport(false);
+            setJsonImportText('');
+            setJsonImportError(null);
+        } catch (e: any) {
+            setJsonImportError(e.message || 'Ошибка парсинга JSON');
+        }
+    };
+
     const sortedServers = [...servers].sort((a, b) => {
         const builtinIds = [BUILTIN_BSL_LS_ID, BUILTIN_1C_HELP_ID, BUILTIN_1C_SEARCH_ID, BUILTIN_1C_SERVER_ID, BUILTIN_1C_METADATA_ID];
         const aIdx = builtinIds.indexOf(a.id);
@@ -323,12 +387,21 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                     <Globe className="w-5 h-5 text-blue-500" />
                     MCP Servers
                 </h3>
-                <button
-                    onClick={handleAddServer}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
-                >
-                    <Plus className="w-4 h-4" /> Добавить сервер
-                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => { setShowJsonImport(true); setJsonImportText(''); setJsonImportError(null); }}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 rounded-lg text-sm font-medium transition"
+                        title="Добавить сервер из JSON-конфига (формат Claude Desktop)"
+                    >
+                        <Code className="w-4 h-4" /> Импорт из JSON
+                    </button>
+                    <button
+                        onClick={handleAddServer}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition"
+                    >
+                        <Plus className="w-4 h-4" /> Добавить сервер
+                    </button>
+                </div>
             </div>
 
             {servers.length === 0 ? (
@@ -1048,6 +1121,76 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                 className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-900/20 transition-all active:scale-95"
                             >
                                 Импортировать
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* JSON Import Modal */}
+            {showJsonImport && (
+                <div className="absolute inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 rounded-xl">
+                    <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+                        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <Code className="w-5 h-5 text-blue-400" />
+                                <h3 className="text-sm font-bold text-zinc-100">Импорт MCP сервера из JSON</h3>
+                            </div>
+                            <button
+                                onClick={() => setShowJsonImport(false)}
+                                className="p-1 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 rounded-lg transition"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">
+                                    Вставьте JSON из документации MCP сервера
+                                </label>
+                                <textarea
+                                    autoFocus
+                                    value={jsonImportText}
+                                    onChange={(e) => { setJsonImportText(e.target.value); setJsonImportError(null); }}
+                                    onKeyDown={(e) => { if (e.key === 'Escape') setShowJsonImport(false); }}
+                                    rows={8}
+                                    spellCheck={false}
+                                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-blue-500/50 rounded-xl px-4 py-3 text-xs text-zinc-100 font-mono focus:outline-none focus:ring-4 focus:ring-blue-500/5 transition-all resize-none placeholder:text-zinc-700"
+                                    placeholder={`{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": ["-y", "chrome-devtools-mcp@latest"]\n    }\n  }\n}`}
+                                />
+                            </div>
+
+                            <div className="bg-zinc-800/50 border border-zinc-700/50 rounded-xl p-4 flex gap-3">
+                                <Activity className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+                                <p className="text-[10px] text-zinc-400 leading-relaxed">
+                                    Поддерживаются форматы: <code className="text-zinc-300">{"{ mcpServers: { name: {...} } }"}</code>,
+                                    карта серверов <code className="text-zinc-300">{"{ name: { command, args } }"}</code>
+                                    или конфиг одного сервера <code className="text-zinc-300">{"{ command, args }"}</code>.
+                                </p>
+                            </div>
+
+                            {jsonImportError && (
+                                <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 flex items-center gap-2">
+                                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                                    <p className="text-xs text-red-300">{jsonImportError}</p>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="px-6 py-4 bg-zinc-900/80 border-t border-zinc-800 flex items-center justify-end gap-3">
+                            <button
+                                onClick={() => setShowJsonImport(false)}
+                                className="px-4 py-2 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-xl text-xs font-bold transition-colors"
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                onClick={handleJsonImport}
+                                disabled={!jsonImportText.trim()}
+                                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-900/20 transition-all active:scale-95"
+                            >
+                                Добавить сервер
                             </button>
                         </div>
                     </div>

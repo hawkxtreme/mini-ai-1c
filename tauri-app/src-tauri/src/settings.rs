@@ -189,6 +189,7 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     pub login: Option<String>,
     pub password: Option<String>,
+    pub headers: Option<std::collections::HashMap<String, String>>,
     // Stdio specific
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
@@ -205,6 +206,7 @@ impl Default for McpServerConfig {
             url: Some("http://localhost/mcp".to_string()),
             login: None,
             password: None,
+            headers: None,
             command: None,
             args: None,
             env: None,
