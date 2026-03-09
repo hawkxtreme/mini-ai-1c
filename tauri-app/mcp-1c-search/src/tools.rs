@@ -331,6 +331,40 @@ async fn handle_search_code(
         }
     });
 
+    // Early check: if scope resolves to a path that doesn't exist, return informative message
+    if let Some(ref sp) = sub_path {
+        let full_scope_path = root.join(sp);
+        if !full_scope_path.exists() {
+            // Check if the parent (type folder) is non-empty — if parent is also empty,
+            // it means this object type wasn't exported in this configuration dump.
+            let scope_str = args["scope"].as_str().unwrap_or("");
+            let parent_empty = sp.parent()
+                .map(|p| {
+                    let parent_full = root.join(p);
+                    !parent_full.is_dir()
+                        || std::fs::read_dir(&parent_full)
+                            .map(|mut rd| rd.next().is_none())
+                            .unwrap_or(true)
+                })
+                .unwrap_or(true);
+
+            let msg = if parent_empty {
+                format!(
+                    "Исходные файлы для объектов данного типа в выгрузке конфигурации отсутствуют (область «{}» не найдена).\n\
+                     Попробуйте поиск без параметра `scope` — например: `search_code query=\"{}\" `.",
+                    scope_str, query
+                )
+            } else {
+                format!(
+                    "Объект «{}» не найден в выгрузке конфигурации.\n\
+                     Проверьте правильность имени или используйте `list_objects` для просмотра доступных объектов.",
+                    scope_str
+                )
+            };
+            return Ok(json!({ "content": [{ "type": "text", "text": msg }] }));
+        }
+    }
+
     let root_clone = root.clone();
     let db_clone = db_path.clone();
     let query_owned = query.to_string();
@@ -681,13 +715,30 @@ async fn handle_get_object_structure(
                 && d.commands.is_empty()
                 && d.modules.is_empty()
             {
-                // ConfigDumpInfo.xml not available — fall back to scanning the object folder
-                text.push_str("*ConfigDumpInfo.xml не проиндексирован — данные получены из файловой структуры.*\n\n");
                 if let Some(fallback) = scan_object_folder_fallback(&d.obj_type, &d.name, config_path) {
+                    text.push_str("*Структурные данные получены из файловой системы.*\n\n");
                     text.push_str(&fallback);
                 } else {
-                    text.push_str("*Папка объекта не найдена в выгрузке конфигурации.*\n");
-                    text.push_str("Используйте `search_code` для поиска кода этого объекта.\n");
+                    // Check if any objects of this type have source files in the dump
+                    let type_folder_has_files = config_path.as_ref()
+                        .and_then(|root| object_type_to_folder(d.obj_type.as_str()).map(|f| root.join(f)))
+                        .map(|p| p.is_dir() && std::fs::read_dir(&p).map(|mut rd| rd.next().is_some()).unwrap_or(false))
+                        .unwrap_or(false);
+
+                    if type_folder_has_files {
+                        text.push_str("*Папка объекта не найдена в файловой структуре выгрузки.*\n");
+                        text.push_str("Используйте `search_code` или `list_objects` для работы с этим объектом.\n");
+                    } else {
+                        text.push_str(&format!(
+                            "*Объект **{}.{}** присутствует в конфигурации.*\n\n",
+                            d.obj_type, d.name
+                        ));
+                        text.push_str(&format!(
+                            "*Исходные файлы объектов типа {} в данной выгрузке конфигурации не экспортированы.*\n",
+                            d.obj_type
+                        ));
+                        text.push_str("Для поиска связанного кода используйте `search_code` без параметра `scope`.\n");
+                    }
                 }
             }
 
