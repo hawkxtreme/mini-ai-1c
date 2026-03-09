@@ -12,8 +12,6 @@ use super::tools::*;
 pub async fn stream_chat_completion(
     messages: Vec<ApiMessage>,
     app_handle: tauri::AppHandle,
-    force_thinking: Option<bool>,
-    force_temperature: Option<f32>,
 ) -> Result<ApiMessage, String> {
     let profile = get_active_profile().ok_or("No active LLM profile")?;
     let (api_key, url) = if matches!(profile.provider, LLMProvider::QwenCli) {
@@ -62,13 +60,10 @@ pub async fn stream_chat_completion(
     let tools: Vec<Tool> = tools_info.iter().map(|i| i.tool.clone()).collect();
     let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
-    // Define planning phase state
-    let is_planning_phase = force_thinking.unwrap_or(false);
-
     // Build messages with dynamic system prompt
     let mut api_messages = vec![ApiMessage {
         role: "system".to_string(),
-        content: Some(get_system_prompt(&tools_info, &messages, is_planning_phase)),
+        content: Some(get_system_prompt(&tools_info, &messages)),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -83,13 +78,9 @@ pub async fn stream_chat_completion(
         profile.max_tokens
     };
 
-    let thinking_enabled = force_thinking.unwrap_or_else(|| {
-        matches!(profile.provider, LLMProvider::QwenCli) && profile.enable_thinking.unwrap_or(false)
-    });
+    let thinking_enabled = matches!(profile.provider, LLMProvider::QwenCli) && profile.enable_thinking.unwrap_or(false);
 
-    let effective_temperature = if let Some(t) = force_temperature {
-        t
-    } else if thinking_enabled {
+    let effective_temperature = if thinking_enabled {
         1.0
     } else {
         profile.temperature
@@ -280,6 +271,22 @@ pub async fn stream_chat_completion(
                     
                     if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
                         if let Some(choice) = chunk.choices.first() {
+                            // Handle Qwen3 native reasoning_content field (enable_thinking=true)
+                            if let Some(reasoning) = &choice.delta.reasoning_content {
+                                if !reasoning.is_empty() {
+                                    if !is_thinking {
+                                        is_thinking = true;
+                                        let _ = app_handle.emit("chat-status", "Размышляю...");
+                                    }
+                                    let _ = app_handle.emit("chat-thinking-chunk", reasoning.clone());
+                                }
+                            } else if is_thinking && choice.delta.content.as_deref().map(|c| !c.is_empty()).unwrap_or(false) {
+                                // Thinking phase ended, text phase started
+                                is_thinking = false;
+                                has_switched_to_executing = true;
+                                let _ = app_handle.emit("chat-status", "Выполнение...");
+                            }
+
                             if let Some(content) = &choice.delta.content {
                                 if !has_switched_to_executing && !is_thinking && !content.trim().is_empty() {
                                     let _ = app_handle.emit("chat-status", "Выполнение...");

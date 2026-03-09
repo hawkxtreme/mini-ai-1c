@@ -148,19 +148,10 @@ pub async fn stream_chat(
         let bsl_state = task_app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
         let settings = crate::settings::load_settings();
 
-        let (is_qwen, has_thinking) = if let Some(profile) = crate::llm_profiles::get_active_profile() {
-            (matches!(profile.provider, crate::llm_profiles::LLMProvider::QwenCli), profile.enable_thinking.unwrap_or(false))
-        } else {
-            (false, false)
-        };
-        let mut is_planning_phase = is_qwen && has_thinking;
-
+        let max_iterations = settings.max_agent_iterations.unwrap_or(u32::MAX);
         let mut current_iteration = 0;
-        let max_iterations = if is_qwen {
-            u32::MAX // Qwen cli models have their own internal loop logic
-        } else {
-            settings.max_agent_iterations.unwrap_or(u32::MAX)
-        };
+        // Guard: ask AI to write text response only once (when it returns thinking-only with no text)
+        let mut asked_for_text_response = false;
 
         loop {
             current_iteration += 1;
@@ -171,16 +162,9 @@ pub async fn stream_chat(
                 break;
             }
 
-            let (force_thinking, force_temperature) = if is_planning_phase {
-                (Some(true), None)
-            } else {
-                // Если мы вышли из фазы планирования, выключаем thinking
-                // Передаем None для temperature, чтобы она взялась из профиля пользователя (например, 0.7)
-                (Some(false), None)
-            };
 
             // Stream chat completion
-            let response_msg = stream_chat_completion(api_messages.clone(), task_app_handle.clone(), force_thinking, force_temperature).await;
+            let response_msg = stream_chat_completion(api_messages.clone(), task_app_handle.clone()).await;
             
             let assistant_msg = match response_msg {
                 Ok(m) => m,
@@ -291,39 +275,32 @@ pub async fn stream_chat(
                 continue;
             }
 
-            // 1.5 If we were in planning phase and no tools were called, transition to execution phase
-            if is_planning_phase {
-                is_planning_phase = false;
-                
-                let full_text = assistant_msg.content.as_deref().unwrap_or("");
-                let has_diff = full_text.contains("<diff>") || full_text.contains("<<<<<<< SEARCH");
-                let has_bsl = !full_text.is_empty() && !extract_bsl_code(full_text).is_empty() && !has_diff;
+            // 2. If no tool calls — check for empty response (thinking-only, TTFT=0)
+            let full_text = assistant_msg.content.as_deref().unwrap_or("");
 
-                if has_diff || has_bsl {
-                    // AI already provided the solution in the planning phase.
-                    // Skip adding the "Plan complete" message and don't emit "chat-new-iteration".
-                    let _ = task_app_handle.emit("chat-status", "Решение получено на этапе планирования. Переход к проверке...");
-                } else {
-                    let _ = task_app_handle.emit("chat-status", "План составлен. Переход к генерации кода...");
-                    // Signal frontend to create a NEW assistant block for the execution phase reply
-                    let _ = task_app_handle.emit("chat-new-iteration", ());
+            if full_text.is_empty() {
+                if !asked_for_text_response {
+                    asked_for_text_response = true;
+                    let _ = task_app_handle.emit("chat-status", "Запрашиваю текстовый ответ...");
                     api_messages.push(ApiMessage {
                         role: "user".to_string(),
-                        content: Some("Отлично. План составлен и информация собрана. Теперь сгенерируй финальный 1С код на основе этого плана. Пиши только проверенный и рабочий BSL код.\nВНИМАНИЕ: Если код был запрошен, используй правила DIFF_FORMAT_INSTRUCTIONS.".to_string()),
+                        content: Some("Напиши свой ответ текстом.".to_string()),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,
                     });
-                    continue; // Trigger the next loop iteration (Execution Phase)
+                    continue;
+                } else {
+                    break; // Already asked once, nothing to show
                 }
             }
+            asked_for_text_response = false; // Reset on non-empty response
 
-            // 2. If no tool calls, check for BSL blocks
-            let full_text = assistant_msg.content.as_deref().unwrap_or("");
+            // Check for BSL blocks
             let bsl_blocks = extract_bsl_code(full_text);
-            
+
             if bsl_blocks.is_empty() {
-                 break;
+                break;
             }
 
             let _ = task_app_handle.emit("chat-status", "Проверка BSL кода...");
