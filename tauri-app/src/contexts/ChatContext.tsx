@@ -60,7 +60,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [currentIteration, setCurrentIteration] = useState(0);
     // Маппинг index→id для tool-call-progress (сбрасывается при новом запросе)
     const currentBatchToolIds = useRef<string[]>([]);
-
     useEffect(() => {
         let isMounted = true;
         let unlistenFns: UnlistenFn[] = [];
@@ -267,33 +266,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     listen<number>('chat-iteration', (event) => {
                         setCurrentIteration(event.payload);
                     }),
-                    // New iteration started (e.g. planning → execution phase transition)
-                    // Create a fresh assistant message block so Шаг 2 doesn't append to Шаг 1
-                    listen('chat-new-iteration', () => {
-                        setMessages(prev => [
-                            ...prev,
-                            {
-                                id: generateId(),
-                                role: 'assistant',
-                                content: '',
-                                parts: [],
-                                timestamp: Date.now()
-                            }
-                        ]);
-                    }),
+
                     listen('chat-done', () => {
                         setIsLoading(false);
                         setChatStatus('');
                         setCurrentIteration(0);
                         setMessages(prev => {
-                            // Reset any lingering pending/executing tool calls (stream died before tool-call-completed)
+                            // Reset any lingering pending/executing tool calls
                             const withFixedTools = prev.map(msg =>
                                 msg.toolCalls?.some(tc => tc.status === 'pending' || tc.status === 'executing')
                                     ? { ...msg, toolCalls: msg.toolCalls!.map(tc => tc.status === 'pending' || tc.status === 'executing' ? { ...tc, status: 'error' as const } : tc) }
                                     : msg
                             );
-                            // Remove trailing empty assistant messages (created by chat-new-iteration
-                            // but not filled if model produced no output in that phase)
+                            // Remove trailing empty assistant messages (no content, no parts, no tool calls)
                             const filtered = [...withFixedTools];
                             while (
                                 filtered.length > 0 &&
@@ -368,16 +353,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
         try {
             // Construct message history (system messages are UI-only, not sent to backend)
-            // IMPORTANT: tool_calls, tool_call_id and name must be preserved for LLM to
-            // correctly understand the history of tool usage in subsequent turns.
+            // IMPORTANT: tool_calls + tool results must be preserved for multi-turn tool use.
+            // Assistant messages with tool_calls are expanded to include synthetic tool result
+            // messages so the LLM gets a valid conversation history.
             const payloadMessages: api.ChatMessage[] = messages
                 .filter(m => m.role !== 'system')
-                .map(m => {
+                .flatMap(m => {
                     const msg: api.ChatMessage = {
                         role: m.role as 'user' | 'assistant' | 'tool',
                         content: m.content || ''
                     };
-                    // Preserve tool call history for proper LLM context
                     if (m.toolCalls && m.toolCalls.length > 0 && m.role === 'assistant') {
                         msg.tool_calls = m.toolCalls.map(tc => ({
                             id: tc.id,
@@ -387,11 +372,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                 arguments: tc.arguments || '{}'
                             }
                         }));
+                        // Inject tool result messages so the API history is valid
+                        const toolResults: api.ChatMessage[] = m.toolCalls
+                            .filter(tc => tc.result !== undefined && tc.id)
+                            .map(tc => ({
+                                role: 'tool' as const,
+                                content: tc.result || '',
+                                tool_call_id: tc.id,
+                                name: tc.name
+                            }));
+                        return [msg, ...toolResults];
                     }
-                    // For tool role messages, restore tool_call_id and name
-                    // This info is stored in the message content via the backend loop,
-                    // but for history reconstruction, we rely on UI state if available.
-                    return msg;
+                    return [msg];
                 });
             payloadMessages.push({ role: 'user', content: contextPayload });
 
@@ -491,7 +483,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             // Construct message history from truncated + edited (filter system/UI messages)
             const payloadMessages: api.ChatMessage[] = [...truncatedMessages, editedMessage]
                 .filter(m => m.role !== 'system')
-                .map(m => {
+                .flatMap(m => {
                     const msg: api.ChatMessage = {
                         role: m.role as 'user' | 'assistant' | 'tool',
                         content: m.content || ''
@@ -505,8 +497,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                 arguments: tc.arguments || '{}'
                             }
                         }));
+                        const toolResults: api.ChatMessage[] = m.toolCalls
+                            .filter(tc => tc.result !== undefined && tc.id)
+                            .map(tc => ({
+                                role: 'tool' as const,
+                                content: tc.result || '',
+                                tool_call_id: tc.id,
+                                name: tc.name
+                            }));
+                        return [msg, ...toolResults];
                     }
-                    return msg;
+                    return [msg];
                 });
             payloadMessages.push({ role: 'user', content: contextPayload });
 

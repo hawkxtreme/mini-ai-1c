@@ -27,8 +27,9 @@ pub fn log(message: &str, force: bool) {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let formatted_message = format!("[{}] {}", timestamp, message);
     
-    // Print to real console too
-    println!("{}", formatted_message);
+    // Print to real console — ignore broken pipe errors (os error 232 on Windows)
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "{}", formatted_message);
     
     let mut logs = LOGS.lock().unwrap();
     if logs.len() >= MAX_LOG_LINES {

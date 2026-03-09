@@ -42,24 +42,6 @@ Your goal is to make **Targeted Edits** using strictly XML-based diff format.
 [/RULES]
 "#;
 
-pub const TWO_STEP_PLANNING_RULES: &str = r#"
-=== TWO-STEP PLANNING AND LANGUAGE RULES ===
-
-[RULES]
-1. AUTOMATIC_PLANNING:
-   - For COMPLEX tasks (multiple steps), you MUST start your response with a `<think>` tag.
-   - For SIMPLE tasks, you MAY skip the `<think>` tag and reply directly.
-
-2. LANGUAGE:
-   - The `<think>` BLOCK MUST BE IN ENGLISH for better reasoning.
-   - The FINAL RESPONSE (AFTER `</think>` OR DIRECTLY) MUST BE IN THE USER'S LANGUAGE.
-   - If the user writes in Russian — answer in Russian.
-
-3. THINKING_CONTENT:
-   - Analyze the goal inside `<think>`.
-   - Do NOT include final code inside `<think>`.
-[/RULES]
-"#;
 
 /// Helper to detect target language based on message content
 pub fn detect_target_lang(messages: &[ApiMessage]) -> String {
@@ -107,7 +89,7 @@ pub fn has_code_context(messages: &[ApiMessage]) -> bool {
 }
 
 /// Get dynamic system prompt based on available tools
-pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage], is_planning_phase: bool) -> String {
+pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) -> String {
     let settings = load_settings();
     let custom = &settings.custom_prompts;
     let code_gen = &settings.code_generation;
@@ -127,7 +109,6 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage], 
     
     let has_code = has_code_context(messages);
     let code_rules = if has_code { DIFF_FORMAT_INSTRUCTIONS } else { "" };
-    let planning_rules = TWO_STEP_PLANNING_RULES;
 
     let edit_mode_instructions = if has_code {
         r#"РЕЖИМ ОТВЕТА НА ВОПРОСЫ (СТРОГИЙ ПРИОРИТЕТ):
@@ -147,8 +128,6 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage], 
 
     prompt.push_str(&format!(
         r#"Ты - AI-ассистент для разработки на платформе 1С:Предприятие.
-
-{}
 
 === ЯЗЫК ОТВЕТА (КРИТИЧЕСКИ ВАЖНО) ===
 - ALWAYS respond in **{}** language. This is MANDATORY and MUST NOT be violated under any circumstances.
@@ -185,7 +164,7 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage], 
 //
 // Возвращаемое значение:
 //   Тип - Описание"#,
-        planning_rules, target_lang, target_lang, code_rules, edit_mode_instructions
+        target_lang, target_lang, code_rules, edit_mode_instructions
     ));
 
     if code_gen.mark_changes || code_gen.behavior_preset == PromptBehaviorPreset::Maintenance {
@@ -373,25 +352,6 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage], 
 
 "#);
         }
-    }
-
-    prompt.push_str("\n\n=== ТЕКУЩАЯ ФАЗА ВЫПОЛНЕНИЯ ЗАДАЧИ ===\n");
-    if is_planning_phase {
-        prompt.push_str("PHASE: PLANNING & INFORMATION GATHERING\n");
-        prompt.push_str("КРИТИЧЕСКОЕ ПРАВИЛО: Ты НЕ ДОЛЖЕН писать финальный код 1С (ни с нуля, ни в блоках SEARCH/REPLACE).\n");
-        prompt.push_str("Твоя ЕДИНСТВЕННАЯ цель сейчас:\n");
-        prompt.push_str("1. Размышлять над задачей внутри `<think>`.\n");
-        prompt.push_str("2. ЕСЛИ ТЕБЕ НУЖНО больше информации (например, из 1С Справки или структуры), вызывай инструменты (MCP). Ты можешь делать это сколько угодно раз.\n");
-        prompt.push_str("3. ЕСЛИ ИНФОРМАЦИИ ДОСТАТОЧНО (или задача простая), просто напиши пошаговый план решения на Русском Языке и НЕ ВЫЗЫВАЙ никакие инструменты.\n");
-        prompt.push_str("Отсутствие вызова инструмента даст сигнал системе, что ты готов к написанию кода.\n");
-        prompt.push_str("3. Составить детальный пошаговый план решения на Русском Языке.\n");
-        prompt.push_str("ЗАПРЕЩАЕТСЯ выводить финальные блоки кода. Дождись фазы EXECUTION.\n");
-    } else {
-        prompt.push_str("PHASE: EXECUTION & CODE GENERATION\n");
-        prompt.push_str("ТЕПЕРЬ ТЕБЕ РАЗРЕШЕНО ПИСАТЬ ФИНАЛЬНЫЙ КОД.\n");
-        prompt.push_str("Используй всю информацию, собранную на предыдущем этапе Planning.\n");
-        prompt.push_str("Примени изменения СТРОГО соблюдая правила диффов (если редактируешь файл) или пиши 1С код (если создаешь новый).\n");
-        prompt.push_str("НЕ ВЫДУМЫВАЙ СИНТАКСИС — пиши только проверенный и рабочий BSL код.\n");
     }
 
     prompt

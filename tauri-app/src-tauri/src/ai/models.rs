@@ -75,6 +75,8 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
+    /// Qwen3 native thinking field (returned when enable_thinking=true)
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
