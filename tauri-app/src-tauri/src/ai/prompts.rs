@@ -286,7 +286,9 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
         }
         
         if available_tools.iter().any(|t| t.tool.function.name == "ask_1c_ai") {
-            prompt.push_str("2. `ask_1c_ai`: Пользуйся этим инструментом для консультаций по стандартам 1С и БСП, чтобы твой код был не просто синтаксически верным, а профессиональным.\n");
+            prompt.push_str("2. `ask_1c_ai` (сервер \"Напарник\" / 1C:Naparnik): Это инструмент для поиска в информационной системе 1С:ИТС.\n");
+            prompt.push_str("   - При команде /итс или запросе про ИТС — ВСЕГДА вызывай `ask_1c_ai` напрямую, не раздумывая.\n");
+            prompt.push_str("   - Также используй для консультаций по стандартам 1С и БСП.\n");
         }
 
         if available_tools.iter().any(|t| t.server_id == "builtin-1c-help") {
