@@ -484,10 +484,11 @@ pub async fn stream_chat_completion(
                                     }
                                     
                                     let tc = &mut accumulated_tool_calls[idx];
-                                    if let Some(id) = &tc_delta.id { tc.id.push_str(id); }
+                                    // ID приходит только в первом delta — записываем только если ещё не установлен
+                                    if let Some(id) = &tc_delta.id { if tc.id.is_empty() { tc.id.push_str(id); } }
                                     if let Some(f) = &tc_delta.function {
-                                        if let Some(name) = &f.name { 
-                                            tc.function.name.push_str(name); 
+                                        if let Some(name) = &f.name {
+                                            tc.function.name.push_str(name);
                                         }
                                         if let Some(args) = &f.arguments { 
                                             tc.function.arguments.push_str(args);
