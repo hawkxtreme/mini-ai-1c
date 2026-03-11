@@ -60,6 +60,78 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [currentIteration, setCurrentIteration] = useState(0);
     // Маппинг index→id для tool-call-progress (сбрасывается при новом запросе)
     const currentBatchToolIds = useRef<string[]>([]);
+    // Батчинг чанков: буферизуем токены и применяем setMessages не чаще 1 раза в кадр (~30fps)
+    const chunkBuffer = useRef('');
+    const thinkingBuffer = useRef('');
+    const flushRafId = useRef<number | null>(null);
+
+    const flushChunkBuffer = useCallback(() => {
+        flushRafId.current = null;
+        const text = chunkBuffer.current;
+        const thinking = thinkingBuffer.current;
+        if (!text && !thinking) return;
+        chunkBuffer.current = '';
+        thinkingBuffer.current = '';
+        setMessages(prev => {
+            let result = prev;
+            if (text) {
+                let lastAssistantIdx = -1;
+                for (let i = result.length - 1; i >= 0; i--) {
+                    if (result[i].role === 'user') break;
+                    if (result[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                }
+                if (lastAssistantIdx !== -1) {
+                    const last = result[lastAssistantIdx];
+                    const newParts = [...(last.parts || [])];
+                    const lastPart = newParts[newParts.length - 1];
+                    if (lastPart && lastPart.type === 'text') {
+                        newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + text };
+                    } else {
+                        newParts.push({ type: 'text', content: text });
+                    }
+                    result = [...result.slice(0, lastAssistantIdx), { ...last, content: last.content + text, parts: newParts }, ...result.slice(lastAssistantIdx + 1)];
+                } else {
+                    result = [...result, { id: generateId(), role: 'assistant', content: text, parts: [{ type: 'text', content: text }], timestamp: Date.now() }];
+                }
+            }
+            if (thinking) {
+                let lastAssistantIdx = -1;
+                for (let i = result.length - 1; i >= 0; i--) {
+                    if (result[i].role === 'user') break;
+                    if (result[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                }
+                if (lastAssistantIdx !== -1) {
+                    const last = result[lastAssistantIdx];
+                    const newParts = [...(last.parts || [])];
+                    const lastPart = newParts[newParts.length - 1];
+                    if (lastPart && lastPart.type === 'thinking') {
+                        newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + thinking };
+                    } else {
+                        newParts.push({ type: 'thinking', content: thinking });
+                    }
+                    result = [...result.slice(0, lastAssistantIdx), { ...last, thinking: (last.thinking || '') + thinking, parts: newParts }, ...result.slice(lastAssistantIdx + 1)];
+                } else {
+                    result = [...result, { id: generateId(), role: 'assistant', content: '', thinking, parts: [{ type: 'thinking', content: thinking }], timestamp: Date.now() }];
+                }
+            }
+            return result;
+        });
+    }, []);
+
+    const scheduleFlush = useCallback(() => {
+        if (flushRafId.current === null) {
+            flushRafId.current = requestAnimationFrame(flushChunkBuffer);
+        }
+    }, [flushChunkBuffer]);
+
+    const flushNow = useCallback(() => {
+        if (flushRafId.current !== null) {
+            cancelAnimationFrame(flushRafId.current);
+            flushRafId.current = null;
+        }
+        flushChunkBuffer();
+    }, [flushChunkBuffer]);
+
     useEffect(() => {
         let isMounted = true;
         let unlistenFns: UnlistenFn[] = [];
@@ -68,60 +140,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             try {
                 const results = await Promise.all([
                     listen<string>('chat-chunk', (event) => {
-                        setMessages(prev => {
-                            // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
-                            let lastAssistantIdx = -1;
-                            for (let i = prev.length - 1; i >= 0; i--) {
-                                if (prev[i].role === 'user') break;
-                                if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                            }
-
-                            if (lastAssistantIdx !== -1) {
-                                const last = prev[lastAssistantIdx];
-                                const newParts = [...(last.parts || [])];
-                                const lastPart = newParts[newParts.length - 1];
-                                if (lastPart && lastPart.type === 'text') {
-                                    newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + event.payload };
-                                } else {
-                                    newParts.push({ type: 'text', content: event.payload });
-                                }
-                                return [
-                                    ...prev.slice(0, lastAssistantIdx),
-                                    { ...last, content: last.content + event.payload, parts: newParts },
-                                    ...prev.slice(lastAssistantIdx + 1)
-                                ];
-                            }
-                            return [...prev, { id: generateId(), role: 'assistant', content: event.payload, parts: [{ type: 'text', content: event.payload }], timestamp: Date.now() }];
-                        });
+                        chunkBuffer.current += event.payload;
+                        scheduleFlush();
                     }),
                     listen<string>('chat-thinking-chunk', (event) => {
-                        setMessages(prev => {
-                            // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
-                            let lastAssistantIdx = -1;
-                            for (let i = prev.length - 1; i >= 0; i--) {
-                                if (prev[i].role === 'user') break;
-                                if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                            }
-
-                            if (lastAssistantIdx !== -1) {
-                                const last = prev[lastAssistantIdx];
-                                const newParts = [...(last.parts || [])];
-                                const lastPart = newParts[newParts.length - 1];
-                                if (lastPart && lastPart.type === 'thinking') {
-                                    newParts[newParts.length - 1] = { ...lastPart, content: (lastPart.content || '') + event.payload };
-                                } else {
-                                    newParts.push({ type: 'thinking', content: event.payload });
-                                }
-                                return [
-                                    ...prev.slice(0, lastAssistantIdx),
-                                    { ...last, thinking: (last.thinking || '') + event.payload, parts: newParts },
-                                    ...prev.slice(lastAssistantIdx + 1)
-                                ];
-                            }
-                            return [...prev, { id: generateId(), role: 'assistant', content: '', thinking: event.payload, parts: [{ type: 'thinking', content: event.payload }], timestamp: Date.now() }];
-                        });
+                        thinkingBuffer.current += event.payload;
+                        scheduleFlush();
                     }),
                     listen<{ index: number, id: string, name: string }>('tool-call-started', (event) => {
+                        flushNow();
                         setMessages(prev => {
                             const newToolCall = {
                                 id: event.payload.id,
@@ -193,6 +220,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         });
                     }),
                     listen<{ id: string, status: 'done' | 'error', result: string }>('tool-call-completed', (event) => {
+                        flushNow();
                         setMessages(prev => {
                             // Ищем assistant-сообщение с нужным tool call по ID
                             let targetIdx = -1;
@@ -268,6 +296,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     }),
 
                     listen('chat-done', () => {
+                        flushNow();
                         setIsLoading(false);
                         setChatStatus('');
                         setCurrentIteration(0);
@@ -312,6 +341,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             isMounted = false;
             unlistenFns.forEach(fn => fn());
             unlistenFns = [];
+            if (flushRafId.current !== null) {
+                cancelAnimationFrame(flushRafId.current);
+                flushRafId.current = null;
+            }
         };
     }, []);
 

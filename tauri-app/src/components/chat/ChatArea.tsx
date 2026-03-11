@@ -704,7 +704,15 @@ export function ChatArea({
                                         <div className="min-w-0 flex flex-col gap-3">
                                             {msg.role === 'assistant' && msg.parts ? (
                                                 <>
-                                                    {msg.parts.map((part, partIdx) => {
+                                                    {/* Объединяем соседние text-части чтобы tool call не разбивал слова */}
+                                                    {msg.parts.reduce<{ type: string; content?: string; toolCallId?: string; origIdx: number }[]>((acc, part, idx) => {
+                                                        if (part.type === 'text' && acc.length > 0 && acc[acc.length - 1].type === 'text') {
+                                                            acc[acc.length - 1] = { ...acc[acc.length - 1], content: (acc[acc.length - 1].content || '') + (part.content || '') };
+                                                        } else {
+                                                            acc.push({ ...part, origIdx: idx });
+                                                        }
+                                                        return acc;
+                                                    }, []).map((part, partIdx) => {
                                                         if (part.type === 'thinking') {
                                                             const thinkingKey = `${i}-${partIdx}`;
                                                             const isThinkingStreaming = isLoading && i === messages.length - 1;
@@ -744,7 +752,7 @@ export function ChatArea({
                                                                 <div key={partIdx} className="min-w-0">
                                                                     <MarkdownRenderer
                                                                         content={part.content || ''}
-                                                                        isStreaming={isLoading && i === messages.length - 1 && partIdx === msg.parts!.length - 1}
+                                                                        isStreaming={isLoading && i === messages.length - 1 && (part as any).origIdx === msg.parts!.length - 1}
                                                                         onApplyCode={onApplyCode}
                                                                         originalCode={currentOriginalCode}
                                                                     />
