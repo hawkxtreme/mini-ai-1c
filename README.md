@@ -298,6 +298,9 @@ npm run app:build
 ## 🤝 Благодарности
 
 - **Владимир Харин ([@vladimir-kharin](https://github.com/vladimir-kharin))** — за расширение [1c_mcp](https://github.com/vladimir-kharin/1c_mcp), которое легло в основу интеграции с метаданными 1С.
+- **[@alkoleft](https://github.com/alkoleft)** — за грамматику [tree-sitter-bsl](https://github.com/alkoleft/tree-sitter-bsl), используемую для парсинга BSL-кода в MCP-сервере поиска по конфигурации.
+- **[@Arman-Kudaibergenov](https://github.com/Arman-Kudaibergenov)** — за проект [bsl-atlas](https://github.com/Arman-Kudaibergenov/bsl-atlas), послуживший источником вдохновения для построения индекса символов и call graph BSL.
+- **[@SteelMorgan](https://github.com/SteelMorgan)** — за проект [spring-mcp-1c-copilot](https://github.com/SteelMorgan/spring-mcp-1c-copilot), идеи из которого были использованы при разработке MCP 1С Напарника.
 
 ---
 
