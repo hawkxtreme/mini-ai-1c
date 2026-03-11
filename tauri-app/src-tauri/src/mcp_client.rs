@@ -8,6 +8,7 @@ use tokio::process::{Command, Child};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use std::collections::{HashMap, HashSet, VecDeque};
 use lazy_static::lazy_static;
@@ -15,6 +16,8 @@ use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
 use std::thread;
 use async_trait::async_trait;
 use tauri::Manager;
+
+static RECONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 #[async_trait]
 pub trait InternalMcpHandler: Send + Sync {
@@ -185,7 +188,7 @@ impl McpManager {
              // Try lock with timeout to avoid hanging if BSL is currently busy analyzing large file
              let bsl_client = bsl_client_state.inner();
              let bsl_lock_future = bsl_client.lock();
-             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(100), bsl_lock_future).await {
+             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(3000), bsl_lock_future).await {
                  let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
                  if jar_exists && !bsl.is_connected() {
                      crate::app_log!("[MCP] Restarting/Starting BSL LS because it was enabled and not connected");
@@ -318,15 +321,20 @@ pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
                     });
 
                     if interesting {
-                        // Debounce? or just reload. 
-                        // It's better to wait a bit to ensure write is complete.
+                        // Debounce: wait a bit to ensure write is complete.
                         thread::sleep(Duration::from_millis(100));
-                        
+
+                        // Дедупликация: если reconfigure уже выполняется — пропускаем
+                        if RECONFIGURE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                            continue;
+                        }
+
                         // Run async reconfigure in tauri runtime
                         let app_handle_clone = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             let settings = crate::settings::load_settings();
                             McpManager::reconfigure(settings, &app_handle_clone).await;
+                            RECONFIGURE_IN_FLIGHT.store(false, Ordering::SeqCst);
                         });
                     }
                 },
@@ -706,6 +714,7 @@ impl McpSession {
         let is_search_server = config.id == "builtin-1c-search";
 
         // Writer task
+        let pending_for_writer_drain = pending_requests.clone();
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 if let Ok(json) = serde_json::to_string(&req) {
@@ -716,6 +725,11 @@ impl McpSession {
                         break;
                     }
                 }
+            }
+            // Процесс умер — немедленно уведомляем все ожидающие запросы
+            let mut pending = pending_for_writer_drain.lock().await;
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err("MCP server process died (stdin closed)".to_string()));
             }
         });
 

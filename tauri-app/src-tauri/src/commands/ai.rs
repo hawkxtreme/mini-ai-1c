@@ -306,22 +306,30 @@ pub async fn stream_chat(
             let validation_result = tokio::time::timeout(
                 tokio::time::Duration::from_secs(30),
                 async {
-                    let mut client: tokio::sync::MutexGuard<crate::bsl_client::BSLClient> = bsl_state.lock().await;
-                    if !client.is_connected() {
-                        let _ = client.connect().await;
-                    }
+                    // Проверяем подключение один раз до цикла
+                    {
+                        let mut client = bsl_state.lock().await;
+                        if !client.is_connected() {
+                            let _ = client.connect().await;
+                        }
+                    } // lock освобождён
 
                     let mut all_errors: Vec<String> = Vec::new();
                     let mut ui_diagnostics: Vec<BSLDiagnostic> = Vec::new();
 
                     for (idx, code) in bsl_blocks.iter().enumerate() {
                         let uri = format!("file:///iteration_{}_{}.bsl", current_iteration, idx);
-                        match client.analyze_code(code, &uri).await {
+                        // Захватываем и освобождаем lock на каждой итерации
+                        let result = {
+                            let mut client = bsl_state.lock().await;
+                            client.analyze_code(code, &uri).await
+                        };
+                        match result {
                             Ok(diagnostics) => {
                                 for d in &diagnostics {
                                     let msg_lower = d.message.to_lowercase();
-                                    if msg_lower.contains("каноническ") || 
-                                       msg_lower.contains("пробел") || 
+                                    if msg_lower.contains("каноническ") ||
+                                       msg_lower.contains("пробел") ||
                                        msg_lower.contains("canonical") ||
                                        msg_lower.contains("comments") {
                                         continue;
@@ -342,7 +350,7 @@ pub async fn stream_chat(
                                 let errors: Vec<crate::bsl_client::Diagnostic> = diagnostics.into_iter()
                                     .filter(|d| d.severity == Some(1))
                                     .collect();
-                                
+
                                 if !errors.is_empty() {
                                     let error_str = errors.iter()
                                         .map(|e| format!("- Line {}: {}", e.range.start.line + 1, e.message))

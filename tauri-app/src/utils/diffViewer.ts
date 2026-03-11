@@ -45,6 +45,9 @@ export interface DiffApplyResult {
 
 // ─── Вспомогательные функции ───────────────────────────────────────────────────
 
+/** Максимальная длина строки для алгоритма Левенштейна (O(m×n)). */
+const MAX_LEV_LEN = 2000;
+
 /**
  * Расстояние Левенштейна между двумя строками (две строки DP, O(m*n)).
  * Для больших строк усекает до MAX_LEV_LEN для производительности.
@@ -54,7 +57,11 @@ function levenshteinDistance(a: string, b: string): number {
     if (!a) return b.length;
     if (!b) return a.length;
 
-    // We compute full distance. For performance, we assume it's only called when strings are somewhat similar
+    // При слишком длинных строках fuzzy-match слишком дорог — считаем полностью разными
+    if (a.length > MAX_LEV_LEN || b.length > MAX_LEV_LEN) {
+        return Math.max(a.length, b.length);
+    }
+
     const m = a.length, n = b.length;
     let prev = Array.from({ length: n + 1 }, (_, i) => i);
     let curr = new Array(n + 1).fill(0);

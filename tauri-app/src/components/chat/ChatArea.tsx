@@ -218,14 +218,24 @@ export function ChatArea({
     }, [isLoading]);
 
     // Periodic check ONLY for QwenCli
+    const cliStatusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     useEffect(() => {
+        if (cliStatusIntervalRef.current !== null) {
+            clearInterval(cliStatusIntervalRef.current);
+            cliStatusIntervalRef.current = null;
+        }
         const activeProfile = profiles.find(p => p.id === activeProfileId);
         if (activeProfile?.provider !== 'QwenCli') return;
 
-        const interval = setInterval(() => {
+        cliStatusIntervalRef.current = setInterval(() => {
             fetchCliStatuses();
         }, 60_000);
-        return () => clearInterval(interval);
+        return () => {
+            if (cliStatusIntervalRef.current !== null) {
+                clearInterval(cliStatusIntervalRef.current);
+                cliStatusIntervalRef.current = null;
+            }
+        };
     }, [activeProfileId, profiles]);
 
 

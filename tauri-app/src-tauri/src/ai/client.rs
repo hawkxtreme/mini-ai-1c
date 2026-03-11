@@ -226,7 +226,15 @@ pub async fn stream_chat_completion(
     let mut first_token_received = false;
     let start_gen_time = std::time::Instant::now();
     
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.next()
+        ).await {
+            Err(_) => return Err("Stream timeout: no data from API for 30s".to_string()),
+            Ok(None) => break,
+            Ok(Some(r)) => r,
+        };
         if !first_token_received {
             first_token_received = true;
             let ttft = start_gen_time.elapsed().as_millis();
