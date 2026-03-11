@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
-import { useChat, ToolCall } from '../../contexts/ChatContext';
+import { useChat, ToolCall, ChatMessage } from '../../contexts/ChatContext';
 import { useProfiles } from '../../contexts/ProfileContext';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
@@ -28,6 +28,39 @@ interface ChatAreaProps {
     onOpenSettings?: (tab?: string) => void;
     onActiveDiffChange?: (content: string) => void;
     activeDiffContent?: string;
+}
+
+function buildCopyContent(msg: ChatMessage): string {
+    if (msg.role !== 'assistant' || !msg.parts) {
+        return msg.content;
+    }
+    const sections: string[] = [];
+    const merged = msg.parts.reduce<{ type: string; content?: string; toolCallId?: string }[]>((acc, part) => {
+        if (part.type === 'text' && acc.length > 0 && acc[acc.length - 1].type === 'text') {
+            acc[acc.length - 1] = { ...acc[acc.length - 1], content: (acc[acc.length - 1].content || '') + (part.content || '') };
+        } else {
+            acc.push({ ...part });
+        }
+        return acc;
+    }, []);
+    for (const part of merged) {
+        if (part.type === 'text' && part.content?.trim()) {
+            sections.push(part.content.trim());
+        } else if (part.type === 'tool' && part.toolCallId) {
+            const tc = msg.toolCalls?.find(t => t.id === part.toolCallId);
+            if (tc && (tc.status === 'done' || tc.status === 'error')) {
+                const lines: string[] = [`[Tool: ${tc.name}]`];
+                if (tc.arguments?.trim()) {
+                    lines.push(`Аргументы: ${tc.arguments}`);
+                }
+                if (tc.result?.trim()) {
+                    lines.push(`Результат: ${tc.result}`);
+                }
+                sections.push(lines.join('\n'));
+            }
+        }
+    }
+    return sections.join('\n\n') || msg.content;
 }
 
 function DiffSummaryBanner({ content, onApply, onReject, disabled }: { content: string, onApply?: () => void, onReject?: () => void, disabled?: boolean }) {
@@ -694,7 +727,7 @@ export function ChatArea({
                                         <div className="flex items-start justify-end gap-2 mb-2">
                                             {/* Actions */}
                                             <MessageActions
-                                                content={msg.content}
+                                                content={buildCopyContent(msg)}
                                                 timestamp={msg.timestamp}
                                                 isUser={msg.role === 'user'}
                                                 onEdit={msg.role === 'user' ? () => handleStartEdit(i, msg.content) : undefined}
