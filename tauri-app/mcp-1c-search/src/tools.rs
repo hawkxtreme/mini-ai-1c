@@ -262,11 +262,61 @@ pub fn list_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "smart_find",
+            "description": "Умный поиск функции/процедуры по имени: находит символ в индексе (1 мс) и возвращает полный код за один вызов. Используй ВМЕСТО search_code когда знаешь имя функции.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Имя функции или процедуры (полное или частичное)"
+                    },
+                    "include_code": {
+                        "type": "boolean",
+                        "description": "Включить полный код лучшего совпадения (по умолчанию true)",
+                        "default": true
+                    }
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "find_function_in_object",
+            "description": "Найти функцию/процедуру внутри конкретного объекта 1С (справочник, документ, общий модуль). Возвращает список функций объекта + код лучшего совпадения по подсказке.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object": {
+                        "type": "string",
+                        "description": "Имя объекта или полный идентификатор: 'Catalog.СтавкиНДС', 'CommonModule.УчетНДС', 'Document.ЗаказПокупателя'"
+                    },
+                    "function_hint": {
+                        "type": "string",
+                        "description": "Ключевое слово для фильтрации функций (регистронезависимый поиск по имени). Если не указано — возвращает все функции объекта."
+                    }
+                },
+                "required": ["object"]
+            }
+        }),
+        json!({
             "name": "stats",
             "description": "Статистика символьного индекса конфигурации 1С: количество символов, файлов, объектов, рёбер графа вызовов.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
+            }
+        }),
+        json!({
+            "name": "benchmark",
+            "description": "Замер производительности всех инструментов поиска: min/avg/p95/max latency в мс. Используется для публичного бенчмарка и сравнения до/после оптимизаций.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "iterations": {
+                        "type": "number",
+                        "description": "Количество итераций каждого инструмента (по умолчанию 20, max 100)"
+                    }
+                }
             }
         }),
     ]
@@ -290,8 +340,11 @@ pub async fn call_tool(
         "impact_analysis" => handle_impact_analysis(args, config_path, db_path).await,
         "get_function_context" => handle_get_function_context(args, db_path).await,
         "get_module_functions" => handle_get_module_functions(args, db_path).await,
+        "smart_find" => handle_smart_find(args, config_path, db_path).await,
+        "find_function_in_object" => handle_find_function_in_object(args, config_path, db_path).await,
         "stats" => handle_stats(db_path).await,
         "sync_index" => handle_sync_index(config_path, db_path).await,
+        "benchmark" => handle_benchmark(args, config_path, db_path).await,
         _ => Err(format!("Неизвестный инструмент: {}", name)),
     };
     eprintln!("[PERF] {} in {}ms", name, start.elapsed().as_millis());
@@ -1333,4 +1386,341 @@ async fn handle_stats(db_path: &Option<PathBuf>) -> Result<Value, String> {
     );
 
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+// ─── smart_find ──────────────────────────────────────────────────────────────
+
+async fn handle_smart_find(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let query = args["query"].as_str().ok_or("Параметр 'query' обязателен")?;
+    if query.trim().is_empty() {
+        return Err("Параметр 'query' не может быть пустым".to_string());
+    }
+    let with_code = args["include_code"].as_bool().unwrap_or(true);
+
+    let db = db_path.as_ref().ok_or("Индекс символов не готов. Убедитесь, что указан путь к конфигурации и индексация завершена.")?;
+
+    let db_clone = db.clone();
+    let query_owned = query.to_string();
+
+    // Step 1: find by exact name, fallback to substring
+    let results = tokio::task::spawn_blocking(move || {
+        let exact = index::find_symbols(&db_clone, &query_owned, true, 5)?;
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        index::find_symbols(&db_clone, &query_owned, false, 10)
+    })
+    .await
+    .map_err(|e| format!("Ошибка поиска: {}", e))??;
+
+    if results.is_empty() {
+        // Fallback to search_code if config available
+        if config_path.is_some() {
+            let fallback = handle_search_code(
+                &json!({"query": query, "limit": 10}),
+                config_path,
+                db_path,
+            )
+            .await?;
+            let fallback_text = fallback["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            return Ok(json!({ "content": [{ "type": "text", "text": format!(
+                "Символ \"{}\" не найден в индексе. Результаты текстового поиска:\n\n{}",
+                query, fallback_text
+            )}]}));
+        }
+        return Ok(json!({ "content": [{ "type": "text", "text": format!(
+            "Символ \"{}\" не найден в индексе. Проверьте написание имени.", query
+        )}]}));
+    }
+
+    // Build result text
+    let mut text = format!("Найдено {} символ(ов) по запросу \"{}\":\n\n", results.len(), query);
+    for r in &results {
+        let export_mark = if r.is_export { " Экспорт" } else { "" };
+        text.push_str(&format!(
+            "- **{}** ({}{}) — `{}` строки {}-{}\n",
+            r.name, r.kind, export_mark, r.file, r.start_line, r.end_line
+        ));
+    }
+
+    // Step 2: append code of best match (prefer export, then first)
+    if with_code {
+        if let Some(root) = config_path {
+            let best = results.iter().find(|r| r.is_export).unwrap_or(&results[0]);
+            let file_path = root.join(best.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = (best.start_line as usize).saturating_sub(1);
+                let end = (best.end_line as usize).min(lines.len());
+                if start < lines.len() {
+                    let body = lines[start..end].join("\n");
+                    let export_mark = if best.is_export { " Экспорт" } else { "" };
+                    text.push_str(&format!(
+                        "\n\n---\n**Код: {}{}** (`{}` строки {}-{}):\n\n```bsl\n{}\n```",
+                        best.name, export_mark, best.file,
+                        best.start_line, best.end_line, body
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+// ─── find_function_in_object ─────────────────────────────────────────────────
+
+async fn handle_find_function_in_object(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let object = args["object"].as_str().ok_or("Параметр 'object' обязателен")?;
+    let function_hint = args["function_hint"].as_str().unwrap_or("").to_lowercase();
+    let db = db_path.as_ref().ok_or("Индекс символов не готов")?;
+
+    // Resolve "Catalog.СтавкиНДС" → "Catalogs/СтавкиНДС"
+    let path_prefix = if let Some(dot) = object.find('.') {
+        let type_part = &object[..dot];
+        let name_part = &object[dot + 1..];
+        if let Some(folder) = object_type_to_folder(type_part) {
+            format!("{}/{}", folder, name_part)
+        } else {
+            object.to_string()
+        }
+    } else {
+        object.to_string()
+    };
+
+    let symbols = index::get_module_functions(db, &path_prefix, 500);
+
+    if symbols.is_empty() {
+        return Ok(json!({ "content": [{ "type": "text", "text": format!(
+            "Объект «{}» не найден в индексе или не содержит функций. Проверьте имя или запустите переиндексацию.", object
+        )}]}));
+    }
+
+    // Filter by hint
+    let matched: Vec<&index::SymbolMatch> = if function_hint.is_empty() {
+        symbols.iter().collect()
+    } else {
+        symbols.iter().filter(|s| s.name.to_lowercase().contains(&function_hint)).collect()
+    };
+
+    let mut text = format!("## Функции объекта `{}`\n\n", object);
+    text.push_str(&format!(
+        "Всего функций: {} | Совпадений по «{}»: {}\n\n",
+        symbols.len(),
+        if function_hint.is_empty() { "все" } else { &function_hint },
+        matched.len()
+    ));
+
+    if matched.is_empty() {
+        text.push_str("Функций, соответствующих подсказке, не найдено.\n\n**Первые 30 функций объекта:**\n");
+        for s in symbols.iter().take(30) {
+            let export = if s.is_export { " Экспорт" } else { "" };
+            text.push_str(&format!("- **{}**{} (строка {})\n", s.name, export, s.start_line));
+        }
+    } else {
+        for s in &matched {
+            let export = if s.is_export { " Экспорт" } else { "" };
+            text.push_str(&format!("- **{}**{} (строка {})\n", s.name, export, s.start_line));
+        }
+
+        // Code of best match (prefer export)
+        let best = matched.iter().find(|s| s.is_export).copied().unwrap_or(matched[0]);
+        if let Some(root) = config_path {
+            let file_path = root.join(best.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = (best.start_line as usize).saturating_sub(1);
+                let end = (best.end_line as usize).min(lines.len());
+                if start < lines.len() {
+                    let body = lines[start..end].join("\n");
+                    let export_mark = if best.is_export { " Экспорт" } else { "" };
+                    text.push_str(&format!(
+                        "\n\n---\n**Код: {}{}** (`{}`):\n\n```bsl\n{}\n```",
+                        best.name, export_mark, best.file, body
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+// ─── benchmark ───────────────────────────────────────────────────────────────
+
+async fn handle_benchmark(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let db = db_path.as_ref().ok_or("Индекс не настроен")?;
+    let n = (args["iterations"].as_u64().unwrap_or(20) as usize).min(100).max(3);
+
+    // ── Sample data from the index for realistic queries ──────────────────────
+    let (sample_symbol, sample_prefix, sample_file) = {
+        let conn = rusqlite::Connection::open(db).map_err(|e| e.to_string())?;
+        let sym: String = conn
+            .query_row(
+                "SELECT name FROM symbols WHERE kind='function' AND LENGTH(name) > 4 ORDER BY RANDOM() LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "ОбщийМодуль".to_string());
+        let prefix: String = sym.chars().take(4).collect();
+        let file: String = conn
+            .query_row("SELECT filepath FROM indexed_files ORDER BY RANDOM() LIMIT 1", [], |r| r.get(0))
+            .unwrap_or_default();
+        (sym, prefix, file)
+    };
+
+    // ── Timing helper ─────────────────────────────────────────────────────────
+    let calc_stats = |mut times: Vec<u128>| -> serde_json::Value {
+        times.sort_unstable();
+        let len = times.len();
+        let min = times[0];
+        let max = times[len - 1];
+        let avg = times.iter().sum::<u128>() / len as u128;
+        let p95_idx = ((len as f64 * 0.95) as usize).min(len - 1);
+        let p95 = times[p95_idx];
+        json!({ "min_ms": min, "avg_ms": avg, "p95_ms": p95, "max_ms": max, "n": len })
+    };
+
+    let mut results: Vec<serde_json::Value> = vec![];
+
+    // ── 1. find_symbol — точный (SQLite PK lookup) ────────────────────────────
+    {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_find_symbol(&json!({"query": sample_symbol, "exact": true, "limit": 10}), db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("find_symbol (точный)");
+        s["description"] = json!("SQLite WHERE name_lower = ?");
+        results.push(s);
+    }
+
+    // ── 2. find_symbol — prefix LIKE ─────────────────────────────────────────
+    {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_find_symbol(&json!({"query": sample_prefix, "exact": false, "limit": 20}), db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("find_symbol (prefix)");
+        s["description"] = json!("SQLite WHERE name_lower LIKE ?%");
+        results.push(s);
+    }
+
+    // ── 3. get_function_context ───────────────────────────────────────────────
+    {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_get_function_context(&json!({"function_name": sample_symbol}), db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("get_function_context");
+        s["description"] = json!("SQLite + чтение диапазона строк файла");
+        results.push(s);
+    }
+
+    // ── 4. get_module_functions ───────────────────────────────────────────────
+    if !sample_file.is_empty() {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_get_module_functions(&json!({"file": sample_file}), db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("get_module_functions");
+        s["description"] = json!("SQLite WHERE file = ?");
+        results.push(s);
+    }
+
+    // ── 5. list_objects ───────────────────────────────────────────────────────
+    {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_list_objects(&json!({}), db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("list_objects");
+        s["description"] = json!("SQLite GROUP BY из таблицы метаданных");
+        results.push(s);
+    }
+
+    // ── 6. stats ──────────────────────────────────────────────────────────────
+    {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let _ = handle_stats(db_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("stats");
+        s["description"] = json!("SQLite COUNT агрегаты");
+        results.push(s);
+    }
+
+    // ── 7. get_file_context — baseline: чтение файла с диска ─────────────────
+    if config_path.is_some() && !sample_file.is_empty() {
+        let n_slow = n.min(10);
+        let mut times = Vec::with_capacity(n_slow);
+        for _ in 0..n_slow {
+            let t = std::time::Instant::now();
+            let _ = handle_get_file_context(&json!({"file": sample_file, "line": 1}), config_path).await;
+            times.push(t.elapsed().as_millis());
+        }
+        let mut s = calc_stats(times);
+        s["tool"] = json!("get_file_context");
+        s["description"] = json!("Чтение файла с диска (baseline)");
+        results.push(s);
+    }
+
+    // ── 8. search_code — ripgrep, 1 прогрев + 1 замер (тяжёлая операция) ──────
+    // Не включаем в цикл N итераций — одиночный ripgrep-скан уже репрезентативен.
+    if config_path.is_some() {
+        // Прогрев (ОС кэширует файлы)
+        let _ = handle_search_code(&json!({"query": &sample_prefix, "max_results": 10}), config_path, db_path).await;
+        let t = std::time::Instant::now();
+        let _ = handle_search_code(&json!({"query": &sample_prefix, "max_results": 10}), config_path, db_path).await;
+        let elapsed = t.elapsed().as_millis();
+        results.push(json!({
+            "tool": "search_code",
+            "description": "ripgrep по всем BSL/XML файлам (1 замер после прогрева)",
+            "min_ms": elapsed, "avg_ms": elapsed, "p95_ms": elapsed, "max_ms": elapsed, "n": 1
+        }));
+    }
+
+    let db_size_mb = crate::db_size_mb(db);
+    let symbol_count = index::symbol_count(db);
+
+    Ok(json!({
+        "iterations": n,
+        "sample_symbol": sample_symbol,
+        "sample_file": sample_file,
+        "db_size_mb": db_size_mb,
+        "symbol_count": symbol_count,
+        "results": results
+    }))
 }

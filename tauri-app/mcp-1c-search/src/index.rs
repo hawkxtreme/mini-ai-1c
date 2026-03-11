@@ -304,11 +304,27 @@ pub fn symbol_count(db_path: &Path) -> usize {
     0
 }
 
+/// Save symbol/file/object/calls counts to meta table for fast stats retrieval.
+fn save_stats_to_meta(conn: &Connection) {
+    let sym: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0)).unwrap_or(0);
+    let files: i64 = conn.query_row("SELECT COUNT(*) FROM indexed_files", [], |r| r.get(0)).unwrap_or(0);
+    let objs: i64 = conn.query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0)).unwrap_or(0);
+    let calls: i64 = conn.query_row("SELECT COUNT(*) FROM calls", [], |r| r.get(0)).unwrap_or(0);
+    let _ = conn.execute_batch(&format!(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_symbols','{sym}');
+         INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_files','{files}');
+         INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_objects','{objs}');
+         INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_calls','{calls}');"
+    ));
+}
+
 /// Extracted symbol data collected during parallel parse phase.
 struct ParsedFile {
     rel_path: String,
     mtime: u64,
     symbols: Vec<crate::parser::bsl_ast::BslSymbol>,
+    /// true = brand new file, never indexed before (skip DELETE)
+    is_new: bool,
 }
 
 /// Get unix mtime of a file in seconds, 0 if unavailable.
@@ -431,66 +447,104 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
         .filter_map(|(rel_path, mtime, path)| {
             let buf = read_file_to_string_lossy(path).ok()?;
             let symbols = bsl_ast::extract_symbols(&buf);
+            let is_new = !indexed_mtimes.contains_key(rel_path);
             let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
             if total_to_parse > 0 && done % (total_to_parse / 10).max(1) == 0 {
                 let pct = done * 80 / total_to_parse + 10;
                 eprintln!("SEARCH_STATUS:syncing:{}:Парсинг {}/{}", pct, done, total_to_parse);
             }
-            Some(ParsedFile { rel_path: rel_path.clone(), mtime: *mtime, symbols })
+            Some(ParsedFile { rel_path: rel_path.clone(), mtime: *mtime, symbols, is_new })
         })
         .collect();
 
     // ── Serial phase: apply changes to SQLite ─────────────────────────────────
     eprintln!("SEARCH_STATUS:syncing:90:Запись изменений...");
-    {
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
-        // Remove deleted files' symbols
-        for rel in &deleted {
-            let _ = tx.execute("DELETE FROM symbols WHERE file = ?1", params![rel]);
-            let _ = tx.execute("DELETE FROM indexed_files WHERE filepath = ?1", params![rel]);
+    // Maximum write speed: memory journal (stays in RAM, no disk sync),
+    // large page cache, drop all indexes (rebuild once at the end).
+    let _ = conn.execute_batch(
+        "PRAGMA journal_mode=MEMORY;
+         PRAGMA synchronous=OFF;
+         PRAGMA cache_size=-262144;
+         PRAGMA temp_store=MEMORY;
+         DROP INDEX IF EXISTS idx_name_lower;
+         DROP INDEX IF EXISTS idx_file;
+         DROP INDEX IF EXISTS idx_calls_caller;
+         DROP INDEX IF EXISTS idx_calls_callee;"
+    );
+
+    let total_parsed = parsed.len();
+
+    // Single transaction — with journal_mode=MEMORY there is no WAL growth.
+    // Statements are dropped in inner block so tx can be committed (borrow rules).
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    {
+        // Remove deleted files
+        if !deleted.is_empty() {
+            let mut del_sym  = tx.prepare("DELETE FROM symbols WHERE file = ?1").map_err(|e| e.to_string())?;
+            let mut del_call = tx.prepare("DELETE FROM calls WHERE caller_file = ?1").map_err(|e| e.to_string())?;
+            let mut del_file = tx.prepare("DELETE FROM indexed_files WHERE filepath = ?1").map_err(|e| e.to_string())?;
+            for rel in &deleted {
+                let _ = del_sym.execute([rel]);
+                let _ = del_call.execute([rel]);
+                let _ = del_file.execute([rel]);
+            }
         }
 
-        // Replace symbols for changed/new files
-        for pf in &parsed {
-            let _ = tx.execute("DELETE FROM symbols WHERE file = ?1", params![pf.rel_path]);
-            let _ = tx.execute("DELETE FROM calls WHERE caller_file = ?1", params![pf.rel_path]);
+        // Prepare all INSERT/DELETE statements ONCE and reuse — avoids SQL re-compilation per row
+        let mut del_sym  = tx.prepare("DELETE FROM symbols WHERE file = ?1").map_err(|e| e.to_string())?;
+        let mut del_call = tx.prepare("DELETE FROM calls WHERE caller_file = ?1").map_err(|e| e.to_string())?;
+        let mut ins_sym  = tx.prepare(
+            "INSERT INTO symbols (name, name_lower, kind, file, start_line, end_line, is_export)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        ).map_err(|e| e.to_string())?;
+        let mut ins_call = tx.prepare(
+            "INSERT INTO calls (caller_file, caller_name, caller_name_lower, callee_name, callee_name_lower)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ).map_err(|e| e.to_string())?;
+        let mut ins_file = tx.prepare(
+            "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)"
+        ).map_err(|e| e.to_string())?;
+
+        for (i, pf) in parsed.iter().enumerate() {
+            if i > 0 && i % 5000 == 0 {
+                let pct = 90 + (i * 8 / total_parsed.max(1));
+                eprintln!("SEARCH_STATUS:syncing:{}:Запись {}/{}...", pct, i, total_parsed);
+            }
+            // Only DELETE existing data for changed files — skip for brand new files
+            if !pf.is_new {
+                let _ = del_sym.execute([&pf.rel_path]);
+                let _ = del_call.execute([&pf.rel_path]);
+            }
             for sym in &pf.symbols {
-                let _ = tx.execute(
-                    "INSERT INTO symbols (name, name_lower, kind, file, start_line, end_line, is_export)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        sym.name,
-                        sym.name.to_lowercase(),
-                        sym.kind,
-                        pf.rel_path,
-                        sym.start_line,
-                        sym.end_line,
-                        sym.is_export as i32
-                    ],
-                );
+                let name_lower = sym.name.to_lowercase();
+                let _ = ins_sym.execute(params![
+                    sym.name, name_lower, sym.kind,
+                    pf.rel_path, sym.start_line, sym.end_line, sym.is_export as i32
+                ]);
                 for callee in &sym.calls {
-                    let _ = tx.execute(
-                        "INSERT INTO calls (caller_file, caller_name, caller_name_lower, callee_name, callee_name_lower)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            pf.rel_path,
-                            sym.name,
-                            sym.name.to_lowercase(),
-                            callee,
-                            callee.to_lowercase()
-                        ],
-                    );
+                    let _ = ins_call.execute(params![
+                        pf.rel_path, sym.name, name_lower,
+                        callee, callee.to_lowercase()
+                    ]);
                 }
             }
-            let _ = tx.execute(
-                "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)",
-                params![pf.rel_path, pf.mtime as i64],
-            );
+            let _ = ins_file.execute(params![pf.rel_path, pf.mtime as i64]);
         }
-
-        tx.commit().map_err(|e| e.to_string())?;
+        // statements dropped here — tx borrow ends
     }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    // Recreate indexes and switch back to WAL
+    eprintln!("SEARCH_STATUS:syncing:98:Создание индексов...");
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_name_lower ON symbols(name_lower);
+         CREATE INDEX IF NOT EXISTS idx_file ON symbols(file);
+         CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_name_lower);
+         CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name_lower);
+         PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;"
+    );
 
     // Update built_at timestamp
     let ts = std::time::SystemTime::now()
@@ -501,6 +555,9 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('built_at', ?1)",
         params![ts.to_string()],
     );
+
+    // Cache counts so stats tool is O(1) instead of COUNT(*)
+    save_stats_to_meta(&conn);
 
     let total_symbols = symbol_count(db_path);
     Ok(SyncStats {
@@ -571,7 +628,7 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
                 );
             }
 
-            Some(ParsedFile { rel_path, mtime: *mtime, symbols })
+            Some(ParsedFile { rel_path, mtime: *mtime, symbols, is_new: true })
         })
         .collect();
 
@@ -579,51 +636,75 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
     eprintln!("SEARCH_STATUS:indexing:95:Запись в индекс...");
 
     let conn = init_db(db_path).map_err(|e| format!("Ошибка БД: {}", e))?;
-    conn.execute("DELETE FROM symbols", []).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM indexed_files", []).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM calls", []).map_err(|e| e.to_string())?;
+
+    // Maximum write speed: memory journal, no sync, large cache, no indexes during insert
+    let _ = conn.execute_batch(
+        "PRAGMA journal_mode=MEMORY;
+         PRAGMA synchronous=OFF;
+         PRAGMA cache_size=-262144;
+         PRAGMA temp_store=MEMORY;
+         DELETE FROM symbols;
+         DELETE FROM indexed_files;
+         DELETE FROM calls;
+         DROP INDEX IF EXISTS idx_name_lower;
+         DROP INDEX IF EXISTS idx_file;
+         DROP INDEX IF EXISTS idx_calls_caller;
+         DROP INDEX IF EXISTS idx_calls_callee;"
+    );
 
     let mut total_symbols = 0usize;
+    let total_parsed = parsed_files.len();
+
+    // Single transaction + prepared statements reused for every row.
+    // Statements dropped in inner block so tx can be committed.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     {
-        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        for pf in &parsed_files {
+        let mut ins_sym = tx.prepare(
+            "INSERT INTO symbols (name, name_lower, kind, file, start_line, end_line, is_export)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        ).map_err(|e| e.to_string())?;
+        let mut ins_call = tx.prepare(
+            "INSERT INTO calls (caller_file, caller_name, caller_name_lower, callee_name, callee_name_lower)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ).map_err(|e| e.to_string())?;
+        let mut ins_file = tx.prepare(
+            "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)"
+        ).map_err(|e| e.to_string())?;
+
+        for (i, pf) in parsed_files.iter().enumerate() {
+            if i > 0 && i % 5000 == 0 {
+                eprintln!("SEARCH_STATUS:indexing:95:Запись {}/{}...", i, total_parsed);
+            }
             for sym in &pf.symbols {
-                let _ = tx.execute(
-                    "INSERT INTO symbols (name, name_lower, kind, file, start_line, end_line, is_export)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        sym.name,
-                        sym.name.to_lowercase(),
-                        sym.kind,
-                        pf.rel_path,
-                        sym.start_line,
-                        sym.end_line,
-                        sym.is_export as i32
-                    ],
-                );
+                let name_lower = sym.name.to_lowercase();
+                let _ = ins_sym.execute(params![
+                    sym.name, name_lower, sym.kind,
+                    pf.rel_path, sym.start_line, sym.end_line, sym.is_export as i32
+                ]);
                 for callee in &sym.calls {
-                    let _ = tx.execute(
-                        "INSERT INTO calls (caller_file, caller_name, caller_name_lower, callee_name, callee_name_lower)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            pf.rel_path,
-                            sym.name,
-                            sym.name.to_lowercase(),
-                            callee,
-                            callee.to_lowercase()
-                        ],
-                    );
+                    let _ = ins_call.execute(params![
+                        pf.rel_path, sym.name, name_lower,
+                        callee, callee.to_lowercase()
+                    ]);
                 }
                 total_symbols += 1;
             }
-            // Record mtime for incremental sync
-            let _ = tx.execute(
-                "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)",
-                params![pf.rel_path, pf.mtime as i64],
-            );
+            let _ = ins_file.execute(params![pf.rel_path, pf.mtime as i64]);
         }
-        tx.commit().map_err(|e| e.to_string())?;
+        // statements dropped here
     }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    // Recreate indexes and switch back to WAL
+    eprintln!("SEARCH_STATUS:indexing:98:Создание индексов...");
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_name_lower ON symbols(name_lower);
+         CREATE INDEX IF NOT EXISTS idx_file ON symbols(file);
+         CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_name_lower);
+         CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name_lower);
+         PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;"
+    );
 
     // Save build timestamp
     let ts = std::time::SystemTime::now()
@@ -634,6 +715,9 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('built_at', ?1)",
         params![ts.to_string()],
     );
+
+    // Cache counts so stats tool is O(1) instead of COUNT(*)
+    save_stats_to_meta(&conn);
 
     Ok(total_symbols)
 }
@@ -993,14 +1077,50 @@ pub fn get_index_stats(db_path: &Path) -> IndexStats {
         Err(_) => return IndexStats { symbol_count: 0, file_count: 0, object_count: 0, calls_count: 0, built_at: None, db_size_mb },
     };
 
-    let symbol_count = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize;
-    let file_count = conn.query_row("SELECT COUNT(*) FROM indexed_files", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize;
-    let object_count = conn.query_row("SELECT COUNT(*) FROM objects", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize;
-    let calls_count = conn.query_row("SELECT COUNT(*) FROM calls", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize;
+    // Try reading cached counts from meta table (written at build/sync time) — O(1)
+    let read_meta_int = |key: &str| -> Option<usize> {
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [key],
+            |r| r.get::<_, String>(0),
+        ).ok().and_then(|s| s.parse::<usize>().ok())
+    };
+    // If any cached value is missing, compute all 4 via COUNT and save to meta (one-time migration).
+    let needs_migration = read_meta_int("stat_symbols").is_none();
+    let symbol_count = if needs_migration {
+        conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize
+    } else {
+        read_meta_int("stat_symbols").unwrap_or(0)
+    };
+    let file_count = if needs_migration {
+        conn.query_row("SELECT COUNT(*) FROM indexed_files", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize
+    } else {
+        read_meta_int("stat_files").unwrap_or(0)
+    };
+    let object_count = if needs_migration {
+        conn.query_row("SELECT COUNT(*) FROM objects", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize
+    } else {
+        read_meta_int("stat_objects").unwrap_or(0)
+    };
+    let calls_count = if needs_migration {
+        conn.query_row("SELECT COUNT(*) FROM calls", [], |r| r.get::<_, i64>(0)).unwrap_or(0) as usize
+    } else {
+        read_meta_int("stat_calls").unwrap_or(0)
+    };
     let built_at = conn.query_row(
         "SELECT value FROM meta WHERE key = 'built_at'", [],
         |r| r.get::<_, String>(0),
     ).ok().and_then(|s| s.parse::<u64>().ok());
+
+    // One-time migration: write computed counts to meta for future O(1) reads
+    if needs_migration {
+        let _ = conn.execute_batch(&format!(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_symbols','{symbol_count}');
+             INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_files','{file_count}');
+             INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_objects','{object_count}');
+             INSERT OR REPLACE INTO meta(key,value) VALUES ('stat_calls','{calls_count}');"
+        ));
+    }
 
     IndexStats { symbol_count, file_count, object_count, calls_count, built_at, db_size_mb }
 }

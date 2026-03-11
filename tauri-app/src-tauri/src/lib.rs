@@ -77,6 +77,8 @@ pub fn run() {
             get_mcp_server_statuses,
             get_mcp_server_logs,
             save_debug_logs,
+            delete_search_index,
+            open_search_index_dir,
             align_with_configurator,
             send_hotkey_cmd,
             // CLI Providers

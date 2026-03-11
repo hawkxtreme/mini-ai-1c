@@ -96,3 +96,54 @@ pub async fn test_mcp_connection(config: McpServerConfig) -> Result<String, Stri
         Err(e) => Err(format!("Ошибка: {}", e)),
     }
 }
+
+/// Delete the SQLite search index .db file for a given config path.
+#[tauri::command]
+pub async fn delete_search_index(config_path: String) -> Result<(), String> {
+    let db = search_index_db_path(&config_path);
+    if db.exists() {
+        std::fs::remove_file(&db)
+            .map_err(|e| format!("Не удалось удалить файл индекса: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Open the search-index directory in the system file explorer.
+#[tauri::command]
+pub async fn open_search_index_dir(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = dirs::data_dir()
+        .ok_or("Не удалось определить директорию данных")?
+        .join("com.mini-ai-1c")
+        .join("search-index");
+    std::fs::create_dir_all(&dir).ok();
+    app_handle
+        .opener()
+        .open_path(dir.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| format!("Не удалось открыть папку: {}", e))
+}
+
+/// Compute the db path for a given config path (mirrors mcp-1c-search::index::get_db_path).
+fn search_index_db_path(config_path: &str) -> std::path::PathBuf {
+    let hash = fnv_hash_path(config_path);
+    if let Some(data_dir) = dirs::data_dir() {
+        data_dir
+            .join("com.mini-ai-1c")
+            .join("search-index")
+            .join(format!("{:016x}.db", hash))
+    } else {
+        std::path::PathBuf::from(config_path)
+            .join(".mcp-index")
+            .join("symbols.db")
+    }
+}
+
+/// FNV-1 hash — must match the implementation in mcp-1c-search/src/index.rs.
+fn fnv_hash_path(s: &str) -> u64 {
+    let mut hash: u64 = 14695981039346656037;
+    for byte in s.bytes() {
+        hash = hash.wrapping_mul(1099511628211);
+        hash ^= byte as u64;
+    }
+    hash
+}

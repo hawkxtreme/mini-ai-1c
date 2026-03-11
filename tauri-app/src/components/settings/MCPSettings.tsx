@@ -3,6 +3,140 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code } from 'lucide-react';
 
+// ── Benchmark Panel ───────────────────────────────────────────────────────────
+
+interface BenchmarkRow {
+    tool: string;
+    description: string;
+    min_ms: number;
+    avg_ms: number;
+    p95_ms: number;
+    max_ms: number;
+    n: number;
+}
+
+function ratingDot(ms: number) {
+    if (ms <= 5)   return <span className="text-green-400" title="Отлично">●</span>;
+    if (ms <= 50)  return <span className="text-yellow-400" title="Хорошо">●</span>;
+    if (ms <= 500) return <span className="text-orange-400" title="Приемлемо">●</span>;
+    return <span className="text-red-400" title="Медленно">●</span>;
+}
+
+function BenchmarkPanel({ result, loading, onClose }: { result: Record<string, any> | null; loading: boolean; onClose: () => void }) {
+    const rows: BenchmarkRow[] = result?.results ?? [];
+    const [copied, setCopied] = useState(false);
+
+    const toMarkdown = () => {
+        if (!result) return '';
+        const header = [
+            `## mcp-1c-search Benchmark`,
+            ``,
+            `**Символов в индексе**: ${result.symbol_count?.toLocaleString('ru-RU') ?? '—'}`,
+            `**Размер БД**: ${result.db_size_mb} МБ`,
+            `**Итераций**: ${result.iterations}`,
+            `**Пример символа**: \`${result.sample_symbol}\``,
+            ``,
+            `| Инструмент | Мин | Среднее | P95 | Макс | N |`,
+            `|---|---:|---:|---:|---:|---:|`,
+        ].join('\n');
+        const body = rows.map(r =>
+            `| ${r.tool} | ${r.min_ms} мс | ${r.avg_ms} мс | ${r.p95_ms} мс | ${r.max_ms} мс | ${r.n} |`
+        ).join('\n');
+        return header + '\n' + body;
+    };
+
+    const handleCopyMd = () => {
+        const md = toMarkdown();
+        if (!md) return;
+        const doFallback = () => {
+            const ta = document.createElement('textarea');
+            ta.value = md;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        };
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(md)
+                .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })
+                .catch(doFallback);
+        } else {
+            doFallback();
+        }
+    };
+
+    if (loading) return (
+        <div className="mt-2 rounded-lg border border-zinc-700/50 bg-zinc-900/50 p-4 text-center text-[11px] text-zinc-500">
+            <Activity className="w-4 h-4 animate-spin inline mr-2" />
+            Замер производительности ({20} итераций × {8} инструментов)...
+        </div>
+    );
+
+    if (!result) return null;
+
+    if (result.error) return (
+        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/5 p-3 flex items-start gap-2">
+            <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+                <p className="text-[10px] text-red-300 font-medium">Ошибка бенчмарка</p>
+                <p className="text-[10px] text-red-400/70 font-mono mt-0.5 break-all">{result.error}</p>
+            </div>
+            <button onClick={onClose} className="ml-auto p-0.5 text-zinc-500 hover:text-zinc-300 shrink-0"><X className="w-3 h-3" /></button>
+        </div>
+    );
+
+    return (
+        <div className="mt-2 rounded-lg border border-zinc-700/50 bg-zinc-900/60 overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-700/50">
+                <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-wide">
+                    Benchmark · {result.symbol_count?.toLocaleString('ru-RU')} символов · {result.db_size_mb} МБ
+                </span>
+                <div className="flex items-center gap-1">
+                    <button
+                        onClick={handleCopyMd}
+                        className={`px-2 py-0.5 text-[9px] font-mono rounded transition ${copied ? 'bg-green-700 text-green-200' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
+                        title="Скопировать как Markdown"
+                    >{copied ? '✓ Скопировано' : 'MD'}</button>
+                    <button onClick={onClose} className="p-0.5 text-zinc-500 hover:text-zinc-300 transition">
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            </div>
+            <table className="w-full text-[10px]">
+                <thead>
+                    <tr className="text-zinc-500 border-b border-zinc-800">
+                        <th className="text-left px-3 py-1.5 font-medium">Инструмент</th>
+                        <th className="text-right px-2 py-1.5 font-medium">Мин</th>
+                        <th className="text-right px-2 py-1.5 font-medium">Среднее</th>
+                        <th className="text-right px-2 py-1.5 font-medium">P95</th>
+                        <th className="text-right px-2 py-1.5 font-medium">Макс</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows.map((r, i) => (
+                        <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                            <td className="px-3 py-1.5 text-zinc-300 font-mono" title={r.description}>
+                                {ratingDot(r.avg_ms)} {r.tool}
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{r.min_ms} мс</td>
+                            <td className="px-2 py-1.5 text-right font-mono font-bold text-zinc-200">{r.avg_ms} мс</td>
+                            <td className="px-2 py-1.5 text-right text-zinc-400 font-mono">{r.p95_ms} мс</td>
+                            <td className="px-2 py-1.5 text-right text-zinc-500 font-mono">{r.max_ms} мс</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            <div className="px-3 py-1.5 text-[9px] text-zinc-600">
+                ● ≤5мс отлично · ≤50мс хорошо · ≤500мс приемлемо · &gt;500мс медленно · итераций: {result.iterations}
+            </div>
+        </div>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type McpTransport = 'http' | 'stdio' | 'internal';
 
 export interface McpServerConfig {
@@ -61,6 +195,8 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [showJsonImport, setShowJsonImport] = useState(false);
     const [jsonImportText, setJsonImportText] = useState('');
     const [jsonImportError, setJsonImportError] = useState<string | null>(null);
+    const [benchmarkResult, setBenchmarkResult] = useState<Record<string, any> | null>(null);
+    const [isBenchmarking, setIsBenchmarking] = useState(false);
 
     const addToSearchHistory = (path: string) => {
         if (!path.trim()) return;
@@ -707,7 +843,10 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                 </button>
                                                                                 <button
                                                                                     onMouseDown={(e) => e.preventDefault()}
-                                                                                    onClick={(e) => { e.stopPropagation(); removeFromSearchHistory(p); }}
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        removeFromSearchHistory(p);
+                                                                                    }}
                                                                                     className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition shrink-0"
                                                                                     title="Удалить из истории"
                                                                                 >
@@ -745,37 +884,110 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                     {status?.index_message && <p className="text-[10px] text-zinc-500 truncate" title={status.index_message}>{status.index_message}</p>}
                                                                 </div>
                                                             ) : searchSt === 'ready' ? (
+                                                                <>
                                                                 <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-center justify-between gap-3">
                                                                     <div className="flex items-center gap-3 min-w-0">
                                                                         <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
                                                                         <div className="min-w-0">
                                                                             <p className="text-xs text-green-300 font-medium">Поиск готов к работе</p>
-                                                                            <p className="text-[10px] text-zinc-500 mt-0.5 truncate" title={status?.index_message}>{status?.index_message || configPath}</p>
+                                                                            <button
+                                                                                onClick={() => invoke('open_search_index_dir')}
+                                                                                className="text-[10px] text-zinc-500 hover:text-blue-400 mt-0.5 truncate block text-left underline-offset-2 hover:underline transition"
+                                                                                title="Открыть папку с базой индекса"
+                                                                            >{status?.index_message || configPath}</button>
                                                                         </div>
                                                                     </div>
-                                                                    <button
-                                                                        onClick={async () => {
-                                                                            try {
-                                                                                setStatuses(prev => ({
-                                                                                    ...prev,
-                                                                                    [server.id]: {
-                                                                                        ...prev[server.id],
-                                                                                        help_status: 'syncing',
-                                                                                        index_progress: 0,
-                                                                                        index_message: 'Анализ изменённых файлов...'
-                                                                                    }
-                                                                                }));
-                                                                                await invoke('call_mcp_tool', { serverId: server.id, name: 'sync_index', arguments: {} });
-                                                                                // Принудительно запрашиваем обновленный статус сразу после синхронизации (даем бэкенду полсекунды на парсинг STDERR)
-                                                                                setTimeout(fetchStatuses, 500);
-                                                                            } catch { /* UI обновится сам */ }
-                                                                        }}
-                                                                        className="flex items-center gap-1 px-2 py-1 bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-400 hover:text-zinc-200 rounded text-[10px] font-medium transition shrink-0"
-                                                                        title="Обновить индекс (по дате изменения файлов)"
-                                                                    >
-                                                                        <Activity className="w-3 h-3" /> Обновить
-                                                                    </button>
+                                                                    <div className="flex items-center gap-1 shrink-0">
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                try {
+                                                                                    setStatuses(prev => ({
+                                                                                        ...prev,
+                                                                                        [server.id]: {
+                                                                                            ...prev[server.id],
+                                                                                            help_status: 'syncing',
+                                                                                            index_progress: 0,
+                                                                                            index_message: 'Анализ изменённых файлов...'
+                                                                                        }
+                                                                                    }));
+                                                                                    await invoke('call_mcp_tool', { serverId: server.id, name: 'sync_index', arguments: {} });
+                                                                                    setTimeout(fetchStatuses, 500);
+                                                                                } catch { /* UI обновится сам */ }
+                                                                            }}
+                                                                            className="flex items-center gap-1 px-2 py-1 bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-400 hover:text-zinc-200 rounded text-[10px] font-medium transition"
+                                                                            title="Обновить индекс (по дате изменения файлов)"
+                                                                        >
+                                                                            <Activity className="w-3 h-3" /> Обновить
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                if (!configPath) return;
+                                                                                try {
+                                                                                    await invoke('delete_search_index', { configPath });
+                                                                                    setStatuses(prev => ({
+                                                                                        ...prev,
+                                                                                        [server.id]: {
+                                                                                            ...prev[server.id],
+                                                                                            help_status: 'indexing',
+                                                                                            index_progress: 0,
+                                                                                            index_message: 'Перестройка индекса...'
+                                                                                        }
+                                                                                    }));
+                                                                                    await invoke('call_mcp_tool', { serverId: server.id, name: 'sync_index', arguments: {} });
+                                                                                    setTimeout(fetchStatuses, 500);
+                                                                                } catch { /* UI обновится сам */ }
+                                                                            }}
+                                                                            className="p-1 bg-zinc-700/60 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded transition"
+                                                                            title="Удалить базу и перестроить индекс с нуля"
+                                                                        >
+                                                                            <Trash2 className="w-3 h-3" />
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
+
+                                                                {/* ── Benchmark results ── */}
+                                                                {(benchmarkResult || isBenchmarking) && (
+                                                                    <BenchmarkPanel
+                                                                        result={benchmarkResult}
+                                                                        loading={isBenchmarking}
+                                                                        onClose={() => setBenchmarkResult(null)}
+                                                                    />
+                                                                )}
+
+                                                                {/* ── Benchmark button ── */}
+                                                                <button
+                                                                    onClick={async () => {
+                                                                        setIsBenchmarking(true);
+                                                                        setBenchmarkResult(null);
+                                                                        try {
+                                                                            const res = await invoke<any>('call_mcp_tool', {
+                                                                                serverId: server.id,
+                                                                                name: 'benchmark',
+                                                                                arguments: { iterations: 20 }
+                                                                            });
+                                                                            // benchmark returns raw JSON (not content[0].text)
+                                                                            const text = res?.content?.[0]?.text;
+                                                                            const data = text ? JSON.parse(text) : res;
+                                                                            if (data?.results) {
+                                                                                setBenchmarkResult(data);
+                                                                            } else {
+                                                                                setBenchmarkResult({ error: JSON.stringify(res) });
+                                                                            }
+                                                                        } catch (e: any) {
+                                                                            setBenchmarkResult({ error: String(e) });
+                                                                        } finally {
+                                                                            setIsBenchmarking(false);
+                                                                        }
+                                                                    }}
+                                                                    disabled={isBenchmarking}
+                                                                    className="mt-2 w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-400 hover:text-zinc-200 border border-zinc-700/50 hover:border-zinc-600 rounded-lg text-[10px] font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                >
+                                                                    {isBenchmarking
+                                                                        ? <><Activity className="w-3 h-3 animate-spin" /> Замер производительности...</>
+                                                                        : <><Activity className="w-3 h-3" /> Бенчмарк</>
+                                                                    }
+                                                                </button>
+                                                                </>
                                                             ) : (
                                                                 <div className="bg-zinc-900/50 border border-yellow-500/10 rounded-lg p-3 text-xs text-zinc-400 italic">
                                                                     Быстрый поиск и символьный индекс процедур/функций конфигурации 1С (BSL файлы).

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
+
 use serde_json::{json, Value};
 use std::time::Duration;
 use crate::settings::{McpServerConfig, McpTransport, AppSettings};
@@ -356,7 +357,8 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
-        match tokio::time::timeout(Duration::from_secs(30), self.session.call_tool(name, arguments)).await {
+        let timeout_secs = if self.session.config.id == "builtin-1c-search" { 120 } else { 30 };
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.call_tool(name, arguments)).await {
             Ok(res) => res,
             Err(_) => Err(format!("Timeout executing tool '{}'", name)),
         }
@@ -1031,3 +1033,4 @@ impl McpSession {
         }
     }
 }
+
