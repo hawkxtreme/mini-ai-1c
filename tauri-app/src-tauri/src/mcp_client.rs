@@ -357,7 +357,7 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
-        let timeout_secs = if self.session.config.id == "builtin-1c-search" { 120 } else { 30 };
+        let timeout_secs = if self.session.config.id == "builtin-1c-search" || self.session.config.id == "builtin-1c-naparnik" { 120 } else { 30 };
         match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.call_tool(name, arguments)).await {
             Ok(res) => res,
             Err(_) => Err(format!("Timeout executing tool '{}'", name)),
@@ -971,8 +971,8 @@ impl McpSession {
                 crate::app_log!("[MCP][{}] >>> Sending: {}", self.config.id, serde_json::to_string(&req).unwrap_or_default());
                 tx.send(req).await.map_err(|_| "Failed to send request to MCP process".to_string())?;
 
-                // builtin-1c-search may do ripgrep over large 5GB+ configs → need longer timeout
-                let timeout_secs = if self.config.id == "builtin-1c-search" { 120 } else { 30 };
+                // builtin-1c-search: ripgrep over large configs; builtin-1c-naparnik: network requests to ИТС
+                let timeout_secs = if self.config.id == "builtin-1c-search" || self.config.id == "builtin-1c-naparnik" { 120 } else { 30 };
                 match tokio::time::timeout(Duration::from_secs(timeout_secs), auth_rx).await {
                     Ok(Ok(result)) => {
                         crate::app_log!("[MCP][{}] <<< Received result for id {}", self.config.id, id);
