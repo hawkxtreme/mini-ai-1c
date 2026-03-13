@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../api';
 import { ConfiguratorTitleContext, formatConfiguratorContextForLLM } from '../utils/configurator';
+import { messageQueueService, QueuedMessage } from '../services/MessageQueueService';
 
 export interface ToolCall {
     id: string;
@@ -44,11 +45,15 @@ interface ChatContextType {
     isLoading: boolean;
     chatStatus: string;
     currentIteration: number;
+    messageQueue: QueuedMessage[];
     sendMessage: (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     stopChat: () => Promise<void>;
     clearChat: () => void;
     editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     addSystemMessage: (content: string) => void;
+    removeQueuedMessage: (id: string) => void;
+    updateQueuedMessage: (id: string, content: string) => void;
+    clearQueue: () => void;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -58,6 +63,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(false);
     const [chatStatus, setChatStatus] = useState('');
     const [currentIteration, setCurrentIteration] = useState(0);
+    const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
     // Маппинг index→id для tool-call-progress (сбрасывается при новом запросе)
     const currentBatchToolIds = useRef<string[]>([]);
     // Батчинг чанков: буферизуем токены и применяем setMessages не чаще 1 раза в кадр (~30fps)
@@ -131,6 +137,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
         flushChunkBuffer();
     }, [flushChunkBuffer]);
+
+    // Подписка на изменения очереди
+    useEffect(() => {
+        return messageQueueService.subscribe(setMessageQueue);
+    }, []);
 
     useEffect(() => {
         let isMounted = true;
@@ -349,7 +360,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const sendMessage = useCallback(async (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
-        if (!content.trim() || isLoading) return;
+        if (!content.trim()) return;
+
+        // Если идёт генерация — ставим в очередь.
+        // ИИ закончит текущий ответ, затем useEffect дренирует очередь.
+        if (isLoading) {
+            messageQueueService.enqueue({ content, displayContent, codeContext, diagnostics, configuratorCtx });
+            return;
+        }
 
         // 1. UI: Show clean user message (original slash command if available)
         const userMessage: ChatMessage = {
@@ -452,6 +470,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             setIsLoading(false);
         }
     }, [isLoading, messages]);
+
+    // Дренирование очереди: срабатывает когда isLoading переходит false
+    // useEffect гарантирует что sendMessage уже видит isLoading=false
+    const prevIsLoadingRef = useRef(false);
+    useEffect(() => {
+        if (prevIsLoadingRef.current && !isLoading && !messageQueueService.isEmpty) {
+            const next = messageQueueService.dequeue();
+            if (next) {
+                sendMessage(next.content, next.codeContext, next.diagnostics, next.displayContent, next.configuratorCtx);
+            }
+        }
+        prevIsLoadingRef.current = isLoading;
+    }, [isLoading, sendMessage]);
 
     const stopChat = useCallback(async () => {
         try {
@@ -576,17 +607,33 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
     }, [isLoading, messages]);
 
+    const removeQueuedMessage = useCallback((id: string) => {
+        messageQueueService.remove(id);
+    }, []);
+
+    const updateQueuedMessage = useCallback((id: string, content: string) => {
+        messageQueueService.update(id, content);
+    }, []);
+
+    const clearQueue = useCallback(() => {
+        messageQueueService.clear();
+    }, []);
+
     return (
         <ChatContext.Provider value={{
             messages,
             isLoading,
             chatStatus,
             currentIteration,
+            messageQueue,
             sendMessage,
             stopChat,
             clearChat,
             editAndRerun,
-            addSystemMessage
+            addSystemMessage,
+            removeQueuedMessage,
+            updateQueuedMessage,
+            clearQueue,
         }}>
             {children}
         </ChatContext.Provider>

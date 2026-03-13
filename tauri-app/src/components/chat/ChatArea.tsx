@@ -17,6 +17,7 @@ import { ContextChips } from './ContextChips';
 import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/settings';
 import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from '../settings/QwenAuthModal';
+import { QueuedMessages } from './QueuedMessages';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -123,7 +124,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, currentIteration, sendMessage, stopChat, editAndRerun, addSystemMessage } = useChat();
+    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
     const { profiles, activeProfileId, setActiveProfile } = useProfiles();
     const { settings, updateSettings } = useSettings();
     const { detectedWindows, selectedHwnd, refreshWindows, selectWindow, activeConfigTitle, getCode, parsedTitleContext } = useConfigurator();
@@ -455,7 +456,7 @@ export function ChatArea({
             }
         }
 
-        if (!textToSend.trim() || isLoading) return;
+        if (!textToSend.trim()) return;
 
         // ... rest of the logic ...
 
@@ -1013,6 +1014,12 @@ export function ChatArea({
                         onRemoveCode={handleRemoveCodeContext}
                     />
                 </div>
+                <QueuedMessages
+                    queue={messageQueue}
+                    onRemove={removeQueuedMessage}
+                    onUpdate={updateQueuedMessage}
+                    onClearAll={clearQueue}
+                />
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
 
                     <textarea
