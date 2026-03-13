@@ -301,9 +301,13 @@ pub async fn stream_chat(
                 if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
                     crate::app_log!("[AI][INTERRUPT] Injecting user message mid-loop");
                     let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    let wrapped = format!(
+                        "[СТОП. ПОЛЬЗОВАТЕЛЬ ПРЕРВАЛ ТЕКУЩУЮ ЗАДАЧУ]\n\n{}\n\n[Немедленно прекрати текущую задачу. Ответь пользователю на его сообщение выше.]",
+                        interrupt_msg
+                    );
                     api_messages.push(ApiMessage {
                         role: "user".to_string(),
-                        content: Some(interrupt_msg),
+                        content: Some(wrapped),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,
@@ -339,9 +343,13 @@ pub async fn stream_chat(
                 if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
                     crate::app_log!("[AI][INTERRUPT] Injecting user message after text response");
                     let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    let wrapped = format!(
+                        "[СТОП. ПОЛЬЗОВАТЕЛЬ ПРЕРВАЛ ТЕКУЩУЮ ЗАДАЧУ]\n\n{}\n\n[Немедленно прекрати текущую задачу. Ответь пользователю на его сообщение выше.]",
+                        interrupt_msg
+                    );
                     api_messages.push(ApiMessage {
                         role: "user".to_string(),
-                        content: Some(interrupt_msg),
+                        content: Some(wrapped),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,
@@ -430,9 +438,13 @@ pub async fn stream_chat(
                 if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
                     crate::app_log!("[AI][INTERRUPT] Injecting user message after BSL-clean response");
                     let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    let wrapped = format!(
+                        "[СТОП. ПОЛЬЗОВАТЕЛЬ ПРЕРВАЛ ТЕКУЩУЮ ЗАДАЧУ]\n\n{}\n\n[Немедленно прекрати текущую задачу. Ответь пользователю на его сообщение выше.]",
+                        interrupt_msg
+                    );
                     api_messages.push(ApiMessage {
                         role: "user".to_string(),
-                        content: Some(interrupt_msg),
+                        content: Some(wrapped),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,
@@ -445,9 +457,13 @@ pub async fn stream_chat(
             if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
                 crate::app_log!("[AI][INTERRUPT] Injecting user message (BSL errors path)");
                 let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                let wrapped = format!(
+                    "[СТОП. ПОЛЬЗОВАТЕЛЬ ПРЕРВАЛ ТЕКУЩУЮ ЗАДАЧУ]\n\n{}\n\n[Немедленно прекрати текущую задачу. Ответь пользователю на его сообщение выше.]",
+                    interrupt_msg
+                );
                 api_messages.push(ApiMessage {
                     role: "user".to_string(),
-                    content: Some(interrupt_msg),
+                    content: Some(wrapped),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
