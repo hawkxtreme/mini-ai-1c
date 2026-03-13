@@ -41,6 +41,85 @@ pub struct ChatState {
 
 use super::bsl::BSLDiagnostic;
 
+/// Maximum tool calls per iteration to prevent context explosion.
+/// Excess calls are SILENTLY DROPPED from history (no error messages that confuse the model).
+const MAX_PARALLEL_TOOL_CALLS: usize = 5;
+
+/// Context token threshold — when exceeded, old tool-result rounds are pruned.
+/// System prompt ≈ 5000t. Total input threshold = 7000 + 5000 = ~12000t,
+/// safely below the ~13000t hallucination threshold observed in testing.
+const CONTEXT_PRUNE_THRESHOLD: usize = 7000;
+
+/// Maximum chars per tool result to prevent a single large response from blowing up context.
+/// 8000 chars ≈ 2000 tokens per tool result.
+const MAX_TOOL_RESULT_CHARS: usize = 8000;
+
+/// Estimates token count for a slice of messages (chars / 4 approximation).
+fn estimate_tokens(messages: &[ApiMessage]) -> usize {
+    messages.iter().map(|m| {
+        let content_len = m.content.as_deref().map(|c| c.len()).unwrap_or(0);
+        let tc_len = m.tool_calls.as_ref().map(|tc| {
+            tc.iter().map(|t| t.function.arguments.len() + t.function.name.len() + 10).sum::<usize>()
+        }).unwrap_or(0);
+        (content_len + tc_len) / 4
+    }).sum()
+}
+
+/// Prunes old tool-call rounds from the context to keep it under `max_tokens`.
+///
+/// A "round" = one assistant message with tool_calls + all following tool messages.
+/// Rounds are removed oldest-first. The most recent round is always preserved.
+/// User messages and system messages are never removed.
+fn prune_tool_context(messages: &mut Vec<ApiMessage>, max_tokens: usize) {
+    if estimate_tokens(messages) <= max_tokens {
+        return;
+    }
+
+    // Find all tool rounds: (start_idx, end_idx) inclusive
+    // Each round starts with assistant+tool_calls, ends before next non-tool message
+    let mut rounds: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i].role == "assistant" && messages[i].tool_calls.is_some() {
+            let start = i;
+            let mut end = i;
+            let mut j = i + 1;
+            while j < messages.len() && messages[j].role == "tool" {
+                end = j;
+                j += 1;
+            }
+            if end > start {
+                rounds.push((start, end));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Always keep the most recent round; prune from oldest
+    if rounds.len() < 2 {
+        return;
+    }
+    let prunable_count = rounds.len() - 1;
+    let mut removed_total = 0usize;
+
+    for idx in 0..prunable_count {
+        let (start, end) = rounds[idx];
+        let actual_start = start.saturating_sub(removed_total);
+        let actual_end = end.saturating_sub(removed_total);
+        if actual_end >= messages.len() { break; }
+        let count = actual_end - actual_start + 1;
+        messages.drain(actual_start..=actual_end);
+        removed_total += count;
+        crate::app_log!("[AI][PRUNE] Removed tool round (was [{},{}]), {} msgs pruned total. Tokens now ~{}t",
+            start, end, removed_total, estimate_tokens(messages));
+        if estimate_tokens(messages) <= max_tokens {
+            break;
+        }
+    }
+}
+
 /// Stop the current chat generation
 #[tauri::command]
 pub async fn stop_chat(
@@ -187,6 +266,8 @@ pub async fn stream_chat(
                 break;
             }
 
+            // Prune old tool rounds to keep context under threshold
+            prune_tool_context(&mut api_messages, CONTEXT_PRUNE_THRESHOLD);
 
             // Stream chat completion
             let response_msg = stream_chat_completion(api_messages.clone(), task_app_handle.clone()).await;
@@ -198,14 +279,30 @@ pub async fn stream_chat(
                 }
             };
             
-            // Add assistant response to history
-            api_messages.push(assistant_msg.clone());
+            // Add assistant response to history, truncating excess tool calls.
+            // We modify the stored version so tool_call_ids match exactly what we'll execute.
+            // Excess tool calls are dropped silently (no error messages that confuse the model).
+            let assistant_msg_to_push = {
+                let mut m = assistant_msg.clone();
+                if let Some(tc) = &mut m.tool_calls {
+                    if tc.len() > MAX_PARALLEL_TOOL_CALLS {
+                        crate::app_log!("[AI][LOOP] Truncating tool_calls in history: {} → {}",
+                            tc.len(), MAX_PARALLEL_TOOL_CALLS);
+                        tc.truncate(MAX_PARALLEL_TOOL_CALLS);
+                    }
+                }
+                m
+            };
+            api_messages.push(assistant_msg_to_push);
 
-            // 1. Check for tool calls
+            // 1. Check for tool calls (use original to get full count for UI)
             if let Some(tool_calls) = &assistant_msg.tool_calls {
+                let tool_calls_limited: Vec<_> = tool_calls.iter()
+                    .take(MAX_PARALLEL_TOOL_CALLS)
+                    .collect();
                 let _ = task_app_handle.emit("chat-status", "Ожидаю подтверждения...");
                 let _ = task_app_handle.emit("waiting-for-approval", serde_json::json!({
-                    "count": tool_calls.len()
+                    "count": tool_calls_limited.len()
                 }));
                 
                 // Wait for approval signal
@@ -214,9 +311,8 @@ pub async fn stream_chat(
                 if !approved {
                     let _ = task_app_handle.emit("chat-status", "Действие отклонено пользователем");
                     crate::app_log!("[AI][LOOP] Tool calls rejected by user");
-                    
-                    for tool_call in tool_calls {
-                         api_messages.push(ApiMessage {
+                    for tool_call in &tool_calls_limited {
+                        api_messages.push(ApiMessage {
                             role: "tool".to_string(),
                             content: Some("Error: Action rejected by user".to_string()),
                             tool_call_id: Some(tool_call.id.clone()),
@@ -228,9 +324,9 @@ pub async fn stream_chat(
                 }
 
                 let _ = task_app_handle.emit("chat-status", "Вызов MCP...");
-                crate::app_log!("[AI][LOOP] Processing {} tool calls (Approved)", tool_calls.len());
+                crate::app_log!("[AI][LOOP] Processing {} tool calls (Approved)", tool_calls_limited.len());
 
-                for tool_call in tool_calls {
+                for tool_call in &tool_calls_limited {
                     let tool_name = &tool_call.function.name;
                     let _ = task_app_handle.emit("chat-status", format!("Вызов MCP: {}...", tool_name));
                     let arguments: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
@@ -288,6 +384,16 @@ pub async fn stream_chat(
                         }
                     }
                     
+                    // Truncate large tool results to prevent context explosion
+                    if tool_result.len() > MAX_TOOL_RESULT_CHARS {
+                        // Find last valid UTF-8 char boundary at or before the byte limit
+                        let boundary = (0..=MAX_TOOL_RESULT_CHARS).rev()
+                            .find(|&i| tool_result.is_char_boundary(i))
+                            .unwrap_or(0);
+                        tool_result.truncate(boundary);
+                        tool_result.push_str("\n... [результат усечён]");
+                        crate::app_log!("[AI][TOOL] Result truncated to {}b for {}", boundary, tool_name);
+                    }
                     api_messages.push(ApiMessage {
                         role: "tool".to_string(),
                         content: Some(tool_result),
@@ -296,7 +402,7 @@ pub async fn stream_chat(
                         name: Some(tool_name.clone()),
                     });
                 }
-                
+
                 // Check for interrupt message after all tool calls finish
                 if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
                     crate::app_log!("[AI][INTERRUPT] Injecting user message mid-loop");
@@ -333,7 +439,12 @@ pub async fn stream_chat(
                     });
                     continue;
                 } else {
-                    break; // Already asked once, nothing to show
+                    // Model returned empty response twice — likely context too large
+                    crate::app_log!("[AI] Model returned empty response twice (context ~{}t). Emitting fallback.",
+                        api_messages.iter().map(|m| m.content.as_deref().unwrap_or("").len() / 4).sum::<usize>());
+                    let _ = task_app_handle.emit("chat-chunk",
+                        "\n\n> **[Система]** Модель не смогла сформировать ответ (вероятно, контекст диалога слишком велик). Попробуйте начать новый чат или сократить историю.");
+                    break;
                 }
             }
             // Check for BSL blocks

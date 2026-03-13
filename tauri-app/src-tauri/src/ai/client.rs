@@ -87,14 +87,20 @@ pub async fn stream_chat_completion(
     };
 
     // Dynamic thinking budget: estimate total input tokens (chars / 4),
-    // then allocate ~30% for thinking, clamped to [8192, 32768].
-    // This prevents the model from "thinking without space" in long conversations.
+    // then allocate 80%, clamped to [8192, 32768].
+    //
+    // Rationale: Qwen3 hallucinates tool_calls when absolute thinking budget is too low.
+    // Tests showed hallucination starts at input ~13k tokens. At that point:
+    //   old formula 30% max(8192): budget = max(3.9k, 8192) = 8192t (62%) → hallucinates
+    //   new formula 80% max(8192): budget = max(10.5k, 8192) = 10530t (80%) → should help
+    // The min(8192) ensures small contexts always get at least 8192t of thinking.
+    // The 80% ratio scales proportionally as context grows, providing more absolute tokens.
     let dynamic_thinking_budget: Option<u32> = if thinking_enabled {
         let total_chars: usize = api_messages.iter()
             .map(|m| m.content.as_deref().map(|c| c.len()).unwrap_or(0))
             .sum();
         let estimated_tokens = (total_chars / 4) as u32;
-        let budget = (estimated_tokens * 30 / 100).max(8192).min(32768);
+        let budget = (estimated_tokens * 80 / 100).max(8192).min(32768);
         crate::app_log!("[AI] Thinking budget: {}t (input ~{}t)", budget, estimated_tokens);
         Some(budget)
     } else {
@@ -140,6 +146,38 @@ pub async fn stream_chat_completion(
         headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("cors"));
     }
     
+    // === DIAGNOSTIC LOGGING: context breakdown ===
+    {
+        let mut role_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut role_tokens: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for m in &request_body.messages {
+            let role = m.role.as_str();
+            let chars = m.content.as_deref().map(|c| c.len()).unwrap_or(0);
+            // tool_calls also count
+            let tc_chars = m.tool_calls.as_ref().map(|tc| {
+                tc.iter().map(|t| t.function.arguments.len() + t.function.name.len()).sum::<usize>()
+            }).unwrap_or(0);
+            *role_counts.entry(role).or_default() += 1;
+            *role_tokens.entry(role).or_default() += (chars + tc_chars) / 4;
+        }
+        let total_msgs = request_body.messages.len();
+        let total_tokens: usize = role_tokens.values().sum();
+        let tools_count = request_body.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+        crate::app_log!("[AI][CTX] msgs={} (sys={} user={} assistant={} tool={}) ~{}t tools={}",
+            total_msgs,
+            role_counts.get("system").copied().unwrap_or(0),
+            role_counts.get("user").copied().unwrap_or(0),
+            role_counts.get("assistant").copied().unwrap_or(0),
+            role_counts.get("tool").copied().unwrap_or(0),
+            total_tokens,
+            tools_count,
+        );
+        // Log thinking budget vs context ratio
+        if let Some(budget) = dynamic_thinking_budget {
+            let ratio = if total_tokens > 0 { budget as f32 / total_tokens as f32 * 100.0 } else { 0.0 };
+            crate::app_log!("[AI][CTX] thinking_budget={}t / input~{}t = {:.0}%", budget, total_tokens, ratio);
+        }
+    }
     crate::app_log!("[AI] Sending request to {} (Model: {})", url, request_body.model);
 
     let client = reqwest::Client::builder()
@@ -267,6 +305,26 @@ pub async fn stream_chat_completion(
 
                         if matches!(profile.provider, LLMProvider::QwenCli) {
                             crate::llm::cli_providers::qwen::QwenCliProvider::increment_request_count(&profile.id);
+                        }
+                        // === DIAGNOSTIC: log response type ===
+                        if !accumulated_tool_calls.is_empty() {
+                            let names: Vec<&str> = accumulated_tool_calls.iter().map(|tc| tc.function.name.as_str()).collect();
+                            crate::app_log!("[AI][RESP] tool_calls={} names={:?} content_chars={}",
+                                accumulated_tool_calls.len(), names, full_content.len());
+                        } else if full_content.is_empty() {
+                            crate::app_log!("[AI][RESP] EMPTY response (no tool_calls, no content) — likely thinking-only");
+                        } else {
+                            // Check if content mentions known tool names (hallucination signal)
+                            let known_tools = ["list_objects","get_object_structure","get_module_functions",
+                                "find_symbol","search_code","find_references","benchmark","smart_find","stats"];
+                            let hallucinated: Vec<&&str> = known_tools.iter()
+                                .filter(|&&t| full_content.contains(t))
+                                .collect();
+                            if hallucinated.is_empty() {
+                                crate::app_log!("[AI][RESP] text_only content_chars={}", full_content.len());
+                            } else {
+                                crate::app_log!("[AI][RESP] ⚠️ HALLUCINATION DETECTED: text_only but mentions tools {:?} — no actual tool_calls!", hallucinated);
+                            }
                         }
                         return Ok(ApiMessage {
                             role: "assistant".to_string(),

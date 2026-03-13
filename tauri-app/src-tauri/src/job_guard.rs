@@ -23,12 +23,17 @@ mod inner {
     // Store HANDLE as usize (pointer cast) to satisfy Send + Sync requirements.
     static JOB: OnceLock<usize> = OnceLock::new();
 
+    fn stderr_log(msg: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{}", msg);
+    }
+
     fn get_job() -> usize {
         *JOB.get_or_init(|| unsafe {
             let job = match CreateJobObjectW(None, None) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("[job_guard] CreateJobObjectW failed: {:?}", e);
+                    stderr_log(&format!("[job_guard] CreateJobObjectW failed: {:?}", e));
                     return 0;
                 }
             };
@@ -40,12 +45,12 @@ mod inner {
                 &info as *const _ as *const std::ffi::c_void,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             ) {
-                eprintln!("[job_guard] SetInformationJobObject failed: {:?}", e);
+                stderr_log(&format!("[job_guard] SetInformationJobObject failed: {:?}", e));
                 let _ = CloseHandle(job);
                 return 0;
             }
             let addr = job.0 as usize;
-            eprintln!("[job_guard] Kill-on-close Job Object created (handle=0x{:x})", addr);
+            stderr_log(&format!("[job_guard] Kill-on-close Job Object created (handle=0x{:x})", addr));
             addr
         })
     }
@@ -60,14 +65,14 @@ mod inner {
             match OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) {
                 Ok(proc) => {
                     if let Err(e) = AssignProcessToJobObject(job, proc) {
-                        eprintln!("[job_guard] AssignProcessToJobObject(pid={}) failed: {:?}", pid, e);
+                        stderr_log(&format!("[job_guard] AssignProcessToJobObject(pid={}) failed: {:?}", pid, e));
                     } else {
-                        eprintln!("[job_guard] pid={} assigned to kill-on-close job", pid);
+                        stderr_log(&format!("[job_guard] pid={} assigned to kill-on-close job", pid));
                     }
                     let _ = CloseHandle(proc);
                 }
                 Err(e) => {
-                    eprintln!("[job_guard] OpenProcess(pid={}) failed: {:?}", pid, e);
+                    stderr_log(&format!("[job_guard] OpenProcess(pid={}) failed: {:?}", pid, e));
                 }
             }
         }
