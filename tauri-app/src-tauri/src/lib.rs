@@ -43,6 +43,7 @@ pub fn run() {
             set_active_profile,
             stream_chat,
             stop_chat,
+            interrupt_chat,
             approve_tool,
             reject_tool,
             undo_last_change,
