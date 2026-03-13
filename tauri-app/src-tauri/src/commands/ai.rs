@@ -35,6 +35,8 @@ pub struct ChatMessage {
 pub struct ChatState {
     pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
     pub approval_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<bool>>>,
+    /// Channel for injecting user messages mid-loop (interrupt)
+    pub interrupt_tx: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 use super::bsl::BSLDiagnostic;
@@ -92,6 +94,22 @@ pub async fn reject_tool(
     }
 }
 
+/// Inject a user message into the active agentic loop without aborting it.
+/// Returns true if the message was accepted (active loop exists), false otherwise.
+/// When false the frontend should fall back to the message queue.
+#[tauri::command]
+pub async fn interrupt_chat(
+    message: String,
+    state: tauri::State<'_, ChatState>,
+) -> Result<bool, String> {
+    let guard = state.interrupt_tx.lock().await;
+    if let Some(tx) = &*guard {
+        Ok(tx.send(message).is_ok())
+    } else {
+        Ok(false)
+    }
+}
+
 /// Stream chat response using AI client with automatic BSL correction
 #[tauri::command]
 pub async fn stream_chat(
@@ -105,6 +123,13 @@ pub async fn stream_chat(
     {
         let mut guard = chat_state.approval_tx.lock().await;
         *guard = Some(tx);
+    }
+
+    // Create channel for mid-loop interrupt messages
+    let (interrupt_tx, mut interrupt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let mut guard = chat_state.interrupt_tx.lock().await;
+        *guard = Some(interrupt_tx);
     }
 
     // Convert to API messages
@@ -272,6 +297,19 @@ pub async fn stream_chat(
                     });
                 }
                 
+                // Check for interrupt message after all tool calls finish
+                if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
+                    crate::app_log!("[AI][INTERRUPT] Injecting user message mid-loop");
+                    let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    api_messages.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: Some(interrupt_msg),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                }
+
                 continue;
             }
 
@@ -298,6 +336,18 @@ pub async fn stream_chat(
             let bsl_blocks = extract_bsl_code(full_text);
 
             if bsl_blocks.is_empty() {
+                if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
+                    crate::app_log!("[AI][INTERRUPT] Injecting user message after text response");
+                    let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    api_messages.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: Some(interrupt_msg),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    continue;
+                }
                 break;
             }
 
@@ -377,9 +427,40 @@ pub async fn stream_chat(
             let _ = task_app_handle.emit("bsl-validation-result", &ui_diagnostics);
 
             if all_errors.is_empty() {
+                if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
+                    crate::app_log!("[AI][INTERRUPT] Injecting user message after BSL-clean response");
+                    let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                    api_messages.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: Some(interrupt_msg),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    continue;
+                }
                 break;
             }
+            // BSL errors present — check interrupt before retrying
+            if let Ok(interrupt_msg) = interrupt_rx.try_recv() {
+                crate::app_log!("[AI][INTERRUPT] Injecting user message (BSL errors path)");
+                let _ = task_app_handle.emit("chat-interrupt-injected", &interrupt_msg);
+                api_messages.push(ApiMessage {
+                    role: "user".to_string(),
+                    content: Some(interrupt_msg),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+                continue;
+            }
             break;
+        }
+
+        // Clear interrupt channel on loop exit
+        {
+            // interrupt_rx is dropped here (local), interrupt_tx in ChatState will
+            // return SendError on next interrupt_chat call — frontend falls back to queue.
         }
 
         let _ = task_app_handle.emit("chat-status", "");
@@ -394,7 +475,7 @@ pub async fn stream_chat(
         *guard = Some(abort_handle);
     }
 
-    match join_handle.await {
+    let result = match join_handle.await {
         Ok(res) => res,
         Err(e) => {
             if e.is_cancelled() {
@@ -404,5 +485,13 @@ pub async fn stream_chat(
                  Err(format!("Task panic: {}", e))
             }
         }
+    };
+
+    // Clear interrupt channel — subsequent interrupt_chat calls will return false
+    {
+        let mut guard = chat_state.interrupt_tx.lock().await;
+        *guard = None;
     }
+
+    result
 }

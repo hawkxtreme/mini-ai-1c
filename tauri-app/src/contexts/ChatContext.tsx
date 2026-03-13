@@ -299,6 +299,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             return prev;
                         });
                     }),
+                    // chat-interrupt-injected: Rust подтвердил приём — сбрасываем итерацию
+                    listen<string>('chat-interrupt-injected', () => {
+                        flushNow();
+                        currentBatchToolIds.current = [];
+                        setCurrentIteration(0);
+                    }),
                     listen<string>('chat-status', (event) => {
                         setChatStatus(event.payload);
                     }),
@@ -362,10 +368,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const sendMessage = useCallback(async (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
         if (!content.trim()) return;
 
-        // Если идёт генерация — ставим в очередь.
-        // ИИ закончит текущий ответ, затем useEffect дренирует очередь.
+        // Если идёт генерация — пробуем инжектировать в активный agentic loop.
+        // interruptChat возвращает true если loop принял сообщение (между итерациями tool calls).
+        // Если false (нет активного loop / pure-text streaming) — кладём в очередь.
         if (isLoading) {
-            messageQueueService.enqueue({ content, displayContent, codeContext, diagnostics, configuratorCtx });
+            const injected = await api.interruptChat(content);
+            if (injected) {
+                // Оптимистично добавляем user-сообщение в UI
+                const interruptMsg: ChatMessage = {
+                    id: generateId(),
+                    role: 'user',
+                    content,
+                    displayContent,
+                    parts: [{ type: 'text', content: displayContent || content }],
+                    timestamp: Date.now()
+                };
+                setMessages(prev => [...prev, interruptMsg]);
+                currentBatchToolIds.current = [];
+            } else {
+                // Нет активного loop — очередь (отправится после завершения текущего ответа)
+                messageQueueService.enqueue({ content, displayContent, codeContext, diagnostics, configuratorCtx });
+            }
             return;
         }
 

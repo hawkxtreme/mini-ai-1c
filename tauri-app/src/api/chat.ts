@@ -40,6 +40,15 @@ export async function stopChat(): Promise<void> {
     return await invoke('stop_chat');
 }
 
+/**
+ * Inject a user message into the active agentic loop (mid-loop interrupt).
+ * Returns true if accepted by an active loop, false if no loop is running.
+ * When false the caller should fall back to the message queue.
+ */
+export async function interruptChat(message: string): Promise<boolean> {
+    return await invoke('interrupt_chat', { message });
+}
+
 
 /**
  * Approve the pending tool call
