@@ -299,4 +299,14 @@ npm run app:build
 
 ---
 
+## 📰 Публикации
+
+<a href="https://infostart.ru/1c/articles/2639822/">
+  <img src="https://infostart.ru/bitrix/templates/sandbox_empty/assets/tpl/abo/img/logo.svg" alt="Infostart" height="30"/>
+</a>
+
+- [Mini AI 1C — ИИ-ассистент для разработчиков 1С](https://infostart.ru/1c/articles/2639822/) — статья на Infostart
+
+---
+
 *Создано с ❤️ для сообщества 1С · [Telegram](https://t.me/hawkxtreme)*
