@@ -19,14 +19,52 @@ const OBJECT_TYPES: &[&str] = &[
     "CommonForm", "CommonPicture", "CommonTemplate", "StyleItem",
 ];
 
+/// Read configuration identity from Configuration.xml:
+/// - config name (first `<Name>` before `<ChildObjects>`)
+/// - UUID from `<Configuration uuid="...">` attribute
+///
+/// Returns `(name, uuid)` — both `None` if not found or file missing.
+pub fn read_config_identity(root: &Path) -> (Option<String>, Option<String>) {
+    let config_xml = root.join("Configuration.xml");
+    if !config_xml.exists() {
+        return (None, None);
+    }
+    let content = match crate::index::read_file_to_string_lossy(&config_xml) {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+
+    // Extract UUID from <Configuration uuid="...">
+    let uuid = Regex::new(r#"<Configuration[^>]+uuid="([^"]+)""#)
+        .ok()
+        .and_then(|re| re.captures(&content))
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
+
+    // Extract first <Name>...</Name> before <ChildObjects>
+    let search_area = if let Some(child_pos) = content.find("<ChildObjects>") {
+        &content[..child_pos]
+    } else {
+        &content
+    };
+    let name = Regex::new(r"<Name>([^<\n]{1,200})</Name>")
+        .ok()
+        .and_then(|re| re.captures(search_area))
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    (name, uuid)
+}
+
 /// Build the metadata graph (objects + object_items tables).
 ///
 /// Sources (tried in order):
 /// 1. `Configuration.xml` — always present; provides object type + name list
 /// 2. `ConfigDumpInfo.xml` — optional; provides attributes, tabular sections, forms, modules
 ///
-/// Returns the number of top-level objects indexed.
-pub fn build_metadata(root: &Path, db_path: &Path) -> Result<usize, String> {
+/// Returns `(object_count, config_name, onec_uuid)`.
+pub fn build_metadata(root: &Path, db_path: &Path) -> Result<(usize, Option<String>, Option<String>), String> {
     let conn = Connection::open(db_path)
         .map_err(|e| format!("Ошибка открытия БД: {}", e))?;
 
@@ -35,6 +73,9 @@ pub fn build_metadata(root: &Path, db_path: &Path) -> Result<usize, String> {
     conn.execute("DELETE FROM objects", []).map_err(|e| e.to_string())?;
 
     let mut object_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+
+    // Read config identity (name + uuid) from Configuration.xml
+    let (config_name, onec_uuid) = read_config_identity(root);
 
     // Step 1: Parse Configuration.xml for the object list
     let config_xml = root.join("Configuration.xml");
@@ -65,7 +106,7 @@ pub fn build_metadata(root: &Path, db_path: &Path) -> Result<usize, String> {
         }
     }
 
-    Ok(object_ids.len())
+    Ok((object_ids.len(), config_name, onec_uuid))
 }
 
 /// Parse `<ChildObjects>` section in Configuration.xml.

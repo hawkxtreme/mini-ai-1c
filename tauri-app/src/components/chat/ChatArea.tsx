@@ -5,7 +5,7 @@ import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle, ConfiguratorTitleContext } from '../../utils/configurator';
 import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info, Search } from 'lucide-react';
 import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
@@ -14,7 +14,7 @@ import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlo
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
 import { ContextChips } from './ContextChips';
-import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/settings';
+import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus, OneCConfigEntry } from '../../types/settings';
 import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from '../settings/QwenAuthModal';
 import { QueuedMessages } from './QueuedMessages';
@@ -146,6 +146,34 @@ export function ChatArea({
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [editText, setEditText] = useState('');
     const [showVoiceHint, setShowVoiceHint] = useState(false);
+
+    // Search config scope state
+    const [searchConfigScope, setSearchConfigScope] = useState<'all' | string[]>(() => {
+        try { return JSON.parse(localStorage.getItem('search_config_scope') || 'null') ?? 'all'; }
+        catch { return 'all'; }
+    });
+    const [showSearchScopePicker, setShowSearchScopePicker] = useState(false);
+
+    const searchServer = settings?.mcp_servers?.find(s => s.id === 'builtin-1c-search');
+    const searchConfigs = useMemo((): OneCConfigEntry[] => {
+        try { return JSON.parse(searchServer?.env?.['ONEC_CONFIGS'] || '[]'); }
+        catch { return []; }
+    }, [searchServer]);
+    const showSearchIcon = !!(searchServer?.enabled && searchConfigs.length > 1);
+
+    const toggleConfigScope = (id: string) => {
+        setSearchConfigScope(prev => {
+            const current = prev === 'all' ? searchConfigs.map(c => c.id) : [...(prev as string[])];
+            const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
+            const result: 'all' | string[] = next.length === searchConfigs.length ? 'all' : next;
+            localStorage.setItem('search_config_scope', JSON.stringify(result));
+            return result;
+        });
+    };
+    const updateScope = (val: 'all' | string[]) => {
+        setSearchConfigScope(val);
+        localStorage.setItem('search_config_scope', JSON.stringify(val));
+    };
 
     // Slash Commands state
     const [showCommands, setShowCommands] = useState(false);
@@ -477,11 +505,25 @@ export function ChatArea({
 
         const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
 
-        // Если это расширенная слеш-команда, мы НЕ передаем contextCode повторно, 
+        // Если это расширенная слеш-команда, мы НЕ передаем contextCode повторно,
         // так как он уже вставлен в expanded-шаблон через {code}
         const finalContext = isSlashCommand ? undefined : (contextCode || modifiedCode);
 
-        sendMessage(textToSend, finalContext, diagStrings, displayContent, configuratorTitleCtx);
+        // Инжект области поиска по конфигурации в системный контекст (невидимо для пользователя)
+        let textWithSearchCtx = textToSend;
+        if (showSearchIcon && searchConfigScope !== 'all' && (searchConfigScope as string[]).length > 0) {
+            const activeConfigs = searchConfigs.filter(c => (searchConfigScope as string[]).includes(c.id));
+            if (activeConfigs.length > 0 && activeConfigs.length < searchConfigs.length) {
+                const searchContext = activeConfigs.map(c =>
+                    `- config_id=${c.id.slice(0, 8)} "${c.alias ?? c.name ?? c.path}" (${c.role === 'main' ? 'основная' : 'расширение'})`
+                ).join('\n');
+                textWithSearchCtx = `${textToSend}\n\n[SYSTEM: Область поиска ограничена конфигурациями:\n${searchContext}\nИспользуй config_id при вызове инструментов поиска.]`;
+                // Показываем пользователю только оригинальный текст
+                if (!displayContent) displayContent = textToSend;
+            }
+        }
+
+        sendMessage(textWithSearchCtx, finalContext, diagStrings, displayContent, configuratorTitleCtx);
         setInput('');
         // Clear context after sending
         setContextCode('');
@@ -1044,6 +1086,64 @@ export function ChatArea({
                     onUpdate={updateQueuedMessage}
                     onClearAll={clearQueue}
                 />
+
+                {/* Search config scope picker */}
+                {showSearchIcon && (
+                    <div className="relative max-w-4xl mx-auto px-1 pb-1">
+                        <button
+                            onClick={() => setShowSearchScopePicker(v => !v)}
+                            className={`p-1.5 rounded-md transition-colors relative ${
+                                searchConfigScope !== 'all'
+                                    ? 'text-blue-400 bg-blue-500/10'
+                                    : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                            title="Область поиска по конфигурации"
+                        >
+                            <Search className="w-3.5 h-3.5" />
+                            {searchConfigScope !== 'all' && (
+                                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-blue-500 rounded-full" />
+                            )}
+                        </button>
+
+                        {showSearchScopePicker && (
+                            <div className="absolute bottom-full left-0 mb-1 w-72 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-zinc-800">
+                                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Область поиска</span>
+                                </div>
+                                <div className="py-1">
+                                    {searchConfigs.map(cfg => {
+                                        const isSelected = searchConfigScope === 'all' || (searchConfigScope as string[]).includes(cfg.id);
+                                        const displayName = cfg.alias ?? cfg.name ?? cfg.path.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? cfg.path;
+                                        return (
+                                            <label key={cfg.id} className="flex items-start gap-2.5 px-3 py-2 hover:bg-zinc-800/50 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={isSelected}
+                                                    onChange={() => toggleConfigScope(cfg.id)}
+                                                    className="mt-0.5 accent-blue-500"
+                                                />
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span className={`w-2 h-2 rounded-full shrink-0 ${cfg.role === 'main' ? 'bg-blue-400' : 'bg-yellow-400'}`} />
+                                                        <span className="text-xs text-zinc-200">{displayName}</span>
+                                                        <span className="text-[10px] text-zinc-500">
+                                                            ({cfg.role === 'main' ? 'основная' : 'расширение'})
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-[10px] font-mono text-zinc-600 truncate mt-0.5" title={cfg.path}>{cfg.path}</p>
+                                                </div>
+                                            </label>
+                                        );
+                                    })}
+                                </div>
+                                <div className="px-3 py-2 border-t border-zinc-800 flex gap-3">
+                                    <button onClick={() => updateScope('all')} className="text-[11px] text-zinc-400 hover:text-zinc-200 transition">Выбрать все</button>
+                                    <button onClick={() => updateScope([])} className="text-[11px] text-zinc-400 hover:text-zinc-200 transition">Сбросить</button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
 
                     <textarea
@@ -1051,6 +1151,7 @@ export function ChatArea({
                         value={input}
                         onChange={handleInputChange}
                         onKeyDown={handleKeyDown}
+                        onFocus={() => setShowSearchScopePicker(false)}
                         placeholder="Опишите задачу, вставьте код или введите / для команд..."
                         className="w-full h-full bg-transparent text-zinc-300 px-4 py-3 resize-none focus:outline-none placeholder-zinc-600 text-[13px] font-sans leading-relaxed flex-1"
                         style={{ fontFamily: 'Inter, sans-serif' }}

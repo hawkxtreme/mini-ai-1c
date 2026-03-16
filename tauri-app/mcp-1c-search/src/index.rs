@@ -278,6 +278,37 @@ pub fn index_exists(db_path: &Path) -> bool {
     false
 }
 
+/// Save config_name and onec_uuid to the `meta` table of the DB.
+pub fn save_config_identity(db_path: &Path, config_name: Option<&str>, onec_uuid: Option<&str>) {
+    if let Ok(conn) = Connection::open(db_path) {
+        if let Some(name) = config_name {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('config_name', ?1)",
+                [name],
+            );
+        }
+        if let Some(uuid) = onec_uuid {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('onec_uuid', ?1)",
+                [uuid],
+            );
+        }
+    }
+}
+
+/// Read config_name from the `meta` table of an existing DB.
+/// Returns `None` if the DB doesn't exist or the key is missing.
+pub fn read_config_name_from_meta(db_path: &Path) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'config_name'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|s| !s.is_empty())
+}
+
 /// Get unix timestamp when index was last built (from meta table).
 pub fn get_built_at(db_path: &Path) -> Option<u64> {
     let conn = Connection::open(db_path).ok()?;

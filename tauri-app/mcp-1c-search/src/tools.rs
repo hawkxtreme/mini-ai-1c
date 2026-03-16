@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use crate::search;
 use crate::index;
+use crate::config::ConfigEntry;
 
 /// Maps a 1C object type to its plural folder name in the config dump.
 fn object_type_to_folder(obj_type: &str) -> Option<&'static str> {
@@ -89,6 +90,10 @@ pub fn list_tools() -> Vec<Value> {
                     "scope": {
                         "type": "string",
                         "description": "Ограничить поиск конкретным объектом 1С. Форматы: 'CommonModule.МодульИмя', 'Catalog.СправочникИмя', 'Document.ДокументИмя' и т.д. Можно также передать относительный путь: 'CommonModules/МодульИмя'. Если не указан — поиск по всей конфигурации."
+                    },
+                    "config_id": {
+                        "type": "string",
+                        "description": "ID конкретной конфигурации для поиска (при мульти-конфигурации). Если не указан — поиск в первой доступной."
                     }
                 },
                 "required": ["query"]
@@ -136,6 +141,10 @@ pub fn list_tools() -> Vec<Value> {
                         "type": "integer",
                         "description": "Максимум результатов (по умолчанию 20)",
                         "default": 20
+                    },
+                    "config_id": {
+                        "type": "string",
+                        "description": "ID конкретной конфигурации для поиска (при мульти-конфигурации). Если не указан — поиск в первой доступной."
                     }
                 },
                 "required": ["query"]
@@ -300,10 +309,15 @@ pub fn list_tools() -> Vec<Value> {
         }),
         json!({
             "name": "stats",
-            "description": "Статистика символьного индекса конфигурации 1С: количество символов, файлов, объектов, рёбер графа вызовов.",
+            "description": "Статистика символьного индекса конфигурации 1С: количество символов, файлов, объектов, рёбер графа вызовов. При мульти-конфигурации показывает все конфиги.",
             "inputSchema": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "config_id": {
+                        "type": "string",
+                        "description": "ID конкретной конфигурации (опционально). Если не указан — статистика по всем."
+                    }
+                }
             }
         }),
         json!({
@@ -322,29 +336,54 @@ pub fn list_tools() -> Vec<Value> {
     ]
 }
 
+/// Select configs to use based on optional `config_id` argument.
+/// If `config_id` is provided, return only that config.
+/// Otherwise return all configs (extensions first, then main).
+fn select_configs<'a>(
+    args: &Value,
+    configs: &'a [(ConfigEntry, PathBuf)],
+) -> Vec<&'a (ConfigEntry, PathBuf)> {
+    if let Some(id) = args["config_id"].as_str() {
+        return configs.iter().filter(|(e, _)| e.id == id).collect();
+    }
+    // extensions first, then main
+    let mut result: Vec<&(ConfigEntry, PathBuf)> = configs
+        .iter()
+        .filter(|(e, _)| e.role == "extension")
+        .collect();
+    result.extend(configs.iter().filter(|(e, _)| e.role != "extension"));
+    result
+}
+
 pub async fn call_tool(
     name: &str,
     args: &Value,
-    config_path: &Option<PathBuf>,
-    db_path: &Option<PathBuf>,
+    configs: &[(ConfigEntry, PathBuf)],
 ) -> Result<Value, String> {
+    // For backward-compat single-config tools, use the first "main" config or the first available.
+    let selected = select_configs(args, configs);
+    let (config_path, db_path): (Option<PathBuf>, Option<PathBuf>) = selected
+        .first()
+        .map(|(e, db)| (Some(PathBuf::from(&e.path)), Some(db.clone())))
+        .unwrap_or((None, None));
+
     let start = std::time::Instant::now();
     let result = match name {
-        "search_code" => handle_search_code(args, config_path, db_path).await,
-        "get_file_context" => handle_get_file_context(args, config_path).await,
-        "find_symbol" => handle_find_symbol(args, db_path).await,
-        "get_symbol_context" => handle_get_symbol_context(args, config_path, db_path).await,
-        "list_objects" => handle_list_objects(args, db_path).await,
-        "get_object_structure" => handle_get_object_structure(args, db_path, config_path).await,
-        "find_references" => handle_find_references(args, config_path).await,
-        "impact_analysis" => handle_impact_analysis(args, config_path, db_path).await,
-        "get_function_context" => handle_get_function_context(args, db_path).await,
-        "get_module_functions" => handle_get_module_functions(args, db_path).await,
-        "smart_find" => handle_smart_find(args, config_path, db_path).await,
-        "find_function_in_object" => handle_find_function_in_object(args, config_path, db_path).await,
-        "stats" => handle_stats(db_path).await,
-        "sync_index" => handle_sync_index(config_path, db_path).await,
-        "benchmark" => handle_benchmark(args, config_path, db_path).await,
+        "search_code" => handle_search_code(args, &config_path, &db_path).await,
+        "get_file_context" => handle_get_file_context(args, &config_path).await,
+        "find_symbol" => handle_find_symbol(args, &db_path).await,
+        "get_symbol_context" => handle_get_symbol_context(args, &config_path, &db_path).await,
+        "list_objects" => handle_list_objects(args, &db_path).await,
+        "get_object_structure" => handle_get_object_structure(args, &db_path, &config_path).await,
+        "find_references" => handle_find_references(args, &config_path).await,
+        "impact_analysis" => handle_impact_analysis(args, &config_path, &db_path).await,
+        "get_function_context" => handle_get_function_context(args, &db_path).await,
+        "get_module_functions" => handle_get_module_functions(args, &db_path).await,
+        "smart_find" => handle_smart_find(args, &config_path, &db_path).await,
+        "find_function_in_object" => handle_find_function_in_object(args, &config_path, &db_path).await,
+        "stats" => handle_stats_multi(configs).await,
+        "sync_index" => handle_sync_index(&config_path, &db_path).await,
+        "benchmark" => handle_benchmark(args, &config_path, &db_path).await,
         _ => Err(format!("Неизвестный инструмент: {}", name)),
     };
     eprintln!("[PERF] {} in {}ms", name, start.elapsed().as_millis());
@@ -1213,14 +1252,14 @@ async fn handle_sync_index(
 
     let root = root.clone();
     let db = db.clone();
+    let db_for_stats = db.clone();
 
     let stats = tokio::task::spawn_blocking(move || index::sync_index(&root, &db))
         .await
         .map_err(|e| format!("Паника spawn_blocking: {}", e))?
         .map_err(|e| format!("Ошибка синхронизации: {}", e))?;
 
-    let db_for_index = db_path.as_ref().unwrap();
-    let size = crate::db_size_mb(db_for_index);
+    let size = crate::db_size_mb(&db_for_stats);
     // Use current time directly — avoids SQLite WAL caching issues when reading back built_at
     let built_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1335,6 +1374,36 @@ async fn handle_get_module_functions(
         text.push_str(&format!("\n*Показано первых {} — уточните путь для фильтрации.*", limit));
     }
 
+    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+}
+
+// ─── stats (multi-config) ────────────────────────────────────────────────────
+
+async fn handle_stats_multi(configs: &[(ConfigEntry, PathBuf)]) -> Result<Value, String> {
+    if configs.is_empty() {
+        return Err("Конфигурации не настроены".to_string());
+    }
+    if configs.len() == 1 {
+        return handle_stats(&Some(configs[0].1.clone())).await;
+    }
+
+    let mut text = format!("## Статистика индекса ({} конфигураций)\n\n", configs.len());
+    for (entry, db) in configs {
+        let display_name = entry.alias.as_deref()
+            .or(entry.name.as_deref())
+            .unwrap_or(entry.id.as_str());
+        let role_label = if entry.role == "extension" { "расширение" } else { "основная" };
+        text.push_str(&format!("### {} `{}` ({})\n", display_name, entry.id, role_label));
+        if db.exists() {
+            let s = index::get_index_stats(db);
+            text.push_str(&format!(
+                "- Символов: {}\n- Файлов: {}\n- Объектов: {}\n- Вызовов: {}\n- Размер БД: {:.1} МБ\n\n",
+                s.symbol_count, s.file_count, s.object_count, s.calls_count, s.db_size_mb
+            ));
+        } else {
+            text.push_str("- *Индекс не построен*\n\n");
+        }
+    }
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code } from 'lucide-react';
+import type { OneCConfigEntry } from '../../types/settings';
 
 // ── Benchmark Panel ───────────────────────────────────────────────────────────
 
@@ -197,6 +198,20 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [jsonImportError, setJsonImportError] = useState<string | null>(null);
     const [benchmarkResult, setBenchmarkResult] = useState<Record<string, any> | null>(null);
     const [isBenchmarking, setIsBenchmarking] = useState(false);
+
+    // Multi-config state for builtin-1c-search
+    const [showAddConfigForm, setShowAddConfigForm] = useState(false);
+    const [newConfigPath, setNewConfigPath] = useState('');
+    const [newConfigRole, setNewConfigRole] = useState<'main' | 'extension'>('main');
+    const [newConfigExtends, setNewConfigExtends] = useState('');
+    const [newConfigAlias, setNewConfigAlias] = useState('');
+    const [addConfigError, setAddConfigError] = useState<string | null>(null);
+    // Editing existing config entry
+    const [editingConfigId, setEditingConfigId] = useState<string | null>(null);
+    const [editConfigAlias, setEditConfigAlias] = useState('');
+    const [editConfigPath, setEditConfigPath] = useState('');
+    const [editConfigRole, setEditConfigRole] = useState<'main' | 'extension'>('main');
+    const [editConfigExtends, setEditConfigExtends] = useState('');
 
     const addToSearchHistory = (path: string) => {
         if (!path.trim()) return;
@@ -773,97 +788,318 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                             ) : isSearch ? (
                                                 (() => {
                                                     const searchSt = status?.help_status || '';
-                                                    const configPath = server.env?.['ONEC_CONFIG_PATH'] || '';
-                                                    const browseConfigDir = async () => {
+
+                                                    // ── Multi-config helpers ──────────────────────────────
+                                                    const getConfigs = (): OneCConfigEntry[] => {
                                                         try {
-                                                            const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию выгрузки конфигурации 1С' });
-                                                            if (dir && typeof dir === 'string') {
-                                                                const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': dir };
-                                                                handleUpdateServer(server.id, { env: newEnv });
-                                                                addToSearchHistory(dir);
-                                                            }
-                                                        } catch (e) {
-                                                            console.error('Failed to open directory dialog:', e);
-                                                        }
+                                                            const raw = server.env?.['ONEC_CONFIGS'];
+                                                            return raw ? JSON.parse(raw) : [];
+                                                        } catch { return []; }
                                                     };
-                                                    const selectFromHistory = (p: string) => {
-                                                        const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': p };
+                                                    const saveConfigs = (configs: OneCConfigEntry[]) => {
+                                                        const newEnv = { ...(server.env || {}), 'ONEC_CONFIGS': JSON.stringify(configs) };
                                                         handleUpdateServer(server.id, { env: newEnv });
-                                                        setShowSearchHistory(false);
                                                     };
+                                                    const normalizePath = (p: string) => p.trim().replace(/[/\\]+$/, '');
+
+                                                    const currentConfigs = getConfigs();
+
+                                                    // Migration detection
+                                                    const oldPath = server.env?.['ONEC_CONFIG_PATH'];
+                                                    const needsMigration = oldPath && oldPath.trim() !== '' && currentConfigs.length === 0;
+
+                                                    const handleMigrate = () => {
+                                                        const entry: OneCConfigEntry = {
+                                                            id: crypto.randomUUID(),
+                                                            path: normalizePath(oldPath!),
+                                                            role: 'main',
+                                                        };
+                                                        const newEnv = { ...(server.env || {}) };
+                                                        delete newEnv['ONEC_CONFIG_PATH'];
+                                                        newEnv['ONEC_CONFIGS'] = JSON.stringify([entry]);
+                                                        handleUpdateServer(server.id, { env: newEnv });
+                                                    };
+
+                                                    const addConfig = async () => {
+                                                        setAddConfigError(null);
+                                                        const normalized = normalizePath(newConfigPath);
+                                                        if (!normalized) { setAddConfigError('Укажите путь к конфигурации'); return; }
+                                                        const dup = currentConfigs.find(c => c.path.toLowerCase() === normalized.toLowerCase());
+                                                        if (dup) { setAddConfigError('Этот путь уже добавлен'); return; }
+                                                        const entry: OneCConfigEntry = {
+                                                            id: crypto.randomUUID(),
+                                                            path: normalized,
+                                                            role: newConfigRole,
+                                                            extends: newConfigRole === 'extension' && newConfigExtends ? newConfigExtends : undefined,
+                                                            alias: newConfigAlias.trim() || undefined,
+                                                        };
+                                                        saveConfigs([...currentConfigs, entry]);
+                                                        setNewConfigPath('');
+                                                        setNewConfigRole('main');
+                                                        setNewConfigExtends('');
+                                                        setNewConfigAlias('');
+                                                        setShowAddConfigForm(false);
+                                                    };
+
+                                                    const removeConfig = (id: string) => {
+                                                        saveConfigs(currentConfigs.filter(c => c.id !== id));
+                                                    };
+
+                                                    const getDisplayName = (cfg: OneCConfigEntry) =>
+                                                        cfg.alias ?? cfg.name ?? null;
+
+                                                    const getExtendedName = (cfg: OneCConfigEntry) => {
+                                                        if (!cfg.extends) return '?';
+                                                        const parent = currentConfigs.find(c => c.id === cfg.extends);
+                                                        return parent ? getDisplayName(parent) : cfg.extends.slice(0, 8);
+                                                    };
+
                                                     return (
                                                         <div className="space-y-3">
-                                                            <div>
-                                                                <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
-                                                                    <Terminal className="w-3 h-3" /> Путь к выгрузке конфигурации 1С
-                                                                </label>
-                                                                <div className="flex gap-2 relative">
-                                                                    <input
-                                                                        type="text"
-                                                                        value={configPath}
-                                                                        onChange={(e) => {
-                                                                            const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': e.target.value };
-                                                                            handleUpdateServer(server.id, { env: newEnv });
-                                                                        }}
-                                                                        onBlur={() => { if (configPath) addToSearchHistory(configPath); }}
-                                                                        onKeyDown={(e) => { if (e.key === 'Enter' && configPath) addToSearchHistory(configPath); }}
-                                                                        className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none font-mono min-w-0"
-                                                                        placeholder="C:\1C\configs\MyConfig"
-                                                                    />
+                                                            {/* ── Migration banner ── */}
+                                                            {needsMigration && (
+                                                                <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 flex items-start justify-between gap-3">
+                                                                    <div>
+                                                                        <p className="text-xs text-blue-300 font-medium">Обнаружена конфигурация старого формата</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-1 font-mono">{oldPath}</p>
+                                                                        <p className="text-[10px] text-zinc-500">Уже проиндексировано — повторная индексация не потребуется.</p>
+                                                                    </div>
                                                                     <button
-                                                                        onClick={browseConfigDir}
-                                                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded-lg text-xs font-medium transition shrink-0"
-                                                                        title="Выбрать папку"
+                                                                        onClick={handleMigrate}
+                                                                        className="shrink-0 text-[11px] px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 rounded-md transition"
                                                                     >
-                                                                        <FolderOpen className="w-3.5 h-3.5" />
+                                                                        Мигрировать →
                                                                     </button>
-                                                                    {searchPathHistory.length > 0 && (
-                                                                        <button
-                                                                            onClick={() => setShowSearchHistory(v => !v)}
-                                                                            className="flex items-center gap-1 px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded-lg text-xs transition shrink-0"
-                                                                            title="История путей"
-                                                                        >
-                                                                            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSearchHistory ? 'rotate-180' : ''}`} />
-                                                                        </button>
-                                                                    )}
                                                                 </div>
-                                                                {showSearchHistory && searchPathHistory.length > 0 && (
-                                                                    <div className="mt-1 rounded-lg overflow-hidden border border-zinc-700/50">
-                                                                        {searchPathHistory.map((p) => (
-                                                                            <div key={p} className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-700/50">
-                                                                                <button
-                                                                                    onClick={() => selectFromHistory(p)}
-                                                                                    className="flex-1 flex items-center gap-1.5 text-left min-w-0"
-                                                                                >
-                                                                                    {p === configPath
-                                                                                        ? <CheckCircle2 className="w-3 h-3 text-green-500 shrink-0" />
-                                                                                        : <div className="w-3 h-3 shrink-0" />
-                                                                                    }
-                                                                                    <span className="text-xs font-mono text-zinc-300 truncate">{p}</span>
-                                                                                </button>
-                                                                                <button
-                                                                                    onMouseDown={(e) => e.preventDefault()}
-                                                                                    onClick={(e) => {
-                                                                                        e.stopPropagation();
-                                                                                        removeFromSearchHistory(p);
-                                                                                    }}
-                                                                                    className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition shrink-0"
-                                                                                    title="Удалить из истории"
-                                                                                >
-                                                                                    <Trash2 className="w-3 h-3" />
-                                                                                </button>
+                                                            )}
+
+                                                            {/* ── Config list ── */}
+                                                            <div>
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1">
+                                                                        <Terminal className="w-3 h-3" /> Конфигурации 1С
+                                                                    </label>
+                                                                    <button
+                                                                        onClick={() => { setShowAddConfigForm(v => !v); setAddConfigError(null); }}
+                                                                        className="flex items-center gap-1 text-[10px] px-2 py-1 bg-zinc-700/60 hover:bg-zinc-600 text-zinc-300 rounded-md transition"
+                                                                    >
+                                                                        <Plus className="w-3 h-3" /> Добавить
+                                                                    </button>
+                                                                </div>
+
+                                                                {currentConfigs.length === 0 && !needsMigration && (
+                                                                    <p className="text-[11px] text-zinc-600 italic px-1">Нет добавленных конфигураций. Нажмите «Добавить».</p>
+                                                                )}
+
+                                                                <div className="space-y-2">
+                                                                    {currentConfigs.map(cfg => {
+                                                                        const isEditing = editingConfigId === cfg.id;
+                                                                        const displayName = getDisplayName(cfg);
+                                                                        if (isEditing) {
+                                                                            return (
+                                                                                <div key={cfg.id} className="bg-zinc-900/50 border border-blue-500/30 rounded-lg p-3 space-y-2">
+                                                                                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Редактирование</p>
+                                                                                    <div className="flex gap-2">
+                                                                                        <input
+                                                                                            type="text"
+                                                                                            value={editConfigPath}
+                                                                                            onChange={e => setEditConfigPath(e.target.value)}
+                                                                                            placeholder="Путь к конфигурации"
+                                                                                            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none font-mono min-w-0"
+                                                                                        />
+                                                                                        <button
+                                                                                            onClick={async () => {
+                                                                                                try {
+                                                                                                    const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию конфигурации 1С' });
+                                                                                                    if (dir && typeof dir === 'string') setEditConfigPath(dir);
+                                                                                                } catch { /* ignore */ }
+                                                                                            }}
+                                                                                            className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs transition shrink-0"
+                                                                                        ><FolderOpen className="w-3.5 h-3.5" /></button>
+                                                                                    </div>
+                                                                                    <div className="flex gap-2">
+                                                                                        <select
+                                                                                            value={editConfigRole}
+                                                                                            onChange={e => setEditConfigRole(e.target.value as 'main' | 'extension')}
+                                                                                            className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                                        >
+                                                                                            <option value="main">Основная</option>
+                                                                                            <option value="extension">Расширение</option>
+                                                                                        </select>
+                                                                                        <input
+                                                                                            type="text"
+                                                                                            value={editConfigAlias}
+                                                                                            onChange={e => setEditConfigAlias(e.target.value)}
+                                                                                            placeholder="Псевдоним (опционально)"
+                                                                                            className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                                        />
+                                                                                    </div>
+                                                                                    {editConfigRole === 'extension' && currentConfigs.filter(c => c.id !== cfg.id && c.role === 'main').length > 0 && (
+                                                                                        <div>
+                                                                                            <label className="text-[10px] text-zinc-500 mb-1 block">Расширяет:</label>
+                                                                                            <select
+                                                                                                value={editConfigExtends}
+                                                                                                onChange={e => setEditConfigExtends(e.target.value)}
+                                                                                                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                                            >
+                                                                                                <option value="">— не указано —</option>
+                                                                                                {currentConfigs.filter(c => c.id !== cfg.id && c.role === 'main').map(c => (
+                                                                                                    <option key={c.id} value={c.id}>{getDisplayName(c) ?? c.path}</option>
+                                                                                                ))}
+                                                                                            </select>
+                                                                                        </div>
+                                                                                    )}
+                                                                                    <div className="flex gap-2">
+                                                                                        <button
+                                                                                            onClick={() => {
+                                                                                                const norm = normalizePath(editConfigPath);
+                                                                                                if (!norm) return;
+                                                                                                const dup = currentConfigs.find(c => c.id !== cfg.id && c.path.toLowerCase() === norm.toLowerCase());
+                                                                                                if (dup) return;
+                                                                                                saveConfigs(currentConfigs.map(c => c.id !== cfg.id ? c : {
+                                                                                                    ...c,
+                                                                                                    path: norm,
+                                                                                                    role: editConfigRole,
+                                                                                                    extends: editConfigRole === 'extension' && editConfigExtends ? editConfigExtends : undefined,
+                                                                                                    alias: editConfigAlias.trim() || undefined,
+                                                                                                }));
+                                                                                                setEditingConfigId(null);
+                                                                                            }}
+                                                                                            className="flex-1 text-[11px] px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 rounded-md transition"
+                                                                                        >Сохранить</button>
+                                                                                        <button
+                                                                                            onClick={() => setEditingConfigId(null)}
+                                                                                            className="text-[11px] px-3 py-1.5 bg-zinc-700/50 hover:bg-zinc-700 text-zinc-400 rounded-md transition"
+                                                                                        >Отмена</button>
+                                                                                    </div>
+                                                                                </div>
+                                                                            );
+                                                                        }
+                                                                        return (
+                                                                            <div key={cfg.id} className="bg-zinc-900/50 border border-zinc-700/50 rounded-lg p-3">
+                                                                                <div className="flex items-center justify-between mb-1">
+                                                                                    <div className="flex items-center gap-2 min-w-0">
+                                                                                        <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${cfg.role === 'main' ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                                                                            {cfg.role === 'main' ? 'Основная' : `Расш. → ${getExtendedName(cfg)}`}
+                                                                                        </span>
+                                                                                        <span className="text-sm text-zinc-200 font-medium truncate">
+                                                                                            {displayName ?? <span className="text-zinc-500 italic text-xs">имя не определено</span>}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                    <div className="flex items-center gap-1 shrink-0 ml-1">
+                                                                                        <button
+                                                                                            onClick={() => {
+                                                                                                setEditingConfigId(cfg.id);
+                                                                                                setEditConfigPath(cfg.path);
+                                                                                                setEditConfigRole(cfg.role);
+                                                                                                setEditConfigExtends(cfg.extends ?? '');
+                                                                                                setEditConfigAlias(cfg.alias ?? '');
+                                                                                            }}
+                                                                                            className="p-1 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/50 rounded transition"
+                                                                                            title="Редактировать"
+                                                                                        >
+                                                                                            <Settings2 className="w-3.5 h-3.5" />
+                                                                                        </button>
+                                                                                        <button
+                                                                                            onClick={() => removeConfig(cfg.id)}
+                                                                                            className="p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded transition"
+                                                                                            title="Удалить конфигурацию"
+                                                                                        >
+                                                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <p className="text-[11px] font-mono text-zinc-500 truncate" title={cfg.path}>{cfg.path}</p>
                                                                             </div>
-                                                                        ))}
+                                                                        );
+                                                                    })}
+                                                                </div>
+
+                                                                {/* ── Add config form ── */}
+                                                                {showAddConfigForm && (
+                                                                    <div className="mt-2 bg-zinc-900/50 border border-zinc-700/50 rounded-lg p-3 space-y-2">
+                                                                        <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Новая конфигурация</p>
+                                                                        <div className="flex gap-2">
+                                                                            <input
+                                                                                type="text"
+                                                                                value={newConfigPath}
+                                                                                onChange={e => setNewConfigPath(e.target.value)}
+                                                                                placeholder="C:\1C\configs\MyConfig"
+                                                                                className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none font-mono min-w-0"
+                                                                            />
+                                                                            <button
+                                                                                onClick={async () => {
+                                                                                    try {
+                                                                                        const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию конфигурации 1С' });
+                                                                                        if (dir && typeof dir === 'string') setNewConfigPath(dir);
+                                                                                    } catch { /* ignore */ }
+                                                                                }}
+                                                                                className="px-2 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs transition shrink-0"
+                                                                                title="Выбрать папку"
+                                                                            >
+                                                                                <FolderOpen className="w-3.5 h-3.5" />
+                                                                            </button>
+                                                                        </div>
+                                                                        <div className="flex gap-2">
+                                                                            <select
+                                                                                value={newConfigRole}
+                                                                                onChange={e => setNewConfigRole(e.target.value as 'main' | 'extension')}
+                                                                                className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                            >
+                                                                                <option value="main">Основная</option>
+                                                                                <option value="extension">Расширение</option>
+                                                                            </select>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={newConfigAlias}
+                                                                                onChange={e => setNewConfigAlias(e.target.value)}
+                                                                                placeholder="Псевдоним (опционально)"
+                                                                                className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                            />
+                                                                        </div>
+                                                                        {newConfigRole === 'extension' && currentConfigs.filter(c => c.role === 'main').length > 0 && (
+                                                                            <div>
+                                                                                <label className="text-[10px] text-zinc-500 mb-1 block">Расширяет основную конфигурацию:</label>
+                                                                                <select
+                                                                                    value={newConfigExtends}
+                                                                                    onChange={e => setNewConfigExtends(e.target.value)}
+                                                                                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                                >
+                                                                                    <option value="">— не указано —</option>
+                                                                                    {currentConfigs.filter(c => c.role === 'main').map(c => (
+                                                                                        <option key={c.id} value={c.id}>{getDisplayName(c) ?? c.path}</option>
+                                                                                    ))}
+                                                                                </select>
+                                                                            </div>
+                                                                        )}
+                                                                        {addConfigError && (
+                                                                            <p className="text-[10px] text-red-400">{addConfigError}</p>
+                                                                        )}
+                                                                        <div className="flex gap-2">
+                                                                            <button
+                                                                                onClick={addConfig}
+                                                                                className="flex-1 text-[11px] px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-600/30 rounded-md transition"
+                                                                            >
+                                                                                Добавить
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => { setShowAddConfigForm(false); setAddConfigError(null); }}
+                                                                                className="text-[11px] px-3 py-1.5 bg-zinc-700/50 hover:bg-zinc-700 text-zinc-400 rounded-md transition"
+                                                                            >
+                                                                                Отмена
+                                                                            </button>
+                                                                        </div>
                                                                     </div>
                                                                 )}
-                                                                <p className="text-[10px] text-zinc-600 mt-1">Корневая директория выгруженной конфигурации (содержит папки CommonModules, Documents и т.д.)</p>
                                                             </div>
+
+                                                            {/* ── Index status ── */}
                                                             {searchSt === 'unavailable' ? (
                                                                 <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3">
                                                                     <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                                                                     <div>
-                                                                        <p className="text-xs text-amber-300 font-medium">Путь к конфигурации не задан</p>
-                                                                        <p className="text-[10px] text-zinc-500 mt-1">Укажите путь к директории выгрузки конфигурации 1С выше.</p>
+                                                                        <p className="text-xs text-amber-300 font-medium">Конфигурации не настроены</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-1">Добавьте хотя бы одну конфигурацию выше.</p>
                                                                     </div>
                                                                 </div>
                                                             ) : (searchSt === 'indexing' || searchSt === 'syncing') ? (
@@ -894,7 +1130,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                 onClick={() => invoke('open_search_index_dir')}
                                                                                 className="text-[10px] text-zinc-500 hover:text-blue-400 mt-0.5 truncate block text-left underline-offset-2 hover:underline transition"
                                                                                 title="Открыть папку с базой индекса"
-                                                                            >{status?.index_message || configPath}</button>
+                                                                            >{status?.index_message || `${currentConfigs.length} конф.`}</button>
                                                                         </div>
                                                                     </div>
                                                                     <div className="flex items-center gap-1 shrink-0">
@@ -919,29 +1155,6 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                         >
                                                                             <Activity className="w-3 h-3" /> Обновить
                                                                         </button>
-                                                                        <button
-                                                                            onClick={async () => {
-                                                                                if (!configPath) return;
-                                                                                try {
-                                                                                    await invoke('delete_search_index', { configPath });
-                                                                                    setStatuses(prev => ({
-                                                                                        ...prev,
-                                                                                        [server.id]: {
-                                                                                            ...prev[server.id],
-                                                                                            help_status: 'indexing',
-                                                                                            index_progress: 0,
-                                                                                            index_message: 'Перестройка индекса...'
-                                                                                        }
-                                                                                    }));
-                                                                                    await invoke('call_mcp_tool', { serverId: server.id, name: 'sync_index', arguments: {} });
-                                                                                    setTimeout(fetchStatuses, 500);
-                                                                                } catch { /* UI обновится сам */ }
-                                                                            }}
-                                                                            className="p-1 bg-zinc-700/60 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded transition"
-                                                                            title="Удалить базу и перестроить индекс с нуля"
-                                                                        >
-                                                                            <Trash2 className="w-3 h-3" />
-                                                                        </button>
                                                                     </div>
                                                                 </div>
 
@@ -965,7 +1178,6 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                                                 name: 'benchmark',
                                                                                 arguments: { iterations: 20 }
                                                                             });
-                                                                            // benchmark returns raw JSON (not content[0].text)
                                                                             const text = res?.content?.[0]?.text;
                                                                             const data = text ? JSON.parse(text) : res;
                                                                             if (data?.results) {

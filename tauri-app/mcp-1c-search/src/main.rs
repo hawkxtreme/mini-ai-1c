@@ -3,11 +3,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde_json::{json, Value};
 
+mod config;
 mod search;
 mod tools;
 mod parser;
 mod index;
 mod metadata;
+
+use config::ConfigEntry;
 
 /// Returns SQLite DB file size in MB (0.0 if not found).
 pub fn db_size_mb(path: &std::path::Path) -> f64 {
@@ -18,108 +21,130 @@ pub fn db_size_mb(path: &std::path::Path) -> f64 {
 
 #[tokio::main]
 async fn main() {
-    let config_path_str = std::env::var("ONEC_CONFIG_PATH").unwrap_or_default();
-    let config_path: Option<PathBuf> = if !config_path_str.is_empty() {
-        let p = PathBuf::from(&config_path_str);
-        if p.exists() && p.is_dir() {
-            Some(p)
+    // ── Parse configs from env ───────────────────────────────────────────────
+    let configs: Vec<ConfigEntry> = {
+        let raw = std::env::var("ONEC_CONFIGS").unwrap_or_default();
+        if raw.trim().is_empty() {
+            // Fallback to legacy single-config env var
+            let config_path_str = std::env::var("ONEC_CONFIG_PATH").unwrap_or_default();
+            if config_path_str.is_empty() {
+                vec![]
+            } else {
+                vec![ConfigEntry {
+                    id: "default".to_string(),
+                    path: config_path_str,
+                    role: "main".to_string(),
+                    extends: None,
+                    name: None,
+                    onec_uuid: None,
+                    alias: None,
+                }]
+            }
         } else {
-            None
+            match serde_json::from_str::<Vec<ConfigEntry>>(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[1c-search] Failed to parse ONEC_CONFIGS: {}", e);
+                    vec![]
+                }
+            }
         }
-    } else {
-        None
     };
 
-    // Derive db_path for symbol index (always Some when config_path is Some)
-    let db_path: Option<PathBuf> = config_path.as_ref().map(|p| index::get_db_path(p));
+    // ── Validate paths and build (entry, db_path) list ───────────────────────
+    let mut valid_configs: Vec<(ConfigEntry, PathBuf)> = Vec::new();
 
-    // Report status via stderr — parsed by mcp_client.rs
-    // IMPORTANT: Do NOT call count_files_and_size() here synchronously.
-    // On large configs (5GB+, 100k+ files) it blocks the async main for 30+ seconds,
-    // preventing the JSON-RPC event loop from starting and causing tools/list timeouts.
-    match &config_path {
-        Some(_) => {
-            // Emit preliminary ready immediately so the event loop can start.
-            // Background task below will emit an updated status with actual counts.
-            eprintln!("SEARCH_STATUS:ready:0:0.00");
+    for entry in &configs {
+        if entry.path.is_empty() {
+            continue;
         }
-        None => {
-            if config_path_str.is_empty() {
-                eprintln!("SEARCH_STATUS:unavailable:Путь к конфигурации не задан");
-            } else {
-                eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", config_path_str);
-            }
+        let p = PathBuf::from(&entry.path);
+        if p.exists() && p.is_dir() {
+            let db = index::get_db_path(&p);
+            valid_configs.push((entry.clone(), db));
+        } else {
+            eprintln!("[1c-search] Config '{}' path not found: {}", entry.id, entry.path);
         }
     }
 
-    // Background: build or sync symbol index, then emit accurate status.
-    // Runs in spawn_blocking so it doesn't block the async event loop.
-    if let (Some(root), Some(db)) = (config_path.clone(), db_path.clone()) {
-        let db_for_index = db.clone();
-        // Detached background task — JoinHandle intentionally dropped
+    // ── Report preliminary status ────────────────────────────────────────────
+    if valid_configs.is_empty() {
+        if configs.is_empty() {
+            eprintln!("SEARCH_STATUS:unavailable:Путь к конфигурации не задан");
+        } else {
+            eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", configs.first().map(|c| c.path.as_str()).unwrap_or(""));
+        }
+    } else {
+        eprintln!("SEARCH_STATUS:ready:0:0.00");
+    }
+
+    // ── Background indexing for all configs ──────────────────────────────────
+    for (entry, db_for_index) in &valid_configs {
+        let root = PathBuf::from(&entry.path);
+        let db = db_for_index.clone();
+        let entry_id = entry.id.clone();
+
         let _ = tokio::task::spawn_blocking(move || {
-            // Ensure DB schema exists before anything else
-            if let Err(e) = index::ensure_schema(&db_for_index) {
-                eprintln!("[1c-search] Schema init failed: {}", e);
+            if let Err(e) = index::ensure_schema(&db) {
+                eprintln!("[1c-search] Schema init failed ({}): {}", entry_id, e);
+                return;
             }
 
-            // Migrate: if calls table is empty but symbols exist, reset indexed_files
-            // so the next sync will re-parse all files and populate the call graph.
-            index::migrate_if_needed(&db_for_index);
+            index::migrate_if_needed(&db);
 
-            // Build metadata if missing, or if objects exist but have no attributes
-            // (happens when ConfigDumpInfo.xml was absent on first run — per-object XMLs will be parsed now)
-            let needs_metadata = !index::metadata_exists(&db_for_index)
-                || (index::metadata_exists(&db_for_index) && !index::metadata_has_items(&db_for_index));
+            let needs_metadata = !index::metadata_exists(&db)
+                || (index::metadata_exists(&db) && !index::metadata_has_items(&db));
             if needs_metadata {
-                match metadata::build_metadata(&root, &db_for_index) {
-                    Ok(n) => eprintln!("[1c-search] Metadata indexed: {} objects", n),
-                    Err(e) => eprintln!("[1c-search] Metadata skipped: {}", e),
+                match metadata::build_metadata(&root, &db) {
+                    Ok((n, cfg_name, cfg_uuid)) => {
+                        eprintln!("[1c-search] Metadata indexed ({}): {} objects", entry_id, n);
+                        index::save_config_identity(&db, cfg_name.as_deref(), cfg_uuid.as_deref());
+                    }
+                    Err(e) => eprintln!("[1c-search] Metadata skipped ({}): {}", entry_id, e),
                 }
             }
 
-            if index::index_exists(&db_for_index) {
-                // ─── Incremental sync (mtime-based) ─────────────────────────
-                eprintln!("[1c-search] Index found — running incremental sync...");
-                match index::sync_index(&root, &db_for_index) {
+            if index::index_exists(&db) {
+                eprintln!("[1c-search] Index found ({}) — running incremental sync...", entry_id);
+                match index::sync_index(&root, &db) {
                     Ok(stats) => {
-                        let size = db_size_mb(&db_for_index);
-                        let built_at = index::get_built_at(&db_for_index).unwrap_or(0);
+                        let size = db_size_mb(&db);
+                        let built_at = index::get_built_at(&db).unwrap_or(0);
                         eprintln!(
-                            "[1c-search] Sync done: +{} ~{} -{} total={}",
-                            stats.added, stats.updated, stats.removed, stats.total_symbols
+                            "[1c-search] Sync done ({}): +{} ~{} -{} total={}",
+                            entry_id, stats.added, stats.updated, stats.removed, stats.total_symbols
                         );
                         eprintln!(
                             "SEARCH_STATUS:ready:{}:{:.2}:{}",
                             stats.total_symbols, size, built_at
                         );
                     }
-                    Err(e) => eprintln!("[1c-search] Sync error: {}", e),
+                    Err(e) => eprintln!("[1c-search] Sync error ({}): {}", entry_id, e),
                 }
             } else {
-                // ─── Full build ─────────────────────────────────────────────
-                eprintln!("[1c-search] No index found — starting full build...");
-                match index::build_index(&root, &db_for_index) {
+                eprintln!("[1c-search] No index found ({}) — starting full build...", entry_id);
+                match index::build_index(&root, &db) {
                     Ok(sym_count) => {
-                        let size = db_size_mb(&db_for_index);
-                        let built_at = index::get_built_at(&db_for_index).unwrap_or(0);
+                        let size = db_size_mb(&db);
+                        let built_at = index::get_built_at(&db).unwrap_or(0);
                         eprintln!(
                             "SEARCH_STATUS:ready:{}:{:.2}:{}",
                             sym_count, size, built_at
                         );
                     }
                     Err(e) => {
-                        eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации: {}", e);
+                        eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации ({}): {}", entry_id, e);
                     }
                 }
             }
         });
     }
 
+    // ── JSON-RPC event loop ──────────────────────────────────────────────────
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    // Wrap stdout in Arc<Mutex<>> so concurrent tasks can write responses safely
     let stdout = Arc::new(tokio::sync::Mutex::new(stdout));
+    let configs_arc: Arc<Vec<(ConfigEntry, PathBuf)>> = Arc::new(valid_configs);
 
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
@@ -127,7 +152,7 @@ async fn main() {
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF — client disconnected
+            Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -142,7 +167,6 @@ async fn main() {
                     }
                 };
 
-                // Notifications have no "id" — no response needed per JSON-RPC spec
                 let id = match request.get("id") {
                     Some(id) => id.clone(),
                     None => continue,
@@ -151,15 +175,11 @@ async fn main() {
                 let method = request["method"].as_str().unwrap_or("").to_string();
                 let params = request.get("params").cloned().unwrap_or(json!({}));
 
-                // Spawn each request as an independent async task so that
-                // heavy tools (find_references, search_code on large configs)
-                // don't block subsequent tools/list or initialize responses.
-                let config_path_task = config_path.clone();
-                let db_path_task = db_path.clone();
                 let stdout_task = Arc::clone(&stdout);
+                let configs_task = Arc::clone(&configs_arc);
 
                 tokio::spawn(async move {
-                    let result = handle_method(&method, &params, &config_path_task, &db_path_task).await;
+                    let result = handle_method(&method, &params, &configs_task).await;
 
                     let response = match result {
                         Ok(res) => json!({
@@ -195,8 +215,7 @@ async fn main() {
 async fn handle_method(
     method: &str,
     params: &Value,
-    config_path: &Option<PathBuf>,
-    db_path: &Option<PathBuf>,
+    configs: &[(ConfigEntry, PathBuf)],
 ) -> Result<Value, String> {
     match method {
         "initialize" => Ok(json!({
@@ -208,7 +227,7 @@ async fn handle_method(
         "tools/call" => {
             let tool_name = params["name"].as_str().unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-            tools::call_tool(tool_name, &arguments, config_path, db_path).await
+            tools::call_tool(tool_name, &arguments, configs).await
         }
         "ping" => Ok(json!({})),
         _ => Err(format!("Method not found: {}", method)),

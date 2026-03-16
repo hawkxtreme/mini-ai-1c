@@ -89,6 +89,16 @@ export interface CustomPromptsSettings {
     templates: PromptTemplate[];
 }
 
+export interface OneCConfigEntry {
+    id: string;
+    path: string;
+    role: 'main' | 'extension';
+    extends?: string;
+    name?: string;
+    onec_uuid?: string;
+    alias?: string;
+}
+
 export interface McpServerConfig {
     id: string;
     name: string;
