@@ -1096,6 +1096,7 @@ pub struct IndexStats {
     pub calls_count: usize,
     pub built_at: Option<u64>,
     pub db_size_mb: f64,
+    pub config_name: Option<String>,
 }
 
 pub fn get_index_stats(db_path: &Path) -> IndexStats {
@@ -1105,7 +1106,7 @@ pub fn get_index_stats(db_path: &Path) -> IndexStats {
 
     let conn = match Connection::open(db_path) {
         Ok(c) => c,
-        Err(_) => return IndexStats { symbol_count: 0, file_count: 0, object_count: 0, calls_count: 0, built_at: None, db_size_mb },
+        Err(_) => return IndexStats { symbol_count: 0, file_count: 0, object_count: 0, calls_count: 0, built_at: None, db_size_mb, config_name: None },
     };
 
     // Try reading cached counts from meta table (written at build/sync time) — O(1)
@@ -1153,7 +1154,12 @@ pub fn get_index_stats(db_path: &Path) -> IndexStats {
         ));
     }
 
-    IndexStats { symbol_count, file_count, object_count, calls_count, built_at, db_size_mb }
+    let config_name = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'config_name'", [],
+        |r| r.get::<_, String>(0),
+    ).ok();
+
+    IndexStats { symbol_count, file_count, object_count, calls_count, built_at, db_size_mb, config_name }
 }
 
 /// Get full structure of an object by name (case-insensitive).

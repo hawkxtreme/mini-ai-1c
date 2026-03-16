@@ -19,6 +19,20 @@ pub fn db_size_mb(path: &std::path::Path) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Emit combined SEARCH_STATUS after all configs finish indexing.
+/// g = (total_symbols, total_db_size_mb, max_built_at, finished_count, error_count)
+fn emit_combined_status(g: &(u64, f64, u64, usize, usize)) {
+    let (total_sym, total_mb, built_at, finished, errors) = g;
+    if *finished == 0 || (*errors == *finished) {
+        eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации всех конфигураций");
+    } else {
+        eprintln!(
+            "SEARCH_STATUS:ready:{}:{:.2}:{}",
+            total_sym, total_mb, built_at
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // ── Parse configs from env ───────────────────────────────────────────────
@@ -74,19 +88,30 @@ async fn main() {
         } else {
             eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", configs.first().map(|c| c.path.as_str()).unwrap_or(""));
         }
-    } else {
-        eprintln!("SEARCH_STATUS:ready:0:0.00");
+        // No configs to index — nothing more to do.
     }
 
     // ── Background indexing for all configs ──────────────────────────────────
+    // Shared aggregator: (total_symbols, total_db_size_mb, max_built_at, finished_count, error_count)
+    let total_configs = valid_configs.len();
+    let aggregator: Arc<std::sync::Mutex<(u64, f64, u64, usize, usize)>> =
+        Arc::new(std::sync::Mutex::new((0, 0.0, 0, 0, 0)));
+
     for (entry, db_for_index) in &valid_configs {
         let root = PathBuf::from(&entry.path);
         let db = db_for_index.clone();
         let entry_id = entry.id.clone();
+        let agg = Arc::clone(&aggregator);
 
         let _ = tokio::task::spawn_blocking(move || {
             if let Err(e) = index::ensure_schema(&db) {
                 eprintln!("[1c-search] Schema init failed ({}): {}", entry_id, e);
+                let mut g = agg.lock().unwrap();
+                g.3 += 1; // finished
+                g.4 += 1; // error
+                if g.3 == total_configs {
+                    emit_combined_status(&g);
+                }
                 return;
             }
 
@@ -104,37 +129,46 @@ async fn main() {
                 }
             }
 
-            if index::index_exists(&db) {
+            let (sym_count, built_at, had_error) = if index::index_exists(&db) {
                 eprintln!("[1c-search] Index found ({}) — running incremental sync...", entry_id);
                 match index::sync_index(&root, &db) {
                     Ok(stats) => {
-                        let size = db_size_mb(&db);
-                        let built_at = index::get_built_at(&db).unwrap_or(0);
                         eprintln!(
                             "[1c-search] Sync done ({}): +{} ~{} -{} total={}",
                             entry_id, stats.added, stats.updated, stats.removed, stats.total_symbols
                         );
-                        eprintln!(
-                            "SEARCH_STATUS:ready:{}:{:.2}:{}",
-                            stats.total_symbols, size, built_at
-                        );
+                        let built_at = index::get_built_at(&db).unwrap_or(0);
+                        (stats.total_symbols as u64, built_at, false)
                     }
-                    Err(e) => eprintln!("[1c-search] Sync error ({}): {}", entry_id, e),
+                    Err(e) => {
+                        eprintln!("[1c-search] Sync error ({}): {}", entry_id, e);
+                        (0, 0, true)
+                    }
                 }
             } else {
                 eprintln!("[1c-search] No index found ({}) — starting full build...", entry_id);
                 match index::build_index(&root, &db) {
                     Ok(sym_count) => {
-                        let size = db_size_mb(&db);
                         let built_at = index::get_built_at(&db).unwrap_or(0);
-                        eprintln!(
-                            "SEARCH_STATUS:ready:{}:{:.2}:{}",
-                            sym_count, size, built_at
-                        );
+                        (sym_count as u64, built_at, false)
                     }
                     Err(e) => {
-                        eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации ({}): {}", entry_id, e);
+                        eprintln!("[1c-search] Build error ({}): {}", entry_id, e);
+                        (0, 0, true)
                     }
+                }
+            };
+
+            let size = db_size_mb(&db);
+            {
+                let mut g = agg.lock().unwrap();
+                g.0 += sym_count;
+                g.1 += size;
+                if built_at > g.2 { g.2 = built_at; }
+                g.3 += 1; // finished
+                if had_error { g.4 += 1; }
+                if g.3 == total_configs {
+                    emit_combined_status(&g);
                 }
             }
         });

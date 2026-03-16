@@ -383,7 +383,14 @@ pub async fn call_tool(
         "find_function_in_object" => handle_find_function_in_object(args, &config_path, &db_path).await,
         "stats" => handle_stats_multi(configs).await,
         "sync_index" => handle_sync_index(&config_path, &db_path).await,
-        "benchmark" => handle_benchmark(args, &config_path, &db_path).await,
+        "benchmark" => {
+            // Use the config with most symbols for realistic benchmark
+            let (bench_cp, bench_db) = configs.iter()
+                .max_by_key(|(_, db)| if db.exists() { index::symbol_count(db) } else { 0 })
+                .map(|(e, db)| (Some(PathBuf::from(&e.path)), Some(db.clone())))
+                .unwrap_or((config_path.clone(), db_path.clone()));
+            handle_benchmark(args, &bench_cp, &bench_db).await
+        },
         _ => Err(format!("Неизвестный инструмент: {}", name)),
     };
     eprintln!("[PERF] {} in {}ms", name, start.elapsed().as_millis());
@@ -1383,28 +1390,58 @@ async fn handle_stats_multi(configs: &[(ConfigEntry, PathBuf)]) -> Result<Value,
     if configs.is_empty() {
         return Err("Конфигурации не настроены".to_string());
     }
-    if configs.len() == 1 {
-        return handle_stats(&Some(configs[0].1.clone())).await;
+
+    let mut config_stats = Vec::new();
+    let mut total_symbols = 0usize;
+    let mut total_db_size = 0.0f64;
+
+    for (entry, db) in configs {
+        let s = if db.exists() { index::get_index_stats(db) } else {
+            index::IndexStats { symbol_count: 0, file_count: 0, object_count: 0, calls_count: 0, built_at: None, db_size_mb: 0.0, config_name: None }
+        };
+        // Prefer name from DB meta, then from config entry, then empty
+        let resolved_name = s.config_name.clone()
+            .or_else(|| entry.name.clone())
+            .or_else(|| entry.alias.clone());
+        total_symbols += s.symbol_count;
+        total_db_size += s.db_size_mb;
+        config_stats.push(json!({
+            "id": entry.id,
+            "config_name": resolved_name,
+            "alias": entry.alias,
+            "role": entry.role,
+            "extends": entry.extends,
+            "path": entry.path,
+            "symbols": s.symbol_count,
+            "files": s.file_count,
+            "objects": s.object_count,
+            "calls": s.calls_count,
+            "db_size_mb": s.db_size_mb,
+            "built_at": s.built_at,
+            "indexed": db.exists(),
+        }));
     }
 
-    let mut text = format!("## Статистика индекса ({} конфигураций)\n\n", configs.len());
-    for (entry, db) in configs {
-        let display_name = entry.alias.as_deref()
-            .or(entry.name.as_deref())
-            .unwrap_or(entry.id.as_str());
-        let role_label = if entry.role == "extension" { "расширение" } else { "основная" };
-        text.push_str(&format!("### {} `{}` ({})\n", display_name, entry.id, role_label));
-        if db.exists() {
-            let s = index::get_index_stats(db);
-            text.push_str(&format!(
-                "- Символов: {}\n- Файлов: {}\n- Объектов: {}\n- Вызовов: {}\n- Размер БД: {:.1} МБ\n\n",
-                s.symbol_count, s.file_count, s.object_count, s.calls_count, s.db_size_mb
-            ));
-        } else {
-            text.push_str("- *Индекс не построен*\n\n");
-        }
+    // Build human-readable text summary for LLM
+    let mut text = format!("## Статистика индекса ({} конфигураций)\n\nВсего символов: {}\nОбщий размер БД: {:.1} МБ\n\n", configs.len(), total_symbols, total_db_size);
+    for cs in &config_stats {
+        let name = cs["config_name"].as_str().unwrap_or(cs["id"].as_str().unwrap_or("?"));
+        let role = cs["role"].as_str().unwrap_or("main");
+        let role_label = if role == "extension" { "расширение" } else { "основная" };
+        text.push_str(&format!("### {} ({})\n- Символов: {}\n- Файлов: {}\n- Размер БД: {:.1} МБ\n\n",
+            name, role_label,
+            cs["symbols"].as_u64().unwrap_or(0),
+            cs["files"].as_u64().unwrap_or(0),
+            cs["db_size_mb"].as_f64().unwrap_or(0.0),
+        ));
     }
-    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "configs": config_stats,
+        "total_symbols": total_symbols,
+        "total_db_size_mb": total_db_size,
+    }))
 }
 
 // ─── stats ───────────────────────────────────────────────────────────────────

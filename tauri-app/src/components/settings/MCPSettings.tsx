@@ -364,6 +364,37 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         }
     }, [servers, onUpdate]);
 
+    // After indexing completes, read config names from the MCP stats response and persist them
+    const syncConfigNamesFromStats = async (searchServer: McpServerConfig) => {
+        try {
+            const res = await invoke<any>('call_mcp_tool', { serverId: searchServer.id, name: 'stats', arguments: {} });
+            const configStats: Array<{ id: string; config_name?: string }> = res?.configs ?? [];
+            if (!configStats.length) return;
+            const raw = searchServer.env?.['ONEC_CONFIGS'];
+            if (!raw) return;
+            const configs: OneCConfigEntry[] = JSON.parse(raw);
+            let changed = false;
+            const updated = configs.map(cfg => {
+                const stat = configStats.find(s => s.id === cfg.id);
+                const resolvedName = stat?.config_name ?? undefined;
+                if (resolvedName && resolvedName !== cfg.name) {
+                    changed = true;
+                    return { ...cfg, name: resolvedName };
+                }
+                return cfg;
+            });
+            if (changed) {
+                const newEnv = { ...(searchServer.env || {}), 'ONEC_CONFIGS': JSON.stringify(updated) };
+                // Update via servers list
+                const idx = servers.findIndex(s => s.id === searchServer.id);
+                if (idx !== -1) {
+                    const updatedServers = servers.map(s => s.id === searchServer.id ? { ...s, env: newEnv } : s);
+                    onUpdate(updatedServers);
+                }
+            }
+        } catch { /* silent — stats might not be ready yet */ }
+    };
+
     const fetchStatuses = async () => {
         try {
             const result = await invoke<McpServerStatus[]>('get_mcp_server_statuses');
@@ -379,6 +410,16 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
         const interval = setInterval(fetchStatuses, 5000);
         return () => clearInterval(interval);
     }, []);
+
+    // Sync config names from DB after indexing completes
+    useEffect(() => {
+        const searchServer = servers.find(s => s.id === BUILTIN_1C_SEARCH_ID);
+        if (!searchServer?.enabled) return;
+        const st = statuses[BUILTIN_1C_SEARCH_ID]?.help_status;
+        if (st === 'ready') {
+            syncConfigNamesFromStats(searchServer);
+        }
+    }, [statuses[BUILTIN_1C_SEARCH_ID]?.help_status]);
 
     useEffect(() => {
         if (viewingLogsId) {
@@ -848,10 +889,11 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                     const getDisplayName = (cfg: OneCConfigEntry) =>
                                                         cfg.alias ?? cfg.name ?? null;
 
-                                                    const getExtendedName = (cfg: OneCConfigEntry) => {
+                                                    const getExtendedName = (cfg: OneCConfigEntry): string => {
                                                         if (!cfg.extends) return '?';
                                                         const parent = currentConfigs.find(c => c.id === cfg.extends);
-                                                        return parent ? getDisplayName(parent) : cfg.extends.slice(0, 8);
+                                                        if (!parent) return cfg.extends.slice(0, 8);
+                                                        return getDisplayName(parent) ?? parent.path.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? cfg.extends.slice(0, 8);
                                                     };
 
                                                     return (
