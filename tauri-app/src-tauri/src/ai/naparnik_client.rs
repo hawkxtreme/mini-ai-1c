@@ -64,11 +64,6 @@ struct CreateConversationRequest {
     ui_language: String,
 }
 
-#[derive(Deserialize)]
-struct CreateConversationResponse {
-    #[allow(dead_code)]
-    uuid: String,
-}
 
 #[derive(Serialize)]
 struct MessageRequest {
