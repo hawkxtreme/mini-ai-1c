@@ -124,7 +124,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
+    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
@@ -193,16 +193,16 @@ export function ChatArea({
     }, [isLoading, isRecording, toggleRecording]);
 
     // Welcome message when switching to Напарник
+    const NAPARNIK_INFO_MSG = '1С:Напарник подключён · Поиск по ИТС и документации 1С · Диффы и локальный MCP недоступны';
     const prevProfileIdRef = useRef<string | null>(null);
     useEffect(() => {
         if (prevProfileIdRef.current === activeProfileId) return;
         const wasNaparnik = profiles.find(p => p.id === prevProfileIdRef.current)?.provider === 'OneCNaparnik';
         prevProfileIdRef.current = activeProfileId ?? null;
         if (isNaparnikActive && !wasNaparnik && messages.length === 0) {
-            addSystemMessage(
-                '1С:Напарник подключён · Поиск по ИТС и документации 1С · Диффы и локальный MCP недоступны',
-                'info'
-            );
+            addSystemMessage(NAPARNIK_INFO_MSG, 'info');
+        } else if (!isNaparnikActive && wasNaparnik) {
+            removeSystemMessage(NAPARNIK_INFO_MSG);
         }
     }, [activeProfileId]);
 
