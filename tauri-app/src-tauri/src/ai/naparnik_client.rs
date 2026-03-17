@@ -64,11 +64,6 @@ struct CreateConversationRequest {
     ui_language: String,
 }
 
-#[derive(Deserialize)]
-struct CreateConversationResponse {
-    #[allow(dead_code)]
-    uuid: String,
-}
 
 #[derive(Serialize)]
 struct MessageRequest {
@@ -116,15 +111,7 @@ struct ContentDelta {
 struct ToolResultRequest {
     role: String,
     parent_uuid: String,
-    content: Vec<ToolResultItem>,
-}
-
-#[derive(Serialize)]
-struct ToolResultItem {
-    content: String,
-    details: Value,
-    name: String,
-    tool_call_id: String,
+    content: Vec<Value>,
 }
 
 // ─── HTTP Helpers ─────────────────────────────────────────────────────────────
@@ -312,20 +299,13 @@ async fn run_message_loop(
             .and_then(|s| s.last_message_uuid)
             .unwrap_or_default();
 
-        let items: Vec<ToolResultItem> = tool_calls_to_send.iter().map(|tc| {
-            let func = tc["function"].as_object().cloned().unwrap_or_default();
+        let items: Vec<Value> = tool_calls_to_send.iter().map(|tc| {
             let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-            let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            ToolResultItem {
-                content: serde_json::to_string(&serde_json::json!({
-                    "id": tc_id,
-                    "type": tc["type"].as_str().unwrap_or("function"),
-                    "function": func,
-                })).unwrap_or_default(),
-                details: serde_json::json!({ "auto_call": true }),
-                name,
-                tool_call_id: tc_id,
-            }
+            serde_json::json!({
+                "status": "accepted",
+                "tool_call_id": tc_id,
+                "content": null
+            })
         }).collect();
 
         let tool_result_req = ToolResultRequest {

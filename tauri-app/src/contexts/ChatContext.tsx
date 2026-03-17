@@ -52,6 +52,7 @@ interface ChatContextType {
     clearChat: () => void;
     editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     addSystemMessage: (content: string, variant?: 'warning' | 'info') => void;
+    removeSystemMessage: (content: string) => void;
     removeQueuedMessage: (id: string) => void;
     updateQueuedMessage: (id: string, content: string) => void;
     clearQueue: () => void;
@@ -537,6 +538,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         ]);
     }, []);
 
+    const removeSystemMessage = useCallback((content: string) => {
+        setMessages(prev => prev.filter(m => !(m.role === 'system' && m.content === content)));
+    }, []);
+
     // Edit message and rerun from that point
     const editAndRerun = useCallback(async (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
         if (!newContent.trim() || isLoading) return;
@@ -661,6 +666,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             clearChat,
             editAndRerun,
             addSystemMessage,
+            removeSystemMessage,
             removeQueuedMessage,
             updateQueuedMessage,
             clearQueue,

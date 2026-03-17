@@ -119,127 +119,139 @@ class OneCApiClient {
     }
 
     async sendMessage(conversationId: string, message: string): Promise<string> {
-        const payload = {
+        const url = `${BASE_URL}/chat_api/v1/conversations/${conversationId}/messages`;
+        const DEBUG = process.env.ONEC_AI_DEBUG === "true";
+
+        let payload: any = {
             role: "user",
-            content: {
-                content: {
-                    instruction: message
-                }
-            },
+            content: { content: { instruction: message } },
             parent_uuid: this.lastMessageId
         };
-        console.error(`[1C:Naparnik] Sending message payload: ${JSON.stringify(payload)}`);
 
-        const response = await this.fetchWithRetry(`${BASE_URL}/chat_api/v1/conversations/${conversationId}/messages`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": this.token,
-                "Origin": BASE_URL,
-                "Referer": `${BASE_URL}/chat//`,
-                "Accept": "text/event-stream",
-            },
-            body: JSON.stringify(payload),
-        });
+        const segments: string[] = [];
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Failed to send message: ${response.status} ${response.statusText} - ${errorText}`);
+        // Tool round-trip loop (same as naparnik_client.rs)
+        for (let round = 0; round < 10; round++) {
+            if (DEBUG) console.error(`[1C:Naparnik] Round ${round}, payload: ${JSON.stringify(payload)}`);
+
+            const response = await this.fetchWithRetry(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": this.token,
+                    "Origin": BASE_URL,
+                    "Referer": `${BASE_URL}/chat//`,
+                    "Accept": "text/event-stream",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to send message: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+            if (!response.body) throw new Error("Response body is empty");
+
+            const { text, toolCalls } = await this.readSseStream(response, DEBUG);
+            if (text) segments.push(text);
+
+            if (toolCalls.length === 0) break;
+
+            // Send tool results back with accepted status
+            console.error(`[1C:Naparnik] Tool calls received (${toolCalls.length}), sending accepted round-trip`);
+            payload = {
+                role: "tool",
+                parent_uuid: this.lastMessageId,
+                content: toolCalls.map((tc: any) => ({
+                    status: "accepted",
+                    tool_call_id: tc.id ?? "",
+                    content: null
+                }))
+            };
         }
 
-        if (!response.body) {
-            throw new Error("Response body is empty");
+        const fullText = segments.filter(Boolean).join("\n\n");
+        if (!fullText) {
+            throw new Error("Напарник не вернул ответ. Попробуйте повторить запрос.");
         }
+        return fullText;
+    }
 
-        const DEBUG = process.env.ONEC_AI_DEBUG === "true";
-        // Parse SSE
-        let fullText = "";
+    private async readSseStream(response: Response, debug: boolean): Promise<{ text: string; toolCalls: any[] }> {
+        let accText = "";
+        let toolCalls: any[] = [];
         let reasoningOnly = false;
         const self = this;
+
         const parser = createParser({
             onEvent(event) {
-                // Completion marker
                 if (event.data === "[DONE]") return;
-
                 try {
                     const data = JSON.parse(event.data);
-                    if (DEBUG) {
-                        console.error(`[1C:Naparnik] SSE Event type=${event.event ?? "message"} Data: ${JSON.stringify(data)}`);
-                    }
+                    if (debug) console.error(`[1C:Naparnik] SSE: ${JSON.stringify(data)}`);
 
-                    // Named event format: response.output_text.delta
-                    if (event.event === "response.output_text.delta" && data.delta) {
-                        fullText += data.delta;
+                    // Skip user/tool echoes
+                    if ((data.role === "user" || data.role === "tool") && data.finished) return;
+
+                    // Delta text
+                    if (data.content_delta?.content && typeof data.content_delta.content === "string") {
+                        accText += data.content_delta.content;
                         return;
                     }
 
-                    // Named event format: response.completed — final answer
+                    // OpenAI-like choices
+                    if (Array.isArray(data.choices) && data.choices.length > 0) {
+                        const delta = data.choices[0].delta ?? data.choices[0].message ?? {};
+                        if (typeof delta.content === "string") accText += delta.content;
+                        return;
+                    }
+
+                    // Named SSE events
+                    if (event.event === "response.output_text.delta" && data.delta) {
+                        accText += data.delta;
+                        return;
+                    }
                     if (event.event === "response.completed" && data.response?.output) {
                         for (const item of data.response.output) {
                             for (const c of (item.content ?? [])) {
-                                if (c.type === "output_text" && c.text) {
-                                    fullText = c.text;
-                                }
+                                if (c.type === "output_text" && c.text) accText = c.text;
                             }
                         }
                         return;
                     }
 
-                    // OpenAI-like choices format
-                    if (Array.isArray(data.choices) && data.choices.length > 0) {
-                        const choice = data.choices[0];
-                        const delta = choice.delta ?? choice.message ?? {};
-                        if (delta.content && typeof delta.content === "string") {
-                            fullText += delta.content;
-                        }
-                        // finish_reason — not much to do, just note completion
-                        return;
-                    }
-
-                    // Legacy content_delta format
-                    if (data.content_delta) {
-                        const cd = data.content_delta;
-                        // text/content/instruction fields
-                        const piece = cd.text ?? cd.content ?? cd.instruction ?? null;
-                        if (typeof piece === "string") {
-                            fullText += piece;
-                        } else if (piece && typeof piece === "object") {
-                            // content_delta.content.instruction (old nested format)
-                            const nested = piece.text ?? piece.instruction ?? piece.content ?? null;
-                            if (typeof nested === "string") fullText += nested;
-                        }
-                        // Skip reasoning_content — these are thinking tokens, not the answer
-                        return;
-                    }
-
-                    // Handle full result on finish or assistant role
-                    if (data.role === "assistant") {
+                    // Final assistant chunk
+                    if (data.role === "assistant" && data.finished) {
                         if (data.uuid) self.lastMessageId = data.uuid;
+
+                        // Check for tool_calls
+                        const tc = data.content?.tool_calls;
+                        if (Array.isArray(tc) && tc.length > 0) {
+                            toolCalls = tc;
+                            return;
+                        }
+
+                        // Cumulative text
                         if (data.content) {
                             const c = data.content;
-                            const text = c.text ?? c.instruction ?? c.content ?? null;
-                            if (typeof text === "string") fullText = text;
-                            else if (text && typeof text === "object") {
-                                const nested = text.text ?? text.instruction ?? text.content ?? null;
-                                if (typeof nested === "string") fullText = nested;
+                            const text = typeof c === "string" ? c
+                                : (c.text ?? c.instruction ?? c.content ?? null);
+                            if (typeof text === "string" && text.length > accText.length) {
+                                accText = text;
                             }
                         }
+                        return;
                     }
 
-                    // finished flag
-                    if (data.finished === true && !fullText && data.reasoning_content) {
+                    if (data.finished && !accText && data.reasoning_content) {
                         reasoningOnly = true;
                     }
-                } catch (e) {
-                    // ignore json parse errors for non-JSON lines
-                }
+                } catch { /* ignore non-JSON */ }
             }
         });
 
-        // Use a stream reader
-        const reader = response.body.getReader();
+        const reader = response.body!.getReader();
         const decoder = new TextDecoder();
-
         try {
             while (true) {
                 const { done, value } = await reader.read();
@@ -250,10 +262,11 @@ class OneCApiClient {
             reader.releaseLock();
         }
 
-        if (!fullText && reasoningOnly) {
+        if (!accText && reasoningOnly) {
             throw new Error("Получены только рассуждения модели без итогового ответа. Попробуйте повторить запрос.");
         }
-        return fullText;
+
+        return { text: accText, toolCalls };
     }
 
 
