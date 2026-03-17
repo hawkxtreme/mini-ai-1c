@@ -1,6 +1,6 @@
 [package]
 name = "mini-ai-1c"
-version = "1.1.12"
+version = "1.1.13"
 description = "AI-ассистент для разработки на 1С"
 authors = ["you"]
 edition = "2021"
