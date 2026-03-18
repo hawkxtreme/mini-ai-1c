@@ -100,12 +100,26 @@ pub fn run() {
                 .tooltip("Mini AI 1C")
                 .build(app)?;
 
-            // Hotkeys removed
-
+            // Migration: com.miniai1c.agent → com.mini-ai-1c
+            // The app identifier was changed; migrate old Tauri app data to the new folder.
+            if let Some(roaming) = dirs::data_dir() {
+                let old_dir = roaming.join("com.miniai1c.agent");
+                let new_dir = roaming.join("com.mini-ai-1c");
+                if old_dir.exists() && old_dir.is_dir() {
+                    crate::app_log!("[MIGRATE] Migrating app data from {:?} to {:?}", old_dir, new_dir);
+                    if let Err(e) = migrate_dir(&old_dir, &new_dir) {
+                        crate::app_log!("[MIGRATE] Migration error: {}", e);
+                    } else {
+                        // Remove old dir only if migration succeeded and it's now empty
+                        let _ = std::fs::remove_dir_all(&old_dir);
+                        crate::app_log!("[MIGRATE] Migration complete, removed old dir");
+                    }
+                }
+            }
 
             // Start BSL Language Server using managed state
             let app_handle = app.handle().clone();
-            
+
             // Clean up old history file if exists (Issue #11)
             let app_dir = app.path().app_data_dir().unwrap_or_default();
             let history_path = app_dir.join("chat_history.json");
@@ -142,4 +156,20 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Recursively copy all files from `src` to `dst`, skipping files that already exist in `dst`.
+fn migrate_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            migrate_dir(&src_path, &dst_path)?;
+        } else if !dst_path.exists() {
+            std::fs::copy(&src_path, &dst_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
