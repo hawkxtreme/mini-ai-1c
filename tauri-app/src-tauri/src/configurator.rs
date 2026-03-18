@@ -1,17 +1,16 @@
-//! 1C Configurator integration using Windows APIs
+//! Window integration using Windows APIs
 //! Handles window detection, hotkeys, and clipboard operations
 
 use windows::{
-    Win32::Foundation::{HWND, MAX_PATH, RECT},
+    Win32::Foundation::{HWND, RECT},
     Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     },
     Win32::System::Threading::{
-        AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        AttachThreadInput, GetCurrentThreadId,
     },
-    Win32::System::ProcessStatus::K32GetModuleFileNameExW,
     Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU, VK_SHIFT, VK_UP,
+        SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_CONTROL, VK_A, VK_C, VK_V, VK_MENU, VK_SHIFT, VK_UP,
     },
     Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsIconic, IsZoomed,
@@ -31,29 +30,42 @@ pub fn calculate_content_hash(content: &str) -> String {
 
 fn send_ctrl_a() {
     unsafe {
-        let ctrl_a_inputs = vec![
-            // Ctrl down
+        // Ctrl down
+        let ctrl_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
                 },
             },
-            // A down
+        ];
+        SendInput(&ctrl_down, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Ctrl down for RDP compatibility
+
+        // A down
+        let a_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_A, ..Default::default() },
                 },
             },
-            // A up
+        ];
+        SendInput(&a_down, std::mem::size_of::<INPUT>() as i32);
+
+        // A up
+        let a_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_A, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
                 },
             },
-            // Ctrl up
+        ];
+        SendInput(&a_up, std::mem::size_of::<INPUT>() as i32);
+
+        // Ctrl up
+        let ctrl_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -61,57 +73,77 @@ fn send_ctrl_a() {
                 },
             },
         ];
-        SendInput(&ctrl_a_inputs, std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        SendInput(&ctrl_up, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }
 
 /// Send Shift+Up `count` times to re-select pasted lines
 fn send_shift_up(count: usize) {
     unsafe {
-        // First: send Home to go to beginning of current line
-        let home_inputs = vec![
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, ..Default::default() },
-                },
-            },
-            INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
-                },
-            },
-        ];
-        SendInput(&home_inputs, std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        
 
-        // Then: Shift+Up for each line to select upward
-        for _ in 0..count {
-            let shift_up = vec![
-                // Shift down
+        // Shift+Up for each line to select upward
+         // Shift down
+            let shift_down = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                         ki: KEYBDINPUT { wVk: VK_SHIFT, ..Default::default() },
                     },
                 },
-                // Up down
+            ];
+            SendInput(&shift_down, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Shift down for RDP
+
+        for _ in 0..count {
+           
+            // Up down
+            let up_down = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                        ki: KEYBDINPUT { wVk: VK_UP, ..Default::default() },
+                        ki: KEYBDINPUT { wVk: VK_UP, dwFlags: KEYEVENTF_EXTENDEDKEY, ..Default::default() },
                     },
                 },
-                // Up up
+            ];
+            SendInput(&up_down, std::mem::size_of::<INPUT>() as i32);
+
+            // Up up
+            let up_up = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                        ki: KEYBDINPUT { wVk: VK_UP, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
+                        ki: KEYBDINPUT { wVk: VK_UP, dwFlags: KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY, ..Default::default() },
                     },
                 },
-                // Shift up
+            ];
+            SendInput(&up_up, std::mem::size_of::<INPUT>() as i32);
+
+            
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let home_inputs = vec![
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_EXTENDEDKEY, ..Default::default() },
+                },
+            },
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY, ..Default::default() },
+                },
+            },
+        ];
+        SendInput(&home_inputs, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // Shift up
+            let shift_up = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -120,8 +152,6 @@ fn send_shift_up(count: usize) {
                 },
             ];
             SendInput(&shift_up, std::mem::size_of::<INPUT>() as i32);
-            std::thread::sleep(std::time::Duration::from_millis(15));
-        }
     }
 }
 
@@ -139,7 +169,7 @@ pub fn send_hotkey(hwnd: isize, virtual_key: u16, modifiers: Vec<u16>) {
         }
         let _ = SetForegroundWindow(window);
         let _ = SetFocus(window);
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(300));
 
         let mut inputs = Vec::new();
         
@@ -208,14 +238,14 @@ pub fn find_configurator_windows(pattern: &str) -> Vec<WindowInfo> {
     
     // Store pattern for callback
     let pattern_lower = pattern.to_lowercase();
-    
+
     unsafe {
         let _ = EnumWindows(
             Some(enum_windows_callback),
             windows::Win32::Foundation::LPARAM(0),
         );
     }
-    
+
     // Filter by pattern
     if let Ok(windows) = FOUND_WINDOWS.lock() {
         windows
@@ -235,46 +265,20 @@ unsafe extern "system" fn enum_windows_callback(
 ) -> windows::Win32::Foundation::BOOL {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    
+
     if !IsWindowVisible(hwnd).as_bool() {
         return windows::Win32::Foundation::BOOL::from(true);
     }
 
-    // Check process name
-    let mut process_id = 0;
-    GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-    
-    if let Ok(process_handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, process_id) {
-        let mut buffer = [0u16; MAX_PATH as usize];
-        let len = K32GetModuleFileNameExW(process_handle, None, &mut buffer);
-        let _ = windows::Win32::Foundation::CloseHandle(process_handle); // Always close handle
-
-        if len > 0 {
-            let process_path = OsString::from_wide(&buffer[..len as usize])
-                .to_string_lossy()
-                .to_string()
-                .to_lowercase();
-            
-            // Allow 1cv8 (Client/Configurator), 1cv8c (Thin Client), 1cv8s (Thick Client)
-            // But usually Configurator runs as 1cv8.exe
-            let is_1c = process_path.ends_with("1cv8.exe") || 
-                        process_path.ends_with("1cv8c.exe") || 
-                        process_path.ends_with("1cv8s.exe");
-            
-            if !is_1c {
-                return windows::Win32::Foundation::BOOL::from(true);
-            }
-        }
-    }
-    
+    // Get window title
     let mut buffer = [0u16; 512];
     let len = GetWindowTextW(hwnd, &mut buffer);
-    
+
     if len > 0 {
         let title = OsString::from_wide(&buffer[..len as usize])
             .to_string_lossy()
             .to_string();
-        
+
         if !title.is_empty() {
             if let Ok(mut windows) = FOUND_WINDOWS.lock() {
                 windows.push(WindowInfo {
@@ -284,7 +288,7 @@ unsafe extern "system" fn enum_windows_callback(
             }
         }
     }
-    
+
     windows::Win32::Foundation::BOOL::from(true)
 }
 
@@ -350,29 +354,43 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
         let _ = set_clipboard(formats::Unicode, &marker);
         
         if use_select_all {
+            std::thread::sleep(std::time::Duration::from_millis(300)); 
             send_ctrl_a();
         }
-    
-        // Send Ctrl+C
-        let ctrl_c_inputs = vec![
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Send Ctrl+C with RDP-compatible timing
+        let ctrl_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
                 },
             },
+        ];
+        SendInput(&ctrl_down, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Ctrl down for RDP
+
+        let c_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_C, ..Default::default() },
                 },
             },
+        ];
+        SendInput(&c_down, std::mem::size_of::<INPUT>() as i32);
+
+        let c_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_C, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
                 },
             },
+        ];
+        SendInput(&c_up, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(100)); // Pause after Ctrl down for RDP
+        let ctrl_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -380,8 +398,8 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
                 },
             },
         ];
-        SendInput(&ctrl_c_inputs, std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        SendInput(&ctrl_up, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300));
         
         // 2. Wait for change from marker
     let mut retries = 5;
@@ -392,7 +410,7 @@ pub fn get_selected_code(hwnd: isize, use_select_all: bool) -> Result<String, St
                 return Ok(content);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(300));
         retries -= 1;
     }
     
@@ -465,38 +483,48 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
             let _ = AttachThreadInput(current_thread_id, target_thread_id, false);
         }
         
-        std::thread::sleep(std::time::Duration::from_millis(100)); // Wait for focus
+        std::thread::sleep(std::time::Duration::from_millis(300)); // Wait for focus
         crate::app_log!("[Configurator] Sending inputs...");
 
         if use_select_all {
-             send_ctrl_a();
-             std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            send_ctrl_a();
+            std::thread::sleep(std::time::Duration::from_millis(300));
         }
 
-        // Send Ctrl+V using SendInput (more reliable than WM_PASTE)
-        let ctrl_v_inputs = vec![
-            // Ctrl down
+        // Send Ctrl+V with RDP-compatible timing
+        let ctrl_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
                 },
             },
-            // V down
+        ];
+        SendInput(&ctrl_down, std::mem::size_of::<INPUT>() as i32);
+        std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Ctrl down for RDP
+
+        let v_down = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_V, ..Default::default() },
                 },
             },
-            // V up
+        ];
+        SendInput(&v_down, std::mem::size_of::<INPUT>() as i32);
+
+        let v_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { wVk: VK_V, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
                 },
             },
-            // Ctrl up
+        ];
+        SendInput(&v_up, std::mem::size_of::<INPUT>() as i32);
+
+        let ctrl_up = vec![
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -504,10 +532,9 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
                 },
             },
         ];
-        
-        SendInput(&ctrl_v_inputs, std::mem::size_of::<INPUT>() as i32);
+        SendInput(&ctrl_up, std::mem::size_of::<INPUT>() as i32);
         crate::app_log!("[Configurator] Sent Ctrl+V inputs");
-        
+
         // Wait for paste to complete
         std::thread::sleep(std::time::Duration::from_millis(300));
         
@@ -515,17 +542,31 @@ pub fn paste_code(hwnd: isize, code: &str, use_select_all: bool) -> Result<(), S
         if use_select_all {
             // For full module: re-select all and scroll to top
             crate::app_log!("[Configurator] Re-selecting all and scrolling to top");
+            std::thread::sleep(std::time::Duration::from_millis(300)); 
             send_ctrl_a();
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            // Send Ctrl+Home to scroll to top (note: this might clear selection in some 1C versions, 
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Send Ctrl+Home to scroll to top (note: this might clear selection in some 1C versions,
             // but usually it's better to see the start than the end)
-            let inputs = vec![
+            let ctrl_down = vec![
                 INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() } } },
-                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, ..Default::default() } } },
-                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP, ..Default::default() } } },
+            ];
+            SendInput(&ctrl_down, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Ctrl down for RDP
+
+            let home_down = vec![
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_EXTENDEDKEY, ..Default::default() } } },
+            ];
+            SendInput(&home_down, std::mem::size_of::<INPUT>() as i32);
+
+            let home_up = vec![
+                INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: windows::Win32::UI::Input::KeyboardAndMouse::VK_HOME, dwFlags: KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY, ..Default::default() } } },
+            ];
+            SendInput(&home_up, std::mem::size_of::<INPUT>() as i32);
+
+            let ctrl_up = vec![
                 INPUT { r#type: INPUT_KEYBOARD, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 { ki: KEYBDINPUT { wVk: VK_CONTROL, dwFlags: KEYEVENTF_KEYUP, ..Default::default() } } },
             ];
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            SendInput(&ctrl_up, std::mem::size_of::<INPUT>() as i32);
         } else {
             // For fragment: re-select lines using Shift+Up. 
             // Since we re-select UPWARD, the cursor (and thus the view) should move to the beginning of the block.
@@ -575,28 +616,41 @@ pub fn is_selection_active(hwnd: isize) -> bool {
                 let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(window, windows::Win32::UI::WindowsAndMessaging::SW_RESTORE);
             }
             let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window);
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(300));
             
-            // 3. Send Ctrl+C
-            let inputs = vec![
+            // 3. Send Ctrl+C with RDP-compatible timing
+            let ctrl_down = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                         ki: KEYBDINPUT { wVk: VK_CONTROL, ..Default::default() },
                     },
                 },
+            ];
+            SendInput(&ctrl_down, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(300)); // Pause after Ctrl down for RDP
+
+            let c_down = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                         ki: KEYBDINPUT { wVk: VK_C, ..Default::default() },
                     },
                 },
+            ];
+            SendInput(&c_down, std::mem::size_of::<INPUT>() as i32);
+
+            let c_up = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                         ki: KEYBDINPUT { wVk: VK_C, dwFlags: KEYEVENTF_KEYUP, ..Default::default() },
                     },
                 },
+            ];
+            SendInput(&c_up, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(100)); // Pause after Ctrl down for RDP
+            let ctrl_up = vec![
                 INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -604,9 +658,9 @@ pub fn is_selection_active(hwnd: isize) -> bool {
                     },
                 },
             ];
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            
+            SendInput(&ctrl_up, std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+
             // 4. Check if clipboard is NOT empty
             match get_clipboard::<String, _>(formats::Unicode) {
                 Ok(content) => !content.is_empty(),
