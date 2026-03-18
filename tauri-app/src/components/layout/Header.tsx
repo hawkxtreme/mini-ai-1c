@@ -1,4 +1,4 @@
-import { Settings, PanelRight, Trash2, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info } from 'lucide-react';
+import { Settings, PanelRight, Trash2, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon } from 'lucide-react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -304,6 +304,13 @@ export function Header({ bslStatus, nodeAvailable, viewMode, onViewModeChange, o
                     title="Clear Chat & Editor"
                 >
                     <Trash2 className="w-4 h-4 text-zinc-400 group-hover:text-red-400 transition-colors" />
+                </button>
+                <button
+                    onClick={() => settings && updateSettings({ ...settings, theme: settings.theme === 'light' ? 'dark' : 'light' })}
+                    className="p-2 hover:bg-[#27272a] rounded-lg transition-colors text-zinc-400 hover:text-zinc-200"
+                    title={settings?.theme === 'light' ? 'Тёмная тема' : 'Светлая тема'}
+                >
+                    {settings?.theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
                 </button>
                 <button
                     onClick={() => onOpenSettings()}

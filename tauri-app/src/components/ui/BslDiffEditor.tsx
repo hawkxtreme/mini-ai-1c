@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { DiffEditor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
+import { useSettings } from '@/contexts/SettingsContext';
 
 interface BslDiffEditorProps {
     original: string;
@@ -22,6 +23,8 @@ export function BslDiffEditor({
     hideBorder = false
 }: BslDiffEditorProps) {
     const editorRef = useRef<any>(null);
+    const { settings } = useSettings();
+    const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
 
     // Normalize line endings to LF to prevent Monaco from highlighting the entire file as changed
     const normalizedOriginal = original ? original.replace(/\r\n/g, '\n') : '';
@@ -33,6 +36,13 @@ export function BslDiffEditor({
             registerBSL(monaco);
         });
     }, []);
+
+    // Sync global Monaco theme when setting changes
+    useEffect(() => {
+        loader.init().then(monaco => {
+            monaco.editor.setTheme(monacoTheme);
+        });
+    }, [monacoTheme]);
 
     const defaultLoading = (
         <div className="bg-[#1e1e1e] p-4 text-zinc-300 text-[13px] font-mono">
@@ -48,7 +58,7 @@ export function BslDiffEditor({
             <DiffEditor
                 height="100%"
                 language="bsl"
-                theme="vs-dark"
+                theme={monacoTheme}
                 original={normalizedOriginal}
                 modified={normalizedModified}
                 onMount={(editor) => {

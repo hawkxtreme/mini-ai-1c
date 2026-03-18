@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import * as api from '../api';
+import { loader } from '@monaco-editor/react';
 
 import { AppSettings } from '../types/settings';
 
@@ -36,6 +37,21 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         loadSettings();
     }, [loadSettings]);
+
+    // Apply theme class to <html> and Monaco editor theme whenever settings change
+    useEffect(() => {
+        const html = document.documentElement;
+        const isLight = settings?.theme === 'light';
+        if (isLight) {
+            html.classList.add('light');
+        } else {
+            html.classList.remove('light');
+        }
+        // Set Monaco global theme
+        loader.init().then(monaco => {
+            monaco.editor.setTheme(isLight ? 'vs' : 'vs-dark');
+        }).catch(() => {/* Monaco not yet loaded, theme prop on Editor handles initial mount */});
+    }, [settings?.theme]);
 
     const value = React.useMemo(() => ({
         settings,

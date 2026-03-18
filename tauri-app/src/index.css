@@ -87,3 +87,146 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background-color: #4f4f4f;
 }
+
+/* ===== LIGHT THEME ===== */
+/* Tailwind v4 uses CSS variables for zinc colors — override them to flip dark→light */
+html.light {
+    /* Flip zinc scale: dark values → light equivalents */
+    --color-zinc-950: oklch(0.985 0 0);
+    --color-zinc-900: oklch(0.967 0.001 286.375);
+    --color-zinc-800: oklch(0.92 0.004 286.32);
+    --color-zinc-700: oklch(0.871 0.006 286.286);
+    --color-zinc-600: oklch(0.705 0.015 286.067);
+    --color-zinc-500: oklch(0.556 0.013 285.938);
+    --color-zinc-400: oklch(0.442 0.017 285.786);
+    --color-zinc-300: oklch(0.37 0.013 285.805);
+    --color-zinc-200: oklch(0.274 0.006 286.618);
+    --color-zinc-100: oklch(0.21 0.006 285);
+    --color-zinc-50: oklch(0.141 0.005 285.823);
+
+    /* HSL semantic vars used by shadcn/tailwind config */
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+
+    /* VSCode Light theme variables */
+    --vscode-editor-background: #ffffff;
+    --vscode-editor-foreground: #000000;
+    --vscode-button-background: #0078d4;
+    --vscode-button-foreground: #ffffff;
+    --vscode-button-hoverBackground: #106ebe;
+    --vscode-dropdown-background: #f3f3f3;
+    --vscode-dropdown-foreground: #616161;
+    --vscode-dropdown-border: #cecece;
+    --vscode-list-activeSelectionBackground: #0060c0;
+    --vscode-list-activeSelectionForeground: #ffffff;
+    --vscode-list-hoverBackground: #e8e8e8;
+    --vscode-input-background: #ffffff;
+    --vscode-input-foreground: #616161;
+    --vscode-input-border: #cecece;
+    --vscode-focusBorder: #0078d4;
+}
+
+/* Override hardcoded hex colors used in components */
+html.light .bg-\[\#09090b\] { background-color: #ffffff !important; }
+html.light .bg-\[\#18181b\] { background-color: #f5f5f5 !important; }
+html.light .bg-\[\#18181b\]\/80 { background-color: rgb(248 248 248 / 0.95) !important; }
+html.light .border-\[\#3f3f46\]\/30 { border-color: rgb(200 200 200 / 0.6) !important; }
+
+/* Soften blue buttons in light theme — less jarring than vivid Tailwind blue-600 */
+html.light .bg-blue-600 { background-color: #0078d4 !important; }
+html.light .hover\:bg-blue-500:hover { background-color: #1184db !important; }
+html.light .hover\:bg-blue-700:hover { background-color: #006cbd !important; }
+html.light .bg-\[\#1b1b1f\] { background-color: #f0f0f0 !important; }
+html.light .bg-\[\#1e1e1e\] { background-color: #f3f3f3 !important; }
+html.light .bg-\[\#1e1e21\] { background-color: #f5f5f5 !important; }
+html.light .bg-\[\#1f1f23\] { background-color: #f0f0f2 !important; }
+html.light .bg-\[\#121214\] { background-color: #f8f8f8 !important; }
+html.light .bg-\[\#27272a\] { background-color: #e4e4e7 !important; }
+html.light .bg-\[\#3c3c3c\] { background-color: #f0f0f0 !important; }
+html.light .bg-\[\#3f3f46\] { background-color: #d4d4d8 !important; }
+html.light .border-\[\#27272a\] { border-color: #d4d4d8 !important; }
+html.light .hover\:bg-\[\#27272a\]:hover { background-color: #e9e9ec !important; }
+html.light .hover\:bg-\[\#323236\]:hover { background-color: #e0e0e7 !important; }
+html.light .bg-\[\#27272a\]\/50 { background-color: rgb(228 228 231 / 0.5) !important; }
+html.light .bg-\[\#09090b\]\/50 { background-color: rgb(255 255 255 / 0.5) !important; }
+
+/* Light scrollbar */
+html.light ::-webkit-scrollbar-thumb { background: #c4c4c4; }
+html.light ::-webkit-scrollbar-thumb:hover { background-color: #a8a8a8; }
+
+/* Light body */
+html.light body {
+    background-color: #ffffff;
+    color: #18181b;
+}
+
+/* Fix red/destructive colors in light theme (better contrast) */
+html.light .bg-red-900\/40 { background-color: rgb(254 226 226 / 0.8) !important; }
+html.light .bg-red-950\/40 { background-color: rgb(254 226 226 / 0.8) !important; }
+html.light .bg-red-800\/60 { background-color: rgb(252 165 165 / 0.6) !important; }
+html.light .text-red-300 { color: #b91c1c !important; }
+html.light .text-red-400 { color: #dc2626 !important; }
+html.light .border-red-800\/50 { border-color: rgb(185 28 28 / 0.4) !important; }
+html.light .border-red-900\/50 { border-color: rgb(185 28 28 / 0.4) !important; }
+
+/* Fix amber/yellow MCP pre-installed card backgrounds in light theme */
+html.light .bg-amber-500\/5, html.light .bg-amber-500\/10 { background-color: rgb(245 158 11 / 0.06) !important; }
+html.light .bg-yellow-500\/5, html.light .bg-yellow-500\/10 { background-color: rgb(234 179 8 / 0.06) !important; }
+html.light .border-amber-500\/20, html.light .border-amber-500\/30 { border-color: rgb(180 120 8 / 0.3) !important; }
+html.light .border-yellow-500\/20, html.light .border-yellow-500\/30 { border-color: rgb(180 120 8 / 0.3) !important; }
+/* Yellow text icons — darken for readability on light background */
+html.light .text-yellow-400 { color: #92400e !important; }
+html.light .text-yellow-500 { color: #78350f !important; }
+html.light .text-amber-300 { color: #92400e !important; }
+html.light .text-amber-500 { color: #78350f !important; }
+/* MCP pre-installed gradient card background override */
+html.light .from-zinc-800\/80 { --tw-gradient-from: #f5f5f0 !important; }
+html.light .to-yellow-900\/10 { --tw-gradient-to: rgb(234 179 8 / 0.04) !important; }
+
+/* Fix green MCP card (1С:Справка LIVE) backgrounds */
+html.light .bg-emerald-500\/10 { background-color: rgb(16 185 129 / 0.1) !important; }
+html.light .border-emerald-500\/20 { border-color: rgb(16 185 129 / 0.3) !important; }
+
+/* Fix muted text that's too light in light theme */
+html.light .text-zinc-500 { color: #52525b !important; }
+html.light .text-zinc-600 { color: #3f3f46 !important; }
+
+/* Override static white text (not on colored backgrounds) */
+html.light .text-white {
+    color: #18181b !important;
+}
+html.light .text-white\/40 {
+    color: rgb(24 24 27 / 0.5) !important;
+}
+html.light .text-white\/60 {
+    color: rgb(24 24 27 / 0.7) !important;
+}
+html.light .text-white\/10 {
+    color: rgb(24 24 27 / 0.15) !important;
+}
+/* Restore white text on colored (non-zinc) backgrounds */
+html.light .bg-blue-600 .text-white,
+html.light .bg-blue-500 .text-white,
+html.light .bg-red-500 .text-white,
+html.light .bg-emerald-500 .text-white,
+html.light [class*="bg-blue"] .text-white,
+html.light [class*="bg-red"] .text-white {
+    color: #ffffff !important;
+}

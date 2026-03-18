@@ -133,6 +133,7 @@ export interface AppSettings {
     code_generation: CodeGenerationSettings;
     slash_commands: SlashCommand[];
     max_agent_iterations?: number | null;
+    theme?: 'light' | 'dark';
 }
 
 export interface BslDiagnosticItem {

@@ -7,6 +7,7 @@ import { Header } from './Header';
 import { Footer } from './Footer';
 import { DiagnosticsView } from './DiagnosticsView';
 import { applyDiffWithDiagnostics, hasDiffBlocks } from '../../utils/diffViewer';
+import { useSettings } from '@/contexts/SettingsContext';
 
 export { type BslDiagnostic, type CodeSidePanelProps } from './types';
 
@@ -27,9 +28,18 @@ export function CodeSidePanel({
 }: CodeSidePanelProps) {
     const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
+    const { settings } = useSettings();
+    const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
     const {
         width, setWidth, isResizing, isExpanded, setIsExpanded, startResizing
     } = useResizing(window.innerWidth > 1200 ? 600 : 500);
+
+    // Sync global Monaco theme when setting changes
+    useEffect(() => {
+        loader.init().then(monaco => {
+            monaco.editor.setTheme(monacoTheme);
+        });
+    }, [monacoTheme]);
 
     // 1. Сброс стейта при полной очистке (Clear Chat)
     useEffect(() => {
@@ -234,7 +244,7 @@ export function CodeSidePanel({
                     <Editor
                         height="100%"
                         language="bsl"
-                        theme="vs-dark"
+                        theme={monacoTheme}
                         value={modifiedCode}
                         onMount={(editor, monaco) => {
                             registerBSL(monaco);
@@ -255,7 +265,7 @@ export function CodeSidePanel({
                     <DiffEditor
                         height="100%"
                         language="bsl"
-                        theme="vs-dark"
+                        theme={monacoTheme}
                         original={(localOriginalCode || modifiedCode).replace(/\r\n/g, '\n')}
                         modified={(previewFrozenCode !== null ? previewFrozenCode : modifiedCode).replace(/\r\n/g, '\n')}
                         onMount={(editor, monaco) => {

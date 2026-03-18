@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { X, Save, Cpu, Monitor, FileCode, Database, Bug, MessageSquare, Terminal } from 'lucide-react';
+import { X, Save, Cpu, Monitor, FileCode, Database, Bug, MessageSquare, Terminal, Sun, Moon } from 'lucide-react';
 
 import { LLMSettings } from './settings/LLMSettings';
 import { MCPSettings } from './settings/MCPSettings';
@@ -32,7 +32,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     }, [isOpen, initialTab]);
 
     const { profiles, activeProfileId, activeProfile, loadProfiles } = useProfiles();
-    const { loadSettings } = useSettings();
+    const { settings: globalSettings, updateSettings, loadSettings } = useSettings();
     const [settings, setSettings] = useState<AppSettings | null>(null);
     const [saving, setSaving] = useState(false);
 
@@ -176,9 +176,22 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                 {/* Header */}
                 <div data-tauri-drag-region className="flex items-center justify-between px-6 sm:px-8 py-3 sm:py-4 border-b border-zinc-800 bg-zinc-900 select-none">
                     <h2 className="text-lg sm:text-xl font-bold text-zinc-100 pointer-events-none">Settings</h2>
-                    <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200">
-                        <X className="w-5 h-5" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            title={globalSettings?.theme === 'light' ? 'Переключить на тёмную тему' : 'Переключить на светлую тему'}
+                            onClick={() => {
+                                if (!globalSettings) return;
+                                const newTheme = globalSettings.theme === 'light' ? 'dark' : 'light';
+                                updateSettings({ ...globalSettings, theme: newTheme });
+                            }}
+                            className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200 pointer-events-auto"
+                        >
+                            {globalSettings?.theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+                        </button>
+                        <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200">
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
                 </div>
 
                 {/* Tabs */}

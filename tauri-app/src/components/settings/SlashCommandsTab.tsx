@@ -151,12 +151,12 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                 <div className="text-[11px] text-zinc-500 truncate">{cmd.name} — {cmd.description}</div>
                             </div>
 
-                            <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                            <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
                                 <div
                                     onClick={() => updateCommand(index, { is_enabled: !cmd.is_enabled })}
-                                    className={`w-8 h-4 rounded-full relative transition-colors duration-200 flex items-center cursor-pointer ${cmd.is_enabled ? 'bg-blue-600' : 'bg-zinc-700'}`}
+                                    className={`w-8 h-4 rounded-full relative transition-colors duration-200 cursor-pointer ${cmd.is_enabled ? 'bg-blue-600' : 'bg-[#71717a]'}`}
                                 >
-                                    <div className={`absolute w-3 h-3 bg-white rounded-full transition-all duration-200 shadow-sm ${cmd.is_enabled ? 'left-[17px]' : 'left-0.5'}`} />
+                                    <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all duration-200 shadow-sm ${cmd.is_enabled ? 'left-[15px]' : 'left-0.5'}`} />
                                 </div>
                                 {!cmd.is_system && (
                                     <button

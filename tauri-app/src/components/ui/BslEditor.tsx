@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Editor, loader } from '@monaco-editor/react';
 import { registerBSL } from '@/lib/monaco-bsl';
+import { useSettings } from '@/contexts/SettingsContext';
 
 interface BslEditorProps {
     code: string;
@@ -13,6 +14,8 @@ interface BslEditorProps {
 
 export function BslEditor({ code, height = '200px', readOnly = true, loading, className, hideBorder = false }: BslEditorProps) {
     const editorRef = useRef<any>(null);
+    const { settings } = useSettings();
+    const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
 
     // Register BSL language once
     useEffect(() => {
@@ -20,6 +23,13 @@ export function BslEditor({ code, height = '200px', readOnly = true, loading, cl
             registerBSL(monaco);
         });
     }, []);
+
+    // Sync global Monaco theme when setting changes
+    useEffect(() => {
+        loader.init().then(monaco => {
+            monaco.editor.setTheme(monacoTheme);
+        });
+    }, [monacoTheme]);
 
     const defaultLoading = (
         <pre className="bg-[#1e1e1e] p-4 text-zinc-300 text-[13px] font-mono whitespace-pre opacity-50">
@@ -35,7 +45,7 @@ export function BslEditor({ code, height = '200px', readOnly = true, loading, cl
             <Editor
                 height="100%"
                 language="bsl"
-                theme="vs-dark"
+                theme={monacoTheme}
                 value={code}
                 loading={loading || defaultLoading}
                 onMount={(editor) => {

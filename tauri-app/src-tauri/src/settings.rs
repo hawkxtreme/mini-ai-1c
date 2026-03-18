@@ -241,6 +241,10 @@ pub struct AppSettings {
     /// Максимальное количество итераций агента
     #[serde(default = "default_max_iterations")]
     pub max_agent_iterations: Option<u32>,
+
+    /// Тема оформления (light / dark)
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
