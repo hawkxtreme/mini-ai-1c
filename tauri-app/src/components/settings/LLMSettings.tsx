@@ -72,8 +72,22 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 }
 
                 // Auto-fetch models for CLI providers since the Fetch button is hidden
+                // NOTE: handleFetchModels() reads editForm which is stale here (async state update),
+                // so we invoke directly with the freshly found profile `p` to avoid race condition.
                 if (PROVIDERS.find(prov => prov.value === p.provider)?.type === 'cli') {
-                    handleFetchModels();
+                    setLoadingModels(true);
+                    invoke<any[]>('fetch_models_from_provider', {
+                        providerId: p.provider,
+                        baseUrl: p.base_url || PROVIDERS.find(prov => prov.value === p.provider)?.defaultUrl || '',
+                        apiKey: ''
+                    }).then(res => {
+                        const sorted = [...res].sort((a, b) => a.id.localeCompare(b.id));
+                        setModelList(sorted);
+                    }).catch(e => {
+                        console.error('[LLMSettings] Failed to auto-fetch CLI models:', e);
+                    }).finally(() => {
+                        setLoadingModels(false);
+                    });
                 }
             }
         }
