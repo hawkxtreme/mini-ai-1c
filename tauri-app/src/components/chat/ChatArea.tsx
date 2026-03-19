@@ -124,7 +124,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
+    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
@@ -529,11 +529,17 @@ export function ChatArea({
                 handleSendMessage(text);
             },
             injectAssistantMessage: (content: string) => {
-                console.log("[TEST] injectAssistantMessage called");
+                console.log("[TEST] injectAssistantMessage called, length:", content.length);
+                injectMessage({
+                    role: 'assistant',
+                    content,
+                    parts: [{ type: 'text', content }],
+                    timestamp: Date.now(),
+                });
             }
         };
         return () => { delete (window as any).__MINI_AI_TEST__; };
-    }, [handleSendMessage, onCodeLoaded]);
+    }, [handleSendMessage, onCodeLoaded, injectMessage]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
         const value = e.target.value;
@@ -814,7 +820,15 @@ export function ChatArea({
                                                             // text
                                                             const currentOriginalCode = contextCode || modifiedCode || "";
                                                             const cleanedContent = cleanDiffArtifacts(part.content || '', currentOriginalCode);
-                                                            if (cleanedContent.trim().length === 0) return null;
+                                                            if (cleanedContent.trim().length === 0) {
+                                                                if (!hasDiffBlocks(part.content || '')) return null;
+                                                                return (
+                                                                    <div key={partIdx} className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
+                                                                        <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                        <span>Изменения кода</span>
+                                                                    </div>
+                                                                );
+                                                            }
 
                                                             return (
                                                                 <div key={partIdx} className="min-w-0">
@@ -878,7 +892,16 @@ export function ChatArea({
                                                         const cleanedContent = cleanDiffArtifacts(msg.content || '', currentOriginalCode);
                                                         const hasVisibleContent = cleanedContent.trim().length > 0;
 
-                                                        if (msg.role !== 'assistant' || !hasVisibleContent) return null;
+                                                        if (msg.role !== 'assistant') return null;
+                                                        if (!hasVisibleContent) {
+                                                            if (!hasDiffBlocks(msg.content || '')) return null;
+                                                            return (
+                                                                <div className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
+                                                                    <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                    <span>Изменения кода</span>
+                                                                </div>
+                                                            );
+                                                        }
 
                                                         return (
                                                             <div className="min-w-0">
