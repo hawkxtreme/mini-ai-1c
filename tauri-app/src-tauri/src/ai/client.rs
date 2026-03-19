@@ -201,8 +201,14 @@ pub async fn stream_chat_completion(
     }
     crate::app_log!("[AI] Sending request to {} (Model: {})", url, request_body.model);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+    // Local providers (Ollama, LMStudio) have no timeout — large contexts with thinking models
+    // can take several minutes. Cloud APIs keep 120s to detect hanging connections.
+    let is_local = matches!(profile.provider, LLMProvider::Ollama | LLMProvider::LMStudio);
+    let mut client_builder = reqwest::Client::builder();
+    if !is_local {
+        client_builder = client_builder.timeout(std::time::Duration::from_secs(120));
+    }
+    let client = client_builder
         .build()
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
