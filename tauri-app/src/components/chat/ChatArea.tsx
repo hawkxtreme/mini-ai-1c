@@ -396,7 +396,10 @@ export function ChatArea({
 
         // Показываем diff-превью только ПОСЛЕ завершения стриминга
         if (!isLoading) {
-            if (onActiveDiffChange) {
+            // Открываем боковую панель только если есть базовый код для сравнения.
+            // Если код не был загружен из Конфигуратора — панель не открываем.
+            const hasBaseCode = !!(contextCode || modifiedCode || originalCode);
+            if (hasBaseCode && onActiveDiffChange) {
                 onActiveDiffChange(lastMsg.content);
             }
             // Фиксируем как "показанное"
