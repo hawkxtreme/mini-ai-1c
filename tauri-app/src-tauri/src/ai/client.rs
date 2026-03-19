@@ -59,7 +59,17 @@ pub async fn stream_chat_completion(
         (access_token, format!("{}/chat/completions", base))
     } else {
         let api_key = profile.get_api_key();
-        let base_url = profile.get_base_url();
+        let raw_url = profile.get_base_url();
+        // Normalize: Ollama and similar OpenAI-compatible servers require /v1/chat/completions.
+        // If the user entered a bare URL without /v1 (e.g. http://host:11434), add it automatically.
+        let base_url = {
+            let trimmed = raw_url.trim_end_matches('/');
+            if matches!(profile.provider, LLMProvider::Ollama) && !trimmed.ends_with("/v1") {
+                format!("{}/v1", trimmed)
+            } else {
+                trimmed.to_string()
+            }
+        };
         (api_key, format!("{}/chat/completions", base_url))
     };
     
@@ -648,7 +658,16 @@ pub fn extract_bsl_code(text: &str) -> Vec<String> {
 /// Fetch models from provider
 pub async fn fetch_models(profile: &crate::llm_profiles::LLMProfile) -> Result<Vec<String>, String> {
     let api_key = profile.get_api_key();
-    let base_url = profile.get_base_url();
+    let raw_url = profile.get_base_url();
+    // Normalize Ollama URL: auto-add /v1 if missing
+    let base_url = {
+        let trimmed = raw_url.trim_end_matches('/');
+        if matches!(profile.provider, LLMProvider::Ollama) && !trimmed.ends_with("/v1") && !trimmed.ends_with("/chat/completions") {
+            format!("{}/v1", trimmed)
+        } else {
+            trimmed.to_string()
+        }
+    };
     let url = if base_url.ends_with("/chat/completions") {
         base_url.replace("/chat/completions", "/models")
     } else {
