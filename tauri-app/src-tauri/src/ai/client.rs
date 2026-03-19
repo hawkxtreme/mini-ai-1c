@@ -64,7 +64,7 @@ pub async fn stream_chat_completion(
         // If the user entered a bare URL without /v1 (e.g. http://host:11434), add it automatically.
         let base_url = {
             let trimmed = raw_url.trim_end_matches('/');
-            if matches!(profile.provider, LLMProvider::Ollama) && !trimmed.ends_with("/v1") {
+            if matches!(profile.provider, LLMProvider::Ollama | LLMProvider::LMStudio) && !trimmed.ends_with("/v1") {
                 format!("{}/v1", trimmed)
             } else {
                 trimmed.to_string()
@@ -90,6 +90,9 @@ pub async fn stream_chat_completion(
     
     let api_max_tokens = if matches!(profile.provider, LLMProvider::QwenCli) {
         65536u32
+    } else if matches!(profile.provider, LLMProvider::LMStudio) {
+        // Qwen3 thinking models need large token budget to finish thinking before producing content
+        profile.max_tokens.max(8192)
     } else if profile.max_tokens > 16384 {
         4096
     } else {
@@ -132,7 +135,7 @@ pub async fn stream_chat_completion(
         temperature: effective_temperature,
         max_tokens: api_max_tokens,
         tools: tools_opt,
-        enable_thinking: if thinking_enabled { Some(true) } else { None },
+        enable_thinking: if thinking_enabled { Some(true) } else if matches!(profile.provider, LLMProvider::LMStudio) { Some(false) } else { None },
         thinking_budget_tokens: dynamic_thinking_budget,
     };
     
@@ -662,7 +665,7 @@ pub async fn fetch_models(profile: &crate::llm_profiles::LLMProfile) -> Result<V
     // Normalize Ollama URL: auto-add /v1 if missing
     let base_url = {
         let trimmed = raw_url.trim_end_matches('/');
-        if matches!(profile.provider, LLMProvider::Ollama) && !trimmed.ends_with("/v1") && !trimmed.ends_with("/chat/completions") {
+        if matches!(profile.provider, LLMProvider::Ollama | LLMProvider::LMStudio) && !trimmed.ends_with("/v1") && !trimmed.ends_with("/chat/completions") {
             format!("{}/v1", trimmed)
         } else {
             trimmed.to_string()
