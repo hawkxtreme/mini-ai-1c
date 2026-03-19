@@ -225,7 +225,8 @@ export function MainLayout() {
                             modifiedCode={modifiedCode}
                             onApplyCode={useCallback((code: string) => {
                                 setModifiedCode(code);
-                                setViewMode(prev => prev === 'assistant' ? 'split' : prev); // Возвращаем авто-открытие
+                                setActiveDiffContent(''); // Очищаем стейл-дифф при явном применении блока кода
+                                setViewMode(prev => prev === 'assistant' ? 'split' : prev);
                             }, [])}
                             onCommitCode={handleCommitCode}
                             onCodeLoaded={handleCodeLoaded}
