@@ -53,7 +53,7 @@ interface ChatContextType {
     editAndRerun: (messageIndex: number, newContent: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => Promise<void>;
     addSystemMessage: (content: string, variant?: 'warning' | 'info') => void;
     removeSystemMessage: (content: string) => void;
-    injectMessage: (message: ChatMessage) => void;
+    injectMessage: (message: Omit<ChatMessage, 'id'>) => void;
     removeQueuedMessage: (id: string) => void;
     updateQueuedMessage: (id: string, content: string) => void;
     clearQueue: () => void;
@@ -543,8 +543,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setMessages(prev => prev.filter(m => !(m.role === 'system' && m.content === content)));
     }, []);
 
-    const injectMessage = useCallback((message: ChatMessage) => {
-        setMessages(prev => [...prev, { id: generateId(), ...message }]);
+    const injectMessage = useCallback((message: Omit<ChatMessage, 'id'>) => {
+        setMessages(prev => [...prev, { ...message, id: generateId() }]);
     }, []);
 
     // Edit message and rerun from that point
