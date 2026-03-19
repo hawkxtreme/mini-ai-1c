@@ -343,10 +343,13 @@ unsafe extern "system" fn enum_windows_callback(
                     .to_lowercase();
 
                 // Allow 1cv8 (Client/Configurator), 1cv8c (Thin Client), 1cv8s (Thick Client)
-                // But usually Configurator runs as 1cv8.exe
+                // Also allow educational version variants: 1cv8t.exe, 1cv8ct.exe, 1cv8st.exe
                 let is_1c = process_path.ends_with("1cv8.exe") ||
                             process_path.ends_with("1cv8c.exe") ||
-                            process_path.ends_with("1cv8s.exe");
+                            process_path.ends_with("1cv8s.exe") ||
+                            process_path.ends_with("1cv8t.exe") ||
+                            process_path.ends_with("1cv8ct.exe") ||
+                            process_path.ends_with("1cv8st.exe");
 
                 if !is_1c {
                     return windows::Win32::Foundation::BOOL::from(true);
