@@ -311,15 +311,4 @@ npm run app:build
 
 ---
 
-## 📋 Changelog
-
-### v1.1.16
-
-- [#50](https://github.com/hawkxtreme/mini-ai-1c/issues/50) **LM Studio (Local)** — добавлен как провайдер ИИ. URL по умолчанию `http://localhost:1234/v1`, авто-загрузка списка моделей, корректная работа с Qwen3 thinking-моделями.
-- [#52](https://github.com/hawkxtreme/mini-ai-1c/issues/52) Исправлен **404 для Ollama** при отсутствии `/v1` в Base URL — суффикс добавляется автоматически.
-- [#51](https://github.com/hawkxtreme/mini-ai-1c/issues/51) Исправлен **race condition** при переключении на Qwen Code (CLI) в настройках LLM.
-- [#49](https://github.com/hawkxtreme/mini-ai-1c/issues/49) Добавлена поддержка **учебных версий 1С** (`1cv8t.exe`, `1cv8ct.exe`, `1cv8st.exe`) для интеграции с Конфигуратором.
-
----
-
 *Создано с ❤️ для сообщества 1С · [Telegram](https://t.me/hawkxtreme)*
