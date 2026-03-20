@@ -625,6 +625,25 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 </div>
                             </div>
 
+                            {/* Disable streaming toggle — Ollama/LMStudio */}
+                            {(editForm.provider === 'Ollama' || editForm.provider === 'LMStudio') && (
+                                <div className="flex items-center justify-between pt-3 px-1">
+                                    <div>
+                                        <span className="text-xs text-zinc-400 font-medium">Отключить потоковый вывод</span>
+                                        <p className="text-[10px] text-zinc-600 mt-0.5">
+                                            Ответ появится целиком после генерации — полезно на медленных ПК
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setEditForm({ ...editForm, disable_streaming: !editForm.disable_streaming })}
+                                        className={`relative w-9 h-5 rounded-full transition-colors focus:outline-none ${editForm.disable_streaming ? 'bg-blue-500' : 'bg-zinc-700'}`}
+                                    >
+                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${editForm.disable_streaming ? 'translate-x-4' : 'translate-x-0'}`} />
+                                    </button>
+                                </div>
+                            )}
+
                             {/* Thinking mode toggle — Qwen CLI only */}
                             {editForm.provider === 'QwenCli' && (
                                 <div className="flex items-center justify-between pt-3 px-1">
