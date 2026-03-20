@@ -644,6 +644,30 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 </div>
                             )}
 
+                            {/* Stream timeout — Ollama/LMStudio */}
+                            {(editForm.provider === 'Ollama' || editForm.provider === 'LMStudio') && (
+                                <div className="flex items-center justify-between pt-3 px-1">
+                                    <div>
+                                        <span className="text-xs text-zinc-400 font-medium">Таймаут стрима (сек)</span>
+                                        <p className="text-[10px] text-zinc-600 mt-0.5">
+                                            Макс. пауза между чанками. По умолч.: 300с для локальных моделей
+                                        </p>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        min={10}
+                                        max={3600}
+                                        placeholder="300"
+                                        value={editForm.stream_timeout_secs ?? ''}
+                                        onChange={e => {
+                                            const v = parseInt(e.target.value);
+                                            setEditForm({ ...editForm, stream_timeout_secs: isNaN(v) ? undefined : v });
+                                        }}
+                                        className="w-20 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 text-right focus:outline-none focus:border-zinc-500"
+                                    />
+                                </div>
+                            )}
+
                             {/* Thinking mode toggle — Qwen CLI only */}
                             {editForm.provider === 'QwenCli' && (
                                 <div className="flex items-center justify-between pt-3 px-1">

@@ -13,6 +13,7 @@ export interface LLMProfile {
     context_window_override?: number;
     enable_thinking?: boolean;
     disable_streaming?: boolean;
+    stream_timeout_secs?: number;
     provider_subtype?: 'cli';
     cli_info?: CliProviderInfo;
 }

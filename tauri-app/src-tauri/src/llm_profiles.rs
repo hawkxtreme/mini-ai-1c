@@ -54,6 +54,8 @@ pub struct LLMProfile {
     pub enable_thinking: Option<bool>,
     #[serde(default)]
     pub disable_streaming: Option<bool>,
+    #[serde(default)]
+    pub stream_timeout_secs: Option<u32>,
 }
 
 impl LLMProfile {
@@ -71,6 +73,7 @@ impl LLMProfile {
             context_window_override: None,
             enable_thinking: None,
             disable_streaming: None,
+            stream_timeout_secs: None,
         }
     }
 

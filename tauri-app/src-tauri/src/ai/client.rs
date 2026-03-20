@@ -322,11 +322,14 @@ pub async fn stream_chat_completion(
     let start_gen_time = std::time::Instant::now();
     
     loop {
+        let is_local = matches!(profile.provider, LLMProvider::Ollama | LLMProvider::LMStudio);
+        let default_timeout = if is_local { 300u32 } else { 30u32 };
+        let chunk_timeout = profile.stream_timeout_secs.unwrap_or(default_timeout);
         let chunk_result = match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(chunk_timeout as u64),
             stream.next()
         ).await {
-            Err(_) => return Err("Stream timeout: no data from API for 30s".to_string()),
+            Err(_) => return Err(format!("Stream timeout: no data from API for {}s", chunk_timeout)),
             Ok(None) => break,
             Ok(Some(r)) => r,
         };
