@@ -40,17 +40,29 @@ pub fn check_selection_state(hwnd: isize) -> bool {
     }
 }
 
+/// Restore focus to the main mini-ai-1c window
+#[cfg(windows)]
+fn restore_focus_to_app(app_handle: &AppHandle) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.set_focus();
+        crate::app_log!("[1C] Focus restored to mini-ai-1c");
+    }
+}
+
 /// Get code from 1C Configurator window
 #[tauri::command]
-pub fn get_code_from_configurator(hwnd: isize, use_select_all: Option<bool>) -> Result<String, String> {
+pub fn get_code_from_configurator(app_handle: AppHandle, hwnd: isize, use_select_all: Option<bool>) -> Result<String, String> {
     crate::app_log!("[1C] get_code (HWND: {}, select_all: {:?})", hwnd, use_select_all);
     #[cfg(windows)]
     {
         use crate::configurator;
-        configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false))
+        let result = configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false));
+        restore_focus_to_app(&app_handle);
+        result
     }
     #[cfg(not(windows))]
     {
+        let _ = app_handle;
         let _ = hwnd;
         let _ = use_select_all;
         Err("Configurator integration is only available on Windows".to_string())
@@ -59,14 +71,17 @@ pub fn get_code_from_configurator(hwnd: isize, use_select_all: Option<bool>) -> 
 
 /// Get active fragment from 1C Configurator window
 #[tauri::command]
-pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
+pub fn get_active_fragment_cmd(app_handle: AppHandle, hwnd: isize) -> Result<String, String> {
     #[cfg(windows)]
     {
         use crate::configurator;
-        configurator::get_active_fragment(hwnd)
+        let result = configurator::get_active_fragment(hwnd);
+        restore_focus_to_app(&app_handle);
+        result
     }
     #[cfg(not(windows))]
     {
+        let _ = app_handle;
         let _ = hwnd;
         Err("Configurator integration is only available on Windows".to_string())
     }
