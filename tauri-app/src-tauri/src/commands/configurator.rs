@@ -40,33 +40,55 @@ pub fn check_selection_state(hwnd: isize) -> bool {
     }
 }
 
-/// Get code from 1C Configurator window
+/// Get code from 1C Configurator window and restore focus to mini-ai-1c
 #[tauri::command]
-pub fn get_code_from_configurator(hwnd: isize, use_select_all: Option<bool>) -> Result<String, String> {
+pub fn get_code_from_configurator(app_handle: AppHandle, hwnd: isize, use_select_all: Option<bool>) -> Result<String, String> {
     crate::app_log!("[1C] get_code (HWND: {}, select_all: {:?})", hwnd, use_select_all);
     #[cfg(windows)]
     {
         use crate::configurator;
-        configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false))
+        let result = configurator::get_selected_code(hwnd, use_select_all.unwrap_or(false));
+        
+        // Restore focus to mini-ai-1c window after getting code
+        if result.is_ok() {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.set_focus();
+                crate::app_log!("[1C] Focus restored to mini-ai-1c");
+            }
+        }
+        
+        result
     }
     #[cfg(not(windows))]
     {
+        let _ = app_handle;
         let _ = hwnd;
         let _ = use_select_all;
         Err("Configurator integration is only available on Windows".to_string())
     }
 }
 
-/// Get active fragment from 1C Configurator window
+/// Get active fragment from 1C Configurator window and restore focus to mini-ai-1c
 #[tauri::command]
-pub fn get_active_fragment_cmd(hwnd: isize) -> Result<String, String> {
+pub fn get_active_fragment_cmd(app_handle: AppHandle, hwnd: isize) -> Result<String, String> {
     #[cfg(windows)]
     {
         use crate::configurator;
-        configurator::get_active_fragment(hwnd)
+        let result = configurator::get_active_fragment(hwnd);
+        
+        // Restore focus to mini-ai-1c window after getting fragment
+        if result.is_ok() {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.set_focus();
+                crate::app_log!("[1C] Focus restored to mini-ai-1c");
+            }
+        }
+        
+        result
     }
     #[cfg(not(windows))]
     {
+        let _ = app_handle;
         let _ = hwnd;
         Err("Configurator integration is only available on Windows".to_string())
     }
