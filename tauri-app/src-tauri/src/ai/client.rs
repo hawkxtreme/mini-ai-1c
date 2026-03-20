@@ -128,10 +128,12 @@ pub async fn stream_chat_completion(
         None
     };
 
+    let use_stream = !profile.disable_streaming.unwrap_or(false);
+
     let request_body = ChatRequest {
         model: profile.model.clone(),
         messages: api_messages,
-        stream: true,
+        stream: use_stream,
         temperature: effective_temperature,
         max_tokens: api_max_tokens,
         tools: tools_opt,
@@ -276,6 +278,34 @@ pub async fn stream_chat_completion(
             let used = limit.saturating_sub(remaining);
             let _ = crate::llm::cli_providers::qwen::QwenCliProvider::save_usage(&profile.id, used, limit, reset);
         }
+    }
+
+    // === Non-streaming path (disable_streaming = true) ===
+    if !use_stream {
+        crate::app_log!("[AI] Non-streaming mode: waiting for full response...");
+        let body = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let resp: NonStreamResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("Failed to parse non-stream response: {} body={}", e, &body[..body.len().min(200)]))?;
+        let choice = resp.choices.into_iter().next().ok_or("Empty response from API")?;
+        let content = choice.message.content.unwrap_or_default();
+        let tool_calls = choice.message.tool_calls.unwrap_or_default();
+        if !content.is_empty() {
+            let _ = app_handle.emit("chat-status", "Выполнение...");
+            let _ = app_handle.emit("chat-chunk", content.clone());
+        }
+        for (idx, tc) in tool_calls.iter().enumerate() {
+            let _ = app_handle.emit("tool-call-started", serde_json::json!({
+                "index": idx, "id": tc.id, "name": tc.function.name
+            }));
+        }
+        crate::app_log!("[AI][RESP] non-stream content_chars={} tool_calls={}", content.len(), tool_calls.len());
+        return Ok(ApiMessage {
+            role: "assistant".to_string(),
+            content: if content.is_empty() { None } else { Some(content) },
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_call_id: None,
+            name: None,
+        });
     }
 
     let mut stream = response.bytes_stream();

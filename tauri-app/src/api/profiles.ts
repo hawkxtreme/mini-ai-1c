@@ -12,6 +12,7 @@ export interface LLMProfile {
     temperature: number;
     context_window_override?: number;
     enable_thinking?: boolean;
+    disable_streaming?: boolean;
     provider_subtype?: 'cli';
     cli_info?: CliProviderInfo;
 }

@@ -95,6 +95,23 @@ pub struct ToolCallFunctionDelta {
     pub arguments: Option<String>,
 }
 
+/// Non-streaming response from OpenAI-compatible API (stream: false)
+#[derive(Debug, Deserialize)]
+pub struct NonStreamResponse {
+    pub choices: Vec<NonStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NonStreamChoice {
+    pub message: NonStreamMessage,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NonStreamMessage {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
 /// System prompt for 1C assistant
 /// Extended tool info for internal prompt generation
 #[derive(Debug, Clone)]

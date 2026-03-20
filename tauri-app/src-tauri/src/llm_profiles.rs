@@ -52,6 +52,8 @@ pub struct LLMProfile {
     pub context_window_override: Option<u32>,
     #[serde(default)]
     pub enable_thinking: Option<bool>,
+    #[serde(default)]
+    pub disable_streaming: Option<bool>,
 }
 
 impl LLMProfile {
@@ -68,6 +70,7 @@ impl LLMProfile {
             temperature: 0.7,
             context_window_override: None,
             enable_thinking: None,
+            disable_streaming: None,
         }
     }
 
