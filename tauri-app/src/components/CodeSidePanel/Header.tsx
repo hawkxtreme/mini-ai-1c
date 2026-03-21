@@ -1,4 +1,5 @@
 import { X, AlertTriangle, AlertCircle, FileCode, ArrowLeftRight, ChevronUp, ChevronDown, Trash2, Maximize2, Minimize2 } from 'lucide-react';
+import { useSettings } from '@/contexts/SettingsContext';
 
 interface HeaderProps {
     viewMode: 'editor' | 'diff';
@@ -41,24 +42,51 @@ export function Header({
     onDiffRejected,
     foldAll
 }: HeaderProps) {
+    const { settings } = useSettings();
+    const isLightTheme = settings?.theme === 'light';
+
+    const shellClass = isLightTheme
+        ? 'border-[#d4d4d8] bg-[#f4f4f5]'
+        : 'border-[#27272a] bg-[#18181b]';
+    const badgeClass = isLightTheme
+        ? 'bg-[#e4e4e7] border-[#d4d4d8]'
+        : 'bg-[#27272a] border-zinc-700';
+    const toggleShellClass = isLightTheme ? 'bg-[#e4e4e7]' : 'bg-[#27272a]';
+    const activeTabClass = isLightTheme ? 'bg-white text-[#18181b] shadow-sm' : 'bg-[#3f3f46] text-white shadow-sm';
+    const inactiveTabClass = isLightTheme
+        ? 'text-[#52525b] hover:text-[#18181b] hover:bg-white/80'
+        : 'text-zinc-500 hover:text-zinc-300';
+    const diffShellClass = isLightTheme ? 'bg-[#e4e4e7]' : 'bg-[#27272a]/50';
+    const diffDividerClass = isLightTheme ? 'border-zinc-300' : 'border-zinc-700/50';
+    const subtleButtonClass = isLightTheme
+        ? 'text-[#52525b] hover:text-[#18181b] hover:bg-[#d4d4d8]'
+        : 'text-zinc-400 hover:text-white hover:bg-zinc-800';
+    const toolbarIconClass = isLightTheme ? 'text-[#52525b] hover:text-[#18181b]' : 'text-zinc-500 hover:text-zinc-300';
+    const rejectClass = isLightTheme
+        ? 'text-[#52525b] hover:text-[#dc2626] hover:bg-[#d4d4d8]'
+        : 'text-zinc-400 hover:text-red-400 hover:bg-zinc-800';
+    const validatingClass = isLightTheme ? 'bg-[#e4e4e7] text-[#52525b]' : 'bg-[#27272a]/50 text-zinc-500';
+    const diffCounterClass = isLightTheme ? 'text-[#52525b]' : 'text-zinc-500';
+    const errorBadgeTextClass = isLightTheme ? 'text-[#dc2626]' : 'text-red-400';
+    const warningBadgeTextClass = isLightTheme ? 'text-[#b45309]' : 'text-yellow-500';
+
     return (
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[#27272a] bg-[#18181b]">
+        <div className={`flex items-center justify-between px-4 py-3 border-b ${shellClass}`}>
             <div className="flex items-center gap-2">
-                {/* Validation Summary or Loader */}
                 {isValidating ? (
-                    <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-[#27272a]/50 text-zinc-500 text-[10px] animate-pulse">
+                    <div className={`flex items-center gap-2 px-2 py-0.5 rounded text-[10px] animate-pulse ${validatingClass}`}>
                         <span>Validating...</span>
                     </div>
                 ) : (errorCount > 0 || warningCount > 0) ? (
-                    <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-[#27272a] border border-zinc-700 flex-shrink-0">
+                    <div className={`flex items-center gap-2 px-2 py-0.5 rounded border flex-shrink-0 ${badgeClass}`}>
                         {errorCount > 0 && (
-                            <div className="flex items-center gap-1 text-[10px] text-red-400 font-bold">
+                            <div className={`flex items-center gap-1 text-[10px] font-bold ${errorBadgeTextClass}`}>
                                 <AlertCircle className="w-3 h-3" />
                                 <span>{errorCount}</span>
                             </div>
                         )}
                         {warningCount > 0 && (
-                            <div className="flex items-center gap-1 text-[10px] text-yellow-500 font-medium">
+                            <div className={`flex items-center gap-1 text-[10px] font-medium ${warningBadgeTextClass}`}>
                                 <AlertTriangle className="w-3 h-3" />
                                 <span>{warningCount}</span>
                             </div>
@@ -66,10 +94,12 @@ export function Header({
                     </div>
                 ) : null}
 
-                <div className="flex bg-[#27272a] rounded-lg p-0.5 flex-shrink-0">
+                <div className={`flex rounded-lg p-0.5 flex-shrink-0 ${toggleShellClass}`}>
                     <button
                         onClick={() => setViewMode('editor')}
-                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${viewMode === 'editor' ? 'bg-[#3f3f46] text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${
+                            viewMode === 'editor' ? activeTabClass : inactiveTabClass
+                        }`}
                         title="Standard Editor"
                     >
                         <FileCode className="w-3 h-3" />
@@ -77,7 +107,9 @@ export function Header({
                     </button>
                     <button
                         onClick={() => setViewMode('diff')}
-                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${viewMode === 'diff' ? 'bg-[#3f3f46] text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${
+                            viewMode === 'diff' ? activeTabClass : inactiveTabClass
+                        }`}
                         title="Diff View"
                     >
                         <ArrowLeftRight className="w-3 h-3" />
@@ -86,21 +118,21 @@ export function Header({
                 </div>
 
                 {viewMode === 'diff' && diffChanges.length > 0 && (
-                    <div className="flex bg-[#27272a]/50 rounded-lg p-0.5 ml-2 flex-shrink-0 animate-in fade-in items-center">
-                        <div className="flex items-center gap-0.5 mr-1 border-r border-zinc-700/50 pr-1">
+                    <div className={`flex rounded-lg p-0.5 ml-2 flex-shrink-0 animate-in fade-in items-center ${diffShellClass}`}>
+                        <div className={`flex items-center gap-0.5 mr-1 border-r pr-1 ${diffDividerClass}`}>
                             <button
                                 onClick={prevDiff}
-                                className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                                className={`p-1 rounded transition-colors ${subtleButtonClass}`}
                                 title="К предыдущему изменению"
                             >
                                 <ChevronUp className="w-3 h-3" />
                             </button>
-                            <span className="text-[9px] text-zinc-500 font-bold min-w-[32px] text-center tabular-nums">
+                            <span className={`text-[9px] font-bold min-w-[32px] text-center tabular-nums ${diffCounterClass}`}>
                                 {currentDiffIndex + 1} / {diffChanges.length}
                             </span>
                             <button
                                 onClick={nextDiff}
-                                className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors"
+                                className={`p-1 rounded transition-colors ${subtleButtonClass}`}
                                 title="К следующему изменению"
                             >
                                 <ChevronDown className="w-3 h-3" />
@@ -115,8 +147,8 @@ export function Header({
                                 if (onDiffRejected) onDiffRejected();
                                 if (onActiveDiffChange) onActiveDiffChange('');
                             }}
-                            className="px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 text-zinc-400 hover:text-red-400 hover:bg-zinc-800"
-                            title="Отменить непринятые (вернуться к оригиналу)"
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${rejectClass}`}
+                            title="Отменить непринятые изменения"
                         >
                             <Trash2 className="w-3 h-3" />
                             <span>Сбросить непринятые</span>
@@ -124,10 +156,11 @@ export function Header({
                     </div>
                 )}
             </div>
+
             <div className="flex items-center gap-1">
                 <button
                     onClick={foldAll}
-                    className="text-zinc-500 hover:text-zinc-300 transition-colors p-1 flex items-center justify-center"
+                    className={`transition-colors p-1 flex items-center justify-center ${toolbarIconClass}`}
                     title="Fold All"
                 >
                     <ChevronUp className="w-4 h-4" />
@@ -135,15 +168,15 @@ export function Header({
                 {!isFullWidth && (
                     <button
                         onClick={() => setIsExpanded(!isExpanded)}
-                        className="text-zinc-500 hover:text-zinc-300 transition-colors p-1 flex items-center justify-center"
-                        title={isExpanded ? "Collapse Panel" : "Expand Panel"}
+                        className={`transition-colors p-1 flex items-center justify-center ${toolbarIconClass}`}
+                        title={isExpanded ? 'Collapse Panel' : 'Expand Panel'}
                     >
                         {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
                     </button>
                 )}
                 <button
                     onClick={onClose}
-                    className="text-zinc-500 hover:text-zinc-300 transition-colors p-1 flex items-center justify-center ml-1"
+                    className={`transition-colors p-1 flex items-center justify-center ml-1 ${toolbarIconClass}`}
                     title="Close Panel"
                 >
                     <X className="w-4 h-4" />

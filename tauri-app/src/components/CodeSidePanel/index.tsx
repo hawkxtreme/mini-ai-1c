@@ -30,9 +30,99 @@ export function CodeSidePanel({
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
     const { settings } = useSettings();
     const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
+    const isLightTheme = settings?.theme === 'light';
+    const sideResizeGripClass = isLightTheme ? 'bg-zinc-400 group-hover:bg-blue-500' : 'bg-zinc-700 group-hover:bg-blue-400';
+    const inlineToolbarClass = isLightTheme
+        ? 'flex items-center gap-1 bg-white/95 backdrop-blur-sm border border-[#d4d4d8] rounded-md shadow-sm p-0 pointer-events-auto leading-none'
+        : 'flex items-center gap-1 bg-[#18181b]/80 backdrop-blur-sm border border-[#3f3f46]/30 rounded-md shadow-sm p-0 pointer-events-auto leading-none';
+    const inlineRevertButtonClass = isLightTheme
+        ? 'px-1 py-0.5 text-[9px] font-bold text-zinc-600 hover:text-red-600 hover:bg-red-500/10 rounded-sm transition-all active:scale-95'
+        : 'px-1 py-0.5 text-[9px] font-bold text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-sm transition-all active:scale-95';
+    const inlineAcceptButtonClass = isLightTheme
+        ? 'px-1 py-0.5 text-[9px] font-bold text-emerald-600 hover:text-emerald-700 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1'
+        : 'px-1 py-0.5 text-[9px] font-bold text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1';
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    const diagnosticsStorageKey = 'mini-ai-1c:code-side-panel:diagnostics-height';
+    const minDiagnosticsHeight = 110;
+    const defaultDiagnosticsHeight = 160;
+    const maxDiagnosticsHeightFallback = 420;
+    const [diagnosticsHeight, setDiagnosticsHeight] = useState(() => {
+        if (typeof window === 'undefined') return defaultDiagnosticsHeight;
+        const rawValue = window.localStorage.getItem(diagnosticsStorageKey);
+        const parsed = rawValue ? Number.parseInt(rawValue, 10) : Number.NaN;
+        return Number.isFinite(parsed) ? parsed : defaultDiagnosticsHeight;
+    });
+    const [isDiagnosticsResizing, setIsDiagnosticsResizing] = useState(false);
+    const diagnosticsHeightRef = useRef(diagnosticsHeight);
+    const diagnosticsResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
     const {
         width, setWidth, isResizing, isExpanded, setIsExpanded, startResizing
     } = useResizing(window.innerWidth > 1200 ? 600 : 500);
+
+    const clampDiagnosticsHeight = useCallback((value: number) => {
+        const panelHeight = panelRef.current?.clientHeight ?? window.innerHeight;
+        const maxFromPanel = Math.max(minDiagnosticsHeight, panelHeight - 220);
+        const maxHeight = Math.min(maxDiagnosticsHeightFallback, maxFromPanel);
+        return Math.min(Math.max(Math.round(value), minDiagnosticsHeight), maxHeight);
+    }, []);
+
+    useEffect(() => {
+        diagnosticsHeightRef.current = diagnosticsHeight;
+    }, [diagnosticsHeight]);
+
+    useEffect(() => {
+        setDiagnosticsHeight(prev => clampDiagnosticsHeight(prev));
+    }, [clampDiagnosticsHeight, isOpen]);
+
+    useEffect(() => {
+        const handleWindowResize = () => {
+            setDiagnosticsHeight(prev => clampDiagnosticsHeight(prev));
+        };
+
+        window.addEventListener('resize', handleWindowResize);
+        return () => window.removeEventListener('resize', handleWindowResize);
+    }, [clampDiagnosticsHeight]);
+
+    useEffect(() => {
+        const handleMouseMove = (event: MouseEvent) => {
+            const session = diagnosticsResizeRef.current;
+            if (!session) return;
+
+            const delta = session.startY - event.clientY;
+            setDiagnosticsHeight(clampDiagnosticsHeight(session.startHeight + delta));
+        };
+
+        const handleMouseUp = () => {
+            if (!diagnosticsResizeRef.current) return;
+
+            diagnosticsResizeRef.current = null;
+            setIsDiagnosticsResizing(false);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            window.localStorage.setItem(
+                diagnosticsStorageKey,
+                String(diagnosticsHeightRef.current),
+            );
+        };
+
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [clampDiagnosticsHeight]);
+
+    const startDiagnosticsResizing = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        diagnosticsResizeRef.current = {
+            startY: event.clientY,
+            startHeight: diagnosticsHeightRef.current,
+        };
+        setIsDiagnosticsResizing(true);
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+    }, []);
 
     // Sync global Monaco theme when setting changes
     useEffect(() => {
@@ -205,16 +295,19 @@ export function CodeSidePanel({
 
     return (
         <div
+            ref={panelRef}
             id="code-side-panel"
             style={{ width: isFullWidth ? '100%' : (isExpanded ? `${width}px` : '280px') }}
-            className={`border-l border-[#27272a] bg-[#09090b] flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out relative ${isResizing || isFullWidth ? 'transition-none' : ''} ${isFullWidth ? 'w-full' : 'flex-shrink-0'}`}
+            className={`border-l flex flex-col h-full shadow-2xl transition-[width] duration-300 ease-in-out relative ${
+                isLightTheme ? 'border-[#d4d4d8] bg-[#fafafa]' : 'border-[#27272a] bg-[#09090b]'
+            } ${isResizing || isFullWidth ? 'transition-none' : ''} ${isFullWidth ? 'w-full' : 'flex-shrink-0'}`}
         >
             {/* Resize Handle */}
             <div
                 onMouseDown={startResizing}
                 className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/30 transition-colors z-50 flex items-center justify-center group"
             >
-                <div className="w-0.5 h-8 bg-zinc-700 group-hover:bg-blue-400 rounded-full opacity-0 group-hover:opacity-100" />
+                <div className={`w-0.5 h-8 rounded-full opacity-0 group-hover:opacity-100 ${sideResizeGripClass}`} />
             </div>
 
             <Header
@@ -435,16 +528,16 @@ export function CodeSidePanel({
                                         domNode.style.height = '18px';
 
                                         const toolbar = document.createElement('div');
-                                        toolbar.className = 'flex items-center gap-1 bg-[#18181b]/80 backdrop-blur-sm border border-[#3f3f46]/30 rounded-md shadow-sm p-0 pointer-events-auto leading-none';
+                                        toolbar.className = inlineToolbarClass;
 
                                         const btnRevert = document.createElement('button');
-                                        btnRevert.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg> Отменить</span>';
-                                        btnRevert.className = 'px-1 py-0.5 text-[9px] font-bold text-zinc-400 hover:text-red-400 hover:bg-red-500/10 rounded-sm transition-all active:scale-95';
+                                        btnRevert.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Revert</span>';
+                                        btnRevert.className = inlineRevertButtonClass;
                                         btnRevert.onclick = makeRevertHandler();
 
                                         const btnAccept = document.createElement('button');
-                                        btnAccept.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg> Принять</span>';
-                                        btnAccept.className = 'px-1 py-0.5 text-[9px] font-bold text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-sm transition-all active:scale-95 ml-1';
+                                        btnAccept.innerHTML = '<span style="display:flex;align-items:center;gap:4px;padding: 1px 4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>Apply</span>';
+                                        btnAccept.className = inlineAcceptButtonClass;
                                         btnAccept.onclick = makeAcceptHandler();
 
                                         toolbar.appendChild(btnRevert);
@@ -480,8 +573,31 @@ export function CodeSidePanel({
                 )}
             </div>
 
+            <div
+                onMouseDown={startDiagnosticsResizing}
+                className={`group h-2 flex-shrink-0 cursor-row-resize border-t transition-colors ${
+                    isLightTheme
+                        ? 'border-[#d4d4d8] bg-[#f4f4f5] hover:bg-blue-500/5'
+                        : 'border-[#27272a] bg-[#111114] hover:bg-blue-500/10'
+                }`}
+                role="separator"
+                aria-label="Resize diagnostics panel"
+                aria-orientation="horizontal"
+            >
+                <div className={`mx-auto mt-[3px] h-0.5 w-14 rounded-full transition-colors ${
+                    isDiagnosticsResizing
+                        ? 'bg-blue-400'
+                        : isLightTheme
+                            ? 'bg-zinc-400 group-hover:bg-blue-500'
+                            : 'bg-zinc-700 group-hover:bg-blue-400'
+                }`} />
+            </div>
+
             <DiagnosticsView
                 diagnostics={diagnostics}
+                height={diagnosticsHeight}
+                isResizing={isDiagnosticsResizing}
+                isLightTheme={isLightTheme}
                 onDiagnosticClick={(targetLine) => {
                     if (editorRef.current) {
                         editorRef.current.revealLineInCenter(targetLine);
