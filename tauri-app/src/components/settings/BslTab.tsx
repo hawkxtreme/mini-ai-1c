@@ -1,6 +1,9 @@
 import React from 'react';
-import { FileCode, Download, RefreshCw, Cpu, CheckCircle, AlertTriangle, AlertCircle, Info, Terminal } from 'lucide-react';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { FileCode, Download, RefreshCw, Cpu, CheckCircle, AlertTriangle, AlertCircle, Info, Terminal, ExternalLink } from 'lucide-react';
 import { BslStatus, AppSettings, BslDiagnosticItem } from '../../types/settings';
+
+const BSL_RELEASES_URL = 'https://github.com/1c-syntax/bsl-language-server/releases/latest';
 
 interface BslTabProps {
     settings: AppSettings;
@@ -11,6 +14,8 @@ interface BslTabProps {
     handleDownloadBslLs: () => void;
     downloading: boolean;
     downloadProgress: number;
+    downloadError?: string | null;
+    downloadSuccess?: boolean;
     diagnosing: boolean;
     diagReport: BslDiagnosticItem[] | null;
     setDiagReport: (report: BslDiagnosticItem[] | null) => void;
@@ -26,6 +31,8 @@ export function BslTab({
     handleDownloadBslLs,
     downloading,
     downloadProgress,
+    downloadError,
+    downloadSuccess,
     diagnosing,
     diagReport,
     setDiagReport,
@@ -92,6 +99,33 @@ export function BslTab({
                                             style={{ width: `${downloadProgress}%` }}
                                         />
                                     </div>
+                                </div>
+                            )}
+
+                            {/* Download error */}
+                            {downloadError && (
+                                <div className="mt-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg space-y-2">
+                                    <div className="flex items-start gap-2 text-xs text-red-400">
+                                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                                        <span className="break-all">{downloadError}</span>
+                                    </div>
+                                    <div className="text-xs text-zinc-400 flex items-center gap-1">
+                                        Скачайте JAR вручную и укажите путь ниже:
+                                        <button
+                                            onClick={() => openUrl(BSL_RELEASES_URL)}
+                                            className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 underline"
+                                        >
+                                            GitHub Releases <ExternalLink className="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Download success */}
+                            {downloadSuccess && !downloadError && (
+                                <div className="mt-2 flex items-center gap-2 text-xs text-green-400">
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                    BSL Language Server успешно установлен
                                 </div>
                             )}
                         </div>

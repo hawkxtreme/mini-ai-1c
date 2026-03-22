@@ -44,6 +44,8 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     const [bslStatus, setBslStatus] = useState<BslStatus | null>(null);
     const [downloading, setDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState<number>(0);
+    const [bslDownloadError, setBslDownloadError] = useState<string | null>(null);
+    const [bslDownloadSuccess, setBslDownloadSuccess] = useState(false);
     const [diagnosing, setDiagnosing] = useState(false);
     const [diagReport, setDiagReport] = useState<BslDiagnosticItem[] | null>(null);
     const [showResetConfirm, setShowResetConfirm] = useState(false);
@@ -51,6 +53,8 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     useEffect(() => {
         if (isOpen) {
             refreshAll();
+            setBslDownloadSuccess(false);
+            setBslDownloadError(null);
         }
     }, [isOpen]);
 
@@ -133,6 +137,8 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
     const handleDownloadBslLs = async () => {
         setDownloading(true);
+        setBslDownloadError(null);
+        setBslDownloadSuccess(false);
         const unlisten = await listen<{ percent: number }>('bsl-download-progress', (event) => {
             setDownloadProgress(event.payload.percent);
         });
@@ -145,15 +151,16 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                     bsl_server: { ...settings.bsl_server, jar_path: path }
                 });
             }
-            try { await invoke('reconnect_bsl_ls_cmd'); } catch (e) { console.warn(e); }
+            setBslDownloadSuccess(true);
+            invoke('reconnect_bsl_ls_cmd').catch(e => console.warn(e));
             setTimeout(refreshBslStatus, 2000);
-            alert('BSL LS installed successfully!');
         } catch (e) {
-            alert('Error downloading BSL LS: ' + e);
+            setBslDownloadError(String(e));
+        } finally {
+            unlisten();
+            setDownloading(false);
+            setDownloadProgress(0);
         }
-        unlisten();
-        setDownloading(false);
-        setDownloadProgress(0);
     };
 
     const runDiagnostics = async () => {
@@ -278,6 +285,8 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                             handleDownloadBslLs={handleDownloadBslLs}
                             downloading={downloading}
                             downloadProgress={downloadProgress}
+                            downloadError={bslDownloadError}
+                            downloadSuccess={bslDownloadSuccess}
                             diagnosing={diagnosing}
                             diagReport={diagReport}
                             setDiagReport={setDiagReport}

@@ -46,12 +46,36 @@ pub async fn download_bsl_ls(app: AppHandle) -> Result<String, String> {
     
     // 1. Get latest release info from GitHub API
     crate::app_log!("[BSL Installer] Fetching latest release info...");
-    let release: GitHubRelease = client
+    let api_response = client
         .get("https://api.github.com/repos/1c-syntax/bsl-language-server/releases/latest")
         .header("User-Agent", "mini-ai-1c")
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch release info: {}", e))?
+        .map_err(|e| format!(
+            "Нет доступа к api.github.com: {}. \
+            Проверьте подключение к интернету. \
+            Если GitHub заблокирован файрволом — скачайте JAR вручную с \
+            https://github.com/1c-syntax/bsl-language-server/releases/latest \
+            и укажите путь в настройках.",
+            e
+        ))?;
+
+    if !api_response.status().is_success() {
+        let status = api_response.status();
+        let body = api_response.text().await.unwrap_or_default();
+        let extra = if status.as_u16() == 403 || body.contains("rate limit") {
+            " (GitHub API rate limit — попробуйте позже или скачайте JAR вручную)".to_string()
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "GitHub API вернул ошибку {}{}\n\
+            Скачайте JAR вручную: https://github.com/1c-syntax/bsl-language-server/releases/latest",
+            status, extra
+        ));
+    }
+
+    let release: GitHubRelease = api_response
         .json()
         .await
         .map_err(|e| format!("Failed to parse release info: {}", e))?;

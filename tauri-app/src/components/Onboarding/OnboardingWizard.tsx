@@ -31,6 +31,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
     const [nodeVersion, setNodeVersion] = useState<string | null>(null);
     const [isDownloadingBsl, setIsDownloadingBsl] = useState(false);
     const [bslProgress, setBslProgress] = useState(0);
+    const [bslDownloadError, setBslDownloadError] = useState<string | null>(null);
 
     // AI State
     const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
@@ -80,14 +81,13 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
     const handleDownloadBsl = async () => {
         setIsDownloadingBsl(true);
         setBslProgress(0);
+        setBslDownloadError(null);
 
         try {
-            // Слушаем прогресс от бэкенда
             const unlisten = await listen<{ percent: number }>('bsl-download-progress', (event) => {
                 setBslProgress(event.payload.percent);
             });
 
-            // Запускаем скачивание
             const jarPath = await invoke<string>('install_bsl_ls_cmd');
             setDownloadedJarPath(jarPath);
 
@@ -96,6 +96,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
         } catch (e) {
             console.error('Download failed:', e);
             setBslStatus('missing');
+            setBslDownloadError(String(e));
         } finally {
             setIsDownloadingBsl(false);
         }
@@ -391,6 +392,27 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                             )}
                         </div>
                     </div>
+
+                    {/* BSL Download Error */}
+                    {bslDownloadError && (
+                        <div className="mt-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 space-y-1">
+                            <div className="font-semibold">Ошибка скачивания:</div>
+                            <div className="break-all opacity-80">{bslDownloadError}</div>
+                            <div className="text-zinc-400 pt-1">
+                                Скачайте JAR вручную:{' '}
+                                <a
+                                    href="https://github.com/1c-syntax/bsl-language-server/releases/latest"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline text-blue-400 hover:text-blue-300"
+                                    onClick={(e) => { e.preventDefault(); openUrl('https://github.com/1c-syntax/bsl-language-server/releases/latest'); }}
+                                >
+                                    github.com/1c-syntax/bsl-language-server
+                                </a>
+                                {' '}→ файл <code>*-exec.jar</code> → укажите путь в настройках BSL
+                            </div>
+                        </div>
+                    )}
 
                     {/* Integrated Progress Bar */}
                     {isDownloadingBsl && (

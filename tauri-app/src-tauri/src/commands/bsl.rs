@@ -110,14 +110,22 @@ pub async fn reconnect_bsl_ls_cmd(
     {
         let mut client = state.inner().lock().await;
         client.stop();
+    }
+
+    // Wait for the old Java process to fully release the port before checking is_port_listening
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    {
+        let mut client = state.inner().lock().await;
         client.start_server()?;
     }
-    
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    
+
+    // Wait for BSL LS to initialize (Spring Boot takes ~4-5 seconds)
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
     let mut client = state.inner().lock().await;
     client.connect().await?;
-    
+
     Ok(())
 }
 
