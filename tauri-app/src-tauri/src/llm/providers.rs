@@ -37,6 +37,28 @@ pub async fn fetch_models_from_api(provider_id: &str, base_url: &str, api_key: &
         ]);
     }
 
+    let requires_api_key = matches!(
+        provider_id,
+        "OpenAI"
+            | "Anthropic"
+            | "OpenRouter"
+            | "Google"
+            | "DeepSeek"
+            | "Groq"
+            | "Mistral"
+            | "XAI"
+            | "Perplexity"
+            | "ZAI"
+            | "OneCNaparnik"
+    );
+
+    if requires_api_key && api_key.trim().is_empty() {
+        return Err(format!(
+            "Для провайдера {} требуется API key. Сохраните ключ в профиле и попробуйте снова.",
+            provider_id
+        ));
+    }
+
     let client = Client::new();
     let trimmed_base = base_url.trim_end_matches('/');
     

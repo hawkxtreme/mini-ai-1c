@@ -36,6 +36,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editForm, setEditForm] = useState<LLMProfile | null>(null);
     const [newApiKey, setNewApiKey] = useState('');
+    const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
     const [modelList, setModelList] = useState<any[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
     const [connectionTest, setConnectionTest] = useState<string | null>(null);
@@ -117,13 +118,17 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         setIsSaving(true);
         setShowSaved(false);
         try {
+            const apiKeyFromInput = apiKeyInputRef.current?.value ?? '';
+            const apiKeyToSave = apiKeyFromInput || newApiKey;
             await invoke('save_profile', {
                 profile: editForm,
-                apiKey: newApiKey || null
+                apiKey: apiKeyToSave || null
             });
-            if (newApiKey) {
-                setEditForm(prev => prev ? { ...prev, api_key_encrypted: 'set' } : null);
+            if (apiKeyToSave) {
                 setNewApiKey('');
+                if (apiKeyInputRef.current) {
+                    apiKeyInputRef.current.value = '';
+                }
             }
             onUpdate();
             setShowSaved(true);
@@ -486,6 +491,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-3">
                                     <label className="text-xs text-zinc-500 uppercase font-bold">Токен code.1c.ai</label>
                                     <input
+                                        ref={apiKeyInputRef}
                                         type="password"
                                         className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-orange-500 outline-none placeholder-zinc-700 text-zinc-200"
                                         placeholder={editForm.api_key_encrypted ? "•••••••••••• (сохранён)" : "Вставьте токен..."}
@@ -514,6 +520,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 <div>
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
                                     <input
+                                        ref={apiKeyInputRef}
                                         type="password"
                                         className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-blue-500 outline-none placeholder-zinc-700 text-zinc-200"
                                         placeholder={editForm.api_key_encrypted ? "•••••••••••• (Encrypted)" : "sk-..."}

@@ -7,6 +7,34 @@ use super::models::*;
 use super::prompts::*;
 use super::tools::*;
 
+fn provider_requires_api_key(provider: &LLMProvider) -> bool {
+    matches!(
+        provider,
+        LLMProvider::OpenAI
+            | LLMProvider::Anthropic
+            | LLMProvider::OpenRouter
+            | LLMProvider::Google
+            | LLMProvider::DeepSeek
+            | LLMProvider::Groq
+            | LLMProvider::Mistral
+            | LLMProvider::XAI
+            | LLMProvider::Perplexity
+            | LLMProvider::ZAI
+            | LLMProvider::OneCNaparnik
+    )
+}
+
+fn resolve_profile_api_key(profile: &crate::llm_profiles::LLMProfile) -> Result<String, String> {
+    let api_key = profile.try_get_api_key()?;
+    if provider_requires_api_key(&profile.provider) && api_key.trim().is_empty() {
+        return Err(format!(
+            "Для провайдера {} не найден API key. Откройте профиль и сохраните ключ заново.",
+            profile.provider
+        ));
+    }
+    Ok(api_key)
+}
+
 /// Stream chat completion from OpenAI-compatible API
 /// Returns the full accumulated response text
 pub async fn stream_chat_completion(
@@ -58,7 +86,7 @@ pub async fn stream_chat_completion(
         };
         (access_token, format!("{}/chat/completions", base))
     } else {
-        let api_key = profile.get_api_key();
+        let api_key = resolve_profile_api_key(&profile)?;
         let raw_url = profile.get_base_url();
         // Normalize: Ollama and similar OpenAI-compatible servers require /v1/chat/completions.
         // If the user entered a bare URL without /v1 (e.g. http://host:11434), add it automatically.
@@ -130,7 +158,7 @@ pub async fn stream_chat_completion(
 
     let use_stream = !profile.disable_streaming.unwrap_or(false);
 
-    let request_body = ChatRequest {
+    let mut request_body = ChatRequest {
         model: profile.model.clone(),
         messages: api_messages,
         stream: use_stream,
@@ -232,13 +260,13 @@ pub async fn stream_chat_completion(
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
-            Ok(r) if r.status().as_u16() == 429 && matches!(profile.provider, LLMProvider::QwenCli) && attempt < max_retries => {
+            Ok(r) if r.status().as_u16() == 429 && attempt < max_retries => {
                 let retry_after = r.headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(5);
-                crate::app_log!("[AI][RETRY] Qwen 429 rate-limit (attempt {}), waiting {}s...", attempt, retry_after);
+                    .unwrap_or(if matches!(profile.provider, LLMProvider::QwenCli) { 5 } else { 10 });
+                crate::app_log!("[AI][RETRY] 429 rate-limit (attempt {}, provider {:?}), waiting {}s...", attempt, profile.provider, retry_after);
                 tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
                 continue;
             }
@@ -246,6 +274,79 @@ pub async fn stream_chat_completion(
                 let status = r.status();
                 let error_body = r.text().await.unwrap_or_default();
                 crate::app_log!("[AI] API Error (Attempt {}): {} - {}", attempt, status, error_body);
+                // OpenRouter 400 "Developer instruction is not enabled" — model doesn't support system role
+                if matches!(profile.provider, LLMProvider::OpenRouter)
+                    && status.as_u16() == 400
+                    && error_body.contains("Developer instruction is not enabled")
+                {
+                    let has_system = request_body.messages.iter().any(|m| m.role == "system");
+                    if has_system {
+                        crate::app_log!("[AI][RETRY] OpenRouter: модель '{}' не поддерживает system-сообщение. Конвертирую в user.", profile.model);
+                        // Merge system content into the first user message
+                        let system_content: String = request_body.messages.iter()
+                            .filter(|m| m.role == "system")
+                            .filter_map(|m| m.content.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        request_body.messages.retain(|m| m.role != "system");
+                        if let Some(first_user) = request_body.messages.iter_mut().find(|m| m.role == "user") {
+                            let original = first_user.content.clone().unwrap_or_default();
+                            first_user.content = Some(format!("{}\n\n---\n\n{}", system_content, original));
+                        }
+                        let _ = app_handle.emit("chat-chunk", "\n\n⚠️ Модель не поддерживает системный промпт — встраиваю инструкции в запрос.\n\n");
+                        attempt = 0;
+                        continue;
+                    }
+                    return Err(
+                        "Модель не поддерживает системные инструкции (Developer instruction is not enabled). Попробуйте другую модель."
+                            .to_string(),
+                    );
+                }
+                // OpenRouter 429 exhausted all retries — extract human-readable message
+                if matches!(profile.provider, LLMProvider::OpenRouter) && status.as_u16() == 429 {
+                    let is_free_model = profile.model.ends_with(":free");
+                    let hint = if is_free_model {
+                        format!(
+                            "Бесплатная модель `{}` временно перегружена на Google AI Studio (общий пул). \
+                            Варианты решения:\n\
+                            • Подождите 1–2 минуты и повторите\n\
+                            • Добавьте свой Google AI Studio ключ: https://openrouter.ai/settings/integrations\n\
+                            • Переключитесь на другую модель (например, `google/gemma-3-27b-it` без `:free`)",
+                            profile.model
+                        )
+                    } else {
+                        serde_json::from_str::<serde_json::Value>(&error_body)
+                            .ok()
+                            .and_then(|v| v["error"]["metadata"]["raw"].as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "Превышен лимит запросов. Попробуйте позже.".to_string())
+                    };
+                    return Err(hint);
+                }
+                if matches!(profile.provider, LLMProvider::OpenRouter)
+                    && status.as_u16() == 401
+                    && error_body.contains("No cookie auth credentials found")
+                {
+                    return Err(
+                        "OpenRouter не получил API key. Проверьте поле API Key в профиле и сохраните его заново."
+                            .to_string(),
+                    );
+                }
+                if matches!(profile.provider, LLMProvider::OpenRouter)
+                    && status.as_u16() == 404
+                    && error_body.contains("No endpoints found that support tool use")
+                {
+                    if request_body.tools.is_some() {
+                        crate::app_log!("[AI][RETRY] OpenRouter: модель '{}' не поддерживает tool use. Повторяю без инструментов.", profile.model);
+                        request_body.tools = None;
+                        let _ = app_handle.emit("chat-chunk", "\n\n⚠️ Модель не поддерживает инструменты — отправляю запрос без MCP-инструментов.\n\n");
+                        attempt = 0;
+                        continue;
+                    }
+                    return Err(
+                        "Модель не поддерживает инструменты (tool use) на OpenRouter. Попробуйте другую модель."
+                            .to_string(),
+                    );
+                }
                 return Err(format!("API error {}: {}", status, error_body));
             }
             Err(e) if attempt < max_retries => {
@@ -699,7 +800,7 @@ pub fn extract_bsl_code(text: &str) -> Vec<String> {
 
 /// Fetch models from provider
 pub async fn fetch_models(profile: &crate::llm_profiles::LLMProfile) -> Result<Vec<String>, String> {
-    let api_key = profile.get_api_key();
+    let api_key = resolve_profile_api_key(profile)?;
     let raw_url = profile.get_base_url();
     // Normalize Ollama URL: auto-add /v1 if missing
     let base_url = {

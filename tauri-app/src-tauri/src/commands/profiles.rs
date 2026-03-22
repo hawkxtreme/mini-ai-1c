@@ -10,11 +10,33 @@ pub fn get_profiles() -> ProfileStore {
 /// Save profile
 #[tauri::command]
 pub fn save_profile(mut profile: LLMProfile, api_key: Option<String>) -> Result<(), String> {
-    if let Some(key) = api_key {
-        profile.set_api_key(&key);
-    }
-
     let mut store = llm_profiles::load_profiles();
+    let existing_encrypted = store.profiles.iter()
+        .find(|p| p.id == profile.id)
+        .map(|p| p.api_key_encrypted.clone());
+
+    match api_key {
+        Some(key) if !key.trim().is_empty() => {
+            profile.set_api_key(&key);
+        }
+        _ => {
+            let incoming = profile.api_key_encrypted.trim();
+            let incoming_is_placeholder =
+                incoming.is_empty() || incoming.eq_ignore_ascii_case("set");
+
+            if incoming_is_placeholder {
+                if let Some(existing) = existing_encrypted {
+                    if existing.trim().is_empty() || existing.eq_ignore_ascii_case("set") {
+                        profile.api_key_encrypted.clear();
+                    } else {
+                        profile.api_key_encrypted = existing;
+                    }
+                } else {
+                    profile.api_key_encrypted.clear();
+                }
+            }
+        }
+    }
 
     // Update or add profile
     if let Some(pos) = store.profiles.iter().position(|p| p.id == profile.id) {
@@ -129,7 +151,7 @@ pub async fn fetch_models_for_profile(profile_id: String) -> Result<Vec<crate::l
     let profile = store.profiles.iter().find(|p| p.id == profile_id)
         .ok_or("Profile not found")?;
 
-    let api_key = profile.get_api_key();
+    let api_key = profile.try_get_api_key()?;
     let base_url = profile.get_base_url();
     
     // 1. Fetch from API

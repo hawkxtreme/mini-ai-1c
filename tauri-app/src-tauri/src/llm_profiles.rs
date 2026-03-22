@@ -85,6 +85,20 @@ impl LLMProfile {
         decrypt_string(&self.api_key_encrypted).unwrap_or_default()
     }
 
+    /// Get decrypted API key with an explicit error when the saved value can't be decrypted.
+    pub fn try_get_api_key(&self) -> Result<String, String> {
+        if self.api_key_encrypted.is_empty() {
+            return Ok(String::new());
+        }
+
+        decrypt_string(&self.api_key_encrypted).map_err(|_| {
+            format!(
+                "Не удалось расшифровать сохраненный API key для профиля '{}'. Сохраните ключ заново в настройках.",
+                self.name
+            )
+        })
+    }
+
     /// Set and encrypt API key
     pub fn set_api_key(&mut self, api_key: &str) {
         self.api_key_encrypted = encrypt_string(api_key).unwrap_or_default();
