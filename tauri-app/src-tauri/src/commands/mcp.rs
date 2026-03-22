@@ -1,5 +1,25 @@
 use crate::mcp_client::{McpClient, McpTool, McpServerStatus};
 use crate::settings::{load_settings, McpServerConfig};
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Struct returned to frontend with aggregated tool metadata
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpToolInfo {
+    pub server_name: String,
+    pub tool_name: String,
+    pub description: Option<String>,
+    pub input_schema: Option<Value>,
+    pub is_enabled: bool,
+}
+
+lazy_static! {
+    static ref MCP_TOOLS_CACHE: Mutex<Option<(Vec<McpToolInfo>, Instant)>> = Mutex::new(None);
+}
+const MCP_TOOLS_CACHE_TTL_SECS: u64 = 300;
 
 /// Get available MCP tools from a specific server
 #[tauri::command]
@@ -25,6 +45,91 @@ pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
 
     let client = McpClient::new(config).await?;
     client.list_tools().await
+}
+
+/// List tools across all enabled MCP servers (cached)
+#[tauri::command]
+pub async fn list_mcp_tools(force_refresh: Option<bool>) -> Result<Vec<McpToolInfo>, String> {
+    let force = force_refresh.unwrap_or(false);
+
+    // Check cache
+    if !force {
+        if let Ok(cache_lock) = MCP_TOOLS_CACHE.lock() {
+            if let Some((cached, ts)) = &*cache_lock {
+                if ts.elapsed().as_secs() < MCP_TOOLS_CACHE_TTL_SECS {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
+    let settings = load_settings();
+    let mut result: Vec<McpToolInfo> = Vec::new();
+
+    // Helper to process a single server config
+    let process_server = |config: McpServerConfig| async move {
+        let mut server_tools: Vec<McpToolInfo> = Vec::new();
+        match McpClient::new(config.clone()).await {
+            Ok(client) => match client.list_tools().await {
+                Ok(tools) => {
+                    for t in tools {
+                        server_tools.push(McpToolInfo {
+                            server_name: config.name.clone(),
+                            tool_name: t.name,
+                            description: Some(t.description),
+                            input_schema: Some(t.input_schema),
+                            is_enabled: true,
+                        });
+                    }
+                }
+                Err(e) => {
+                    server_tools.push(McpToolInfo {
+                        server_name: config.name.clone(),
+                        tool_name: "__server_unavailable__".to_string(),
+                        description: Some(format!("Failed to list tools: {}", e)),
+                        input_schema: None,
+                        is_enabled: false,
+                    });
+                }
+            },
+            Err(e) => {
+                server_tools.push(McpToolInfo {
+                    server_name: config.name.clone(),
+                    tool_name: "__server_unavailable__".to_string(),
+                    description: Some(format!("Failed to create client: {}", e)),
+                    input_schema: None,
+                    is_enabled: false,
+                });
+            }
+        }
+        server_tools
+    };
+
+    // Iterate configured MCP servers
+    for cfg in settings.mcp_servers.iter().filter(|s| s.enabled).cloned() {
+        let mut tools = process_server(cfg).await;
+        result.append(&mut tools);
+    }
+
+    // Include BSL LS as internal server if enabled
+    if settings.bsl_server.enabled {
+        let cfg = crate::settings::McpServerConfig {
+            id: "bsl-ls".to_string(),
+            name: "BSL Language Server".to_string(),
+            enabled: settings.bsl_server.enabled,
+            transport: crate::settings::McpTransport::Internal,
+            ..Default::default()
+        };
+        let mut tools = process_server(cfg).await;
+        result.append(&mut tools);
+    }
+
+    // Update cache
+    if let Ok(mut cache_lock) = MCP_TOOLS_CACHE.lock() {
+        *cache_lock = Some((result.clone(), Instant::now()));
+    }
+
+    Ok(result)
 }
 
 /// Get status of all MCP servers

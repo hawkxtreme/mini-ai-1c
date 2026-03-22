@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code } from 'lucide-react';
+import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code, Wrench } from 'lucide-react';
+import McpToolsView from '../CodeSidePanel/McpToolsView';
 
 // ── Benchmark Panel ───────────────────────────────────────────────────────────
 
@@ -182,6 +183,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
     const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
     const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
     const [viewingLogsId, setViewingLogsId] = useState<string | null>(null);
+    const [viewingToolsId, setViewingToolsId] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [isLoadingLogs, setIsLoadingLogs] = useState(false);
     const [smartImportId, setSmartImportId] = useState<string | null>(null);
@@ -1199,6 +1201,14 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                 {testingId === server.id ? 'Checking...' : 'Проверить'}
                                             </button>
                                             <button
+                                                onClick={() => setViewingToolsId(server.id)}
+                                                disabled={!server.enabled}
+                                                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                <Wrench className="w-3.5 h-3.5" />
+                                                Tools
+                                            </button>
+                                            <button
                                                 onClick={() => setViewingLogsId(server.id)}
                                                 disabled={!server.enabled}
                                                 className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1219,6 +1229,28 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                             </div>
                         );
                     })}
+                </div>
+            )}
+            {/* Tools Modal */}
+            {viewingToolsId && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-zinc-800 border border-zinc-700 rounded-xl w-full max-w-3xl h-[600px] flex flex-col shadow-2xl">
+                        <div className="px-4 py-3 border-b border-zinc-700 flex items-center justify-between">
+                            <h3 className="font-medium text-zinc-100 flex items-center gap-2">
+                                <Wrench className="w-4 h-4 text-zinc-400" />
+                                MCP Tools: {servers.find(s => s.id === viewingToolsId)?.name}
+                            </h3>
+                            <button
+                                onClick={() => setViewingToolsId(null)}
+                                className="p-1 hover:bg-zinc-700 rounded text-zinc-400 hover:text-zinc-200 transition"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-auto">
+                            <McpToolsView serverName={servers.find(s => s.id === viewingToolsId)?.name ?? null} />
+                        </div>
+                    </div>
                 </div>
             )}
 

@@ -74,6 +74,7 @@ pub fn run() {
             restart_app_cmd,
             // MCP
             get_mcp_tools,
+            list_mcp_tools,
             call_mcp_tool,
             test_mcp_connection,
             get_mcp_server_statuses,

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Save, Plus, Trash2, Command, Shield, Edit2, RotateCcw, ChevronDown, ChevronUp, Terminal, TextCursorInput } from 'lucide-react';
+import { Save, Plus, Trash2, Command, Shield, Edit2, RotateCcw, ChevronDown, ChevronUp, Terminal, TextCursorInput, Wrench } from 'lucide-react';
 import {
     AppSettings,
     SlashCommand,
     DEFAULT_SLASH_COMMANDS
 } from '../../types/settings';
+import McpToolsPopover from '../chat/McpToolsPopover';
 
 function TokenCode({ code, colorClass = 'text-blue-400/80 bg-blue-400/5', onSelect }: { code: string, colorClass?: string, onSelect?: (code: string) => void }) {
     const [copied, setCopied] = useState(false);
@@ -39,6 +40,8 @@ interface SlashCommandsTabProps {
 
 export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }: SlashCommandsTabProps) {
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+    const [mcpPopoverIndex, setMcpPopoverIndex] = useState<number | null>(null);
+    const textareaRefs = React.useRef<Record<string, HTMLTextAreaElement | null>>({});
 
     const slashCommands = settings.slash_commands || DEFAULT_SLASH_COMMANDS;
 
@@ -216,6 +219,7 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                         <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">Шаблон промпта</label>
                                     </div>
                                     <textarea
+                                        ref={el => (textareaRefs.current[cmd.id] = el)}
                                         value={cmd.template}
                                         onChange={e => updateCommand(index, { template: e.target.value })}
                                         className="w-full h-32 bg-[#1e1e21] border border-white/[0.05] rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-blue-500/50 transition-colors resize-none font-mono leading-relaxed shadow-inner"
@@ -226,7 +230,25 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                             <span className="text-[10px] text-zinc-600">Код:</span>
                                             <TokenCode
                                                 code="{code}"
-                                                onSelect={(c) => updateCommand(index, { template: cmd.template + c })}
+                                                onSelect={(c) => {
+                                                    const ta = textareaRefs.current[cmd.id];
+                                                    if (!ta) {
+                                                        updateCommand(index, { template: cmd.template + c });
+                                                        return;
+                                                    }
+                                                    const start = ta.selectionStart ?? cmd.template.length;
+                                                    const end = ta.selectionEnd ?? start;
+                                                    const before = cmd.template.slice(0, start);
+                                                    const after = cmd.template.slice(end);
+                                                    const next = before + c + after;
+                                                    updateCommand(index, { template: next });
+                                                    // restore focus & caret after inserted text
+                                                    setTimeout(() => {
+                                                        ta.focus();
+                                                        const pos = start + c.length;
+                                                        ta.setSelectionRange(pos, pos);
+                                                    }, 0);
+                                                }}
                                             />
                                         </div>
                                         <div className="flex items-center gap-2">
@@ -234,7 +256,24 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                             <TokenCode
                                                 code="{diagnostics}"
                                                 colorClass="text-red-400/80 bg-red-400/5"
-                                                onSelect={(c) => updateCommand(index, { template: cmd.template + c })}
+                                                onSelect={(c) => {
+                                                    const ta = textareaRefs.current[cmd.id];
+                                                    if (!ta) {
+                                                        updateCommand(index, { template: cmd.template + c });
+                                                        return;
+                                                    }
+                                                    const start = ta.selectionStart ?? cmd.template.length;
+                                                    const end = ta.selectionEnd ?? start;
+                                                    const before = cmd.template.slice(0, start);
+                                                    const after = cmd.template.slice(end);
+                                                    const next = before + c + after;
+                                                    updateCommand(index, { template: next });
+                                                    setTimeout(() => {
+                                                        ta.focus();
+                                                        const pos = start + c.length;
+                                                        ta.setSelectionRange(pos, pos);
+                                                    }, 0);
+                                                }}
                                             />
                                         </div>
                                         <div className="flex items-center gap-2">
@@ -242,8 +281,62 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                             <TokenCode
                                                 code="{query}"
                                                 colorClass="text-green-400/80 bg-green-400/5"
-                                                onSelect={(c) => updateCommand(index, { template: cmd.template + c })}
+                                                onSelect={(c) => {
+                                                    const ta = textareaRefs.current[cmd.id];
+                                                    if (!ta) {
+                                                        updateCommand(index, { template: cmd.template + c });
+                                                        return;
+                                                    }
+                                                    const start = ta.selectionStart ?? cmd.template.length;
+                                                    const end = ta.selectionEnd ?? start;
+                                                    const before = cmd.template.slice(0, start);
+                                                    const after = cmd.template.slice(end);
+                                                    const next = before + c + after;
+                                                    updateCommand(index, { template: next });
+                                                    setTimeout(() => {
+                                                        ta.focus();
+                                                        const pos = start + c.length;
+                                                        ta.setSelectionRange(pos, pos);
+                                                    }, 0);
+                                                }}
                                             />
+                                        </div>
+                                        <div className="relative flex items-center gap-2">
+                                            <button
+                                                onClick={() => setMcpPopoverIndex(prev => (prev === index ? null : index))}
+                                                className="flex items-center gap-1.5 text-[10px] text-purple-400/80 bg-purple-400/5 px-2 py-0.5 rounded cursor-pointer hover:bg-white/5 transition-all active:scale-95 select-none border border-transparent hover:border-white/10"
+                                                title="Добавить MCP инструмент в шаблон"
+                                            >
+                                                <Wrench size={10} />
+                                                MCP
+                                            </button>
+                                            {mcpPopoverIndex === index && (
+                                                <div className="absolute bottom-full left-0 mb-1 z-50">
+                                                    <McpToolsPopover
+                                                        onToolSelect={(toolName: string) => {
+                                                            const insertion = `@${toolName} `;
+                                                            const ta = textareaRefs.current[cmd.id];
+                                                            if (!ta) {
+                                                                updateCommand(index, { template: cmd.template + insertion });
+                                                            } else {
+                                                                const start = ta.selectionStart ?? cmd.template.length;
+                                                                const end = ta.selectionEnd ?? start;
+                                                                const before = cmd.template.slice(0, start);
+                                                                const after = cmd.template.slice(end);
+                                                                const next = before + insertion + after;
+                                                                updateCommand(index, { template: next });
+                                                                setTimeout(() => {
+                                                                    ta.focus();
+                                                                    const pos = start + insertion.length;
+                                                                    ta.setSelectionRange(pos, pos);
+                                                                }, 0);
+                                                            }
+                                                            setMcpPopoverIndex(null);
+                                                        }}
+                                                        onClose={() => setMcpPopoverIndex(null)}
+                                                    />
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                     <div className="px-1 pt-1 space-y-1">

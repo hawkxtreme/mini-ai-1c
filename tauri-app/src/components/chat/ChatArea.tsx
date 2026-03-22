@@ -5,7 +5,7 @@ import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle, ConfiguratorTitleContext } from '../../utils/configurator';
 import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info, Wrench } from 'lucide-react';
 import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
@@ -18,6 +18,7 @@ import { DEFAULT_SLASH_COMMANDS, SlashCommand, CliStatus } from '../../types/set
 import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from '../settings/QwenAuthModal';
 import { QueuedMessages } from './QueuedMessages';
+import McpToolsPopover from './McpToolsPopover';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -257,6 +258,7 @@ export function ChatArea({
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
+    const [showToolsPopover, setShowToolsPopover] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -1371,6 +1373,45 @@ export function ChatArea({
                                     </button>
                                 </div>
                             )}
+
+                            {/* MCP Tools popover button — always visible */}
+                            <div className="relative">
+                                <button
+                                    onClick={() => {
+                                        setShowToolsPopover(prev => !prev);
+                                        setShowModelDropdown(false);
+                                    }}
+                                    className="w-8 h-8 flex items-center justify-center rounded-lg bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all"
+                                    title="MCP Tools"
+                                >
+                                    <Wrench className="w-4 h-4" />
+                                </button>
+                                {showToolsPopover && (
+                                    <McpToolsPopover
+                                        onToolSelect={(toolName: string) => {
+                                            const textarea = inputRef.current;
+                                            if (!textarea) {
+                                                setInput(prev => (prev ? prev + ` @${toolName} ` : `@${toolName} `));
+                                            } else {
+                                                const start = textarea.selectionStart ?? textarea.value.length;
+                                                const end = textarea.selectionEnd ?? textarea.value.length;
+                                                const before = input.slice(0, start);
+                                                const after = input.slice(end);
+                                                const insertion = `@${toolName} `;
+                                                const next = before + insertion + after;
+                                                setInput(next);
+                                                setTimeout(() => {
+                                                    textarea.focus();
+                                                    const pos = start + insertion.length;
+                                                    textarea.setSelectionRange(pos, pos);
+                                                }, 0);
+                                            }
+                                            setShowToolsPopover(false);
+                                        }}
+                                        onClose={() => setShowToolsPopover(false)}
+                                    />
+                                )}
+                            </div>
 
                             <button onClick={isLoading ? stopChat : () => handleSendMessage()} disabled={!isLoading && !input.trim()} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors flex-shrink-0 ${isLoading ? 'bg-red-500/10 text-red-400' : input.trim() ? 'bg-blue-600 text-white' : 'bg-[#27272a] text-zinc-600'}`}>
                                 {isLoading ? <Square className="w-4 h-4 fill-current" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
