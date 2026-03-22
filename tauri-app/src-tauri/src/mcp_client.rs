@@ -380,6 +380,8 @@ enum TransportImpl {
         login: Option<String>,
         password: Option<String>,
         extra_headers: std::collections::HashMap<String, String>,
+        // None = not initialized yet, Some(None) = initialized (no session id), Some(Some(id)) = initialized with session id
+        http_state: Arc<tokio::sync::Mutex<Option<Option<String>>>>,
     },
     Stdio {
         tx: mpsc::Sender<JsonRpcRequest>,
@@ -417,6 +419,7 @@ impl McpSession {
                 login: config.login,
                 password: config.password,
                 extra_headers,
+                http_state: Arc::new(tokio::sync::Mutex::new(None)),
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -925,7 +928,61 @@ impl McpSession {
         };
 
         match &self.transport {
-            TransportImpl::Http { client, url, login, password, extra_headers } => {
+            TransportImpl::Http { client, url, login, password, extra_headers, http_state } => {
+                // MCP Streamable HTTP requires initialize handshake before any request
+                let session_id: Option<String> = {
+                    let mut state = http_state.lock().await;
+                    if state.is_none() {
+                        crate::app_log!("[MCP][HTTP] Initializing session for {}", url);
+                        let init_req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 0,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": { "name": "mini-ai-1c", "version": "1.0" }
+                            }
+                        });
+                        let mut rb = client.post(url)
+                            .header("Accept", "application/json, text/event-stream")
+                            .header("Content-Type", "application/json")
+                            .json(&init_req);
+                        if let Some(l) = login { if !l.is_empty() { rb = rb.basic_auth(l, password.as_deref()); } }
+                        for (k, v) in extra_headers { rb = rb.header(k.as_str(), v.as_str()); }
+
+                        let sid = match rb.send().await {
+                            Ok(resp) => {
+                                let sid = resp.headers()
+                                    .get("mcp-session-id")
+                                    .and_then(|v| v.to_str().ok())
+                                    .map(|s| s.to_string());
+                                let _ = resp.text().await; // consume body
+                                // Send initialized notification
+                                let notif = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
+                                let mut nb = client.post(url)
+                                    .header("Accept", "application/json, text/event-stream")
+                                    .header("Content-Type", "application/json")
+                                    .json(&notif);
+                                if let Some(l) = login { if !l.is_empty() { nb = nb.basic_auth(l, password.as_deref()); } }
+                                for (k, v) in extra_headers { nb = nb.header(k.as_str(), v.as_str()); }
+                                if let Some(ref s) = sid { nb = nb.header("Mcp-Session-Id", s.as_str()); }
+                                let _ = nb.send().await;
+                                crate::app_log!("[MCP][HTTP] Session initialized, id={:?}", sid);
+                                sid
+                            }
+                            Err(e) => {
+                                crate::app_log!("[MCP][HTTP] Initialize failed ({}), proceeding without handshake", e);
+                                None
+                            }
+                        };
+                        *state = Some(sid.clone());
+                        sid
+                    } else {
+                        state.as_ref().and_then(|s| s.clone())
+                    }
+                };
+
                 let mut rb = client.post(url)
                     .header("Accept", "application/json, text/event-stream")
                     .header("Content-Type", "application/json")
@@ -937,6 +994,9 @@ impl McpSession {
                 }
                 for (k, v) in extra_headers {
                     rb = rb.header(k.as_str(), v.as_str());
+                }
+                if let Some(ref sid) = session_id {
+                    rb = rb.header("Mcp-Session-Id", sid.as_str());
                 }
                 let resp = rb.send().await.map_err(|e| e.to_string())?;
                 let content_type = resp.headers()
