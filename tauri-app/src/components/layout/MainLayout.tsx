@@ -184,7 +184,7 @@ export function MainLayout() {
 
             {/* Custom Title Bar */}
             <div className="relative h-10 bg-[#09090b] flex items-center justify-between px-4 border-b border-[#27272a] select-none z-50">
-                <div data-tauri-drag-region className="absolute inset-0 z-0" onMouseDown={() => appWindow?.startDragging()} />
+                <div data-tauri-drag-region className="absolute inset-0 z-0" />
                 <div className="relative z-10 flex items-center gap-2 pointer-events-none">
                     <img src={logo} alt="Logo" className="w-5 h-5" />
                     <span className="text-sm font-medium text-zinc-300">Mini AI 1C</span>
