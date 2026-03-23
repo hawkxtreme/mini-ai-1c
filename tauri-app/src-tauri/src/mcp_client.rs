@@ -1,21 +1,21 @@
-use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 
-use serde_json::{json, Value};
-use std::time::Duration;
-use crate::settings::{McpServerConfig, McpTransport, AppSettings};
-use tokio::process::{Command, Child};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use std::collections::{HashMap, HashSet, VecDeque};
-use lazy_static::lazy_static;
-use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config};
-use std::thread;
+use crate::settings::{AppSettings, McpServerConfig, McpTransport};
 use async_trait::async_trait;
+use lazy_static::lazy_static;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use tauri::Manager;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 static RECONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
@@ -23,7 +23,9 @@ static RECONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 pub trait InternalMcpHandler: Send + Sync {
     async fn list_tools(&self) -> Vec<McpTool>;
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String>;
-    fn is_alive(&self) -> bool { true }
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Serialize)]
@@ -49,6 +51,13 @@ struct JsonRpcError {
     message: String,
 }
 
+struct HttpRpcResponse {
+    status: reqwest::StatusCode,
+    body: String,
+    rpc_response: Option<JsonRpcResponse>,
+    session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     pub name: String,
@@ -63,9 +72,9 @@ pub struct McpServerStatus {
     pub status: String,
     pub transport: String,
     // 1С:Справка — прогресс индексации
-    pub index_progress: u32,       // 0-100 (%)
-    pub index_message: String,     // Текущее сообщение прогресса
-    pub help_status: String,       // "unavailable" | "indexing" | "ready" | ""
+    pub index_progress: u32,   // 0-100 (%)
+    pub index_message: String, // Текущее сообщение прогресса
+    pub help_status: String,   // "unavailable" | "indexing" | "ready" | ""
 }
 
 // Global manager to hold persistent sessions
@@ -114,7 +123,7 @@ impl McpManager {
                 } else {
                     return Err(format!("Internal handler not found for {}", config.id));
                 }
-            },
+            }
             McpTransport::Http => Arc::new(McpSession::new_http(config.clone())),
             McpTransport::Stdio => {
                 let settings = crate::settings::load_settings();
@@ -133,7 +142,9 @@ impl McpManager {
         crate::app_log!("Reconfiguring MCP servers...");
         let mut sessions = MCP_MANAGER.sessions.lock().await;
 
-        let new_server_ids: HashSet<String> = new_settings.mcp_servers.iter()
+        let new_server_ids: HashSet<String> = new_settings
+            .mcp_servers
+            .iter()
             .map(|s| s.id.clone())
             .collect();
 
@@ -151,7 +162,7 @@ impl McpManager {
             let needs_restart = if let Some((stored_config, session)) = sessions.get(&config.id) {
                 stored_config != &config || !session.is_alive().await
             } else {
-                true 
+                true
             };
 
             if needs_restart {
@@ -162,7 +173,8 @@ impl McpManager {
                 if config.transport == McpTransport::Internal {
                     let handlers = MCP_MANAGER.internal_handlers.lock().await;
                     if let Some(handler) = handlers.get(&config.id) {
-                        let session = Arc::new(McpSession::new_internal(config.clone(), handler.clone()));
+                        let session =
+                            Arc::new(McpSession::new_internal(config.clone(), handler.clone()));
                         sessions.insert(config.id.clone(), (config, session));
                     }
                     continue;
@@ -184,25 +196,33 @@ impl McpManager {
         // 3. Handle BSL Server (Virtual)
         // Optimization: only lock and restart if enabled status changed or not connected
         if new_settings.bsl_server.enabled {
-             let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
-             // Try lock with timeout to avoid hanging if BSL is currently busy analyzing large file
-             let bsl_client = bsl_client_state.inner();
-             let bsl_lock_future = bsl_client.lock();
-             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(3000), bsl_lock_future).await {
-                 let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
-                 if jar_exists && !bsl.is_connected() {
-                     crate::app_log!("[MCP] Restarting/Starting BSL LS because it was enabled and not connected");
-                     let _ = bsl.start_server();
-                     let _ = bsl.connect().await;
-                 }
-             };
+            let bsl_client_state =
+                app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+            // Try lock with timeout to avoid hanging if BSL is currently busy analyzing large file
+            let bsl_client = bsl_client_state.inner();
+            let bsl_lock_future = bsl_client.lock();
+            if let Ok(mut bsl) =
+                tokio::time::timeout(Duration::from_millis(3000), bsl_lock_future).await
+            {
+                let jar_exists = std::path::Path::new(&new_settings.bsl_server.jar_path).exists();
+                if jar_exists && !bsl.is_connected() {
+                    crate::app_log!(
+                        "[MCP] Restarting/Starting BSL LS because it was enabled and not connected"
+                    );
+                    let _ = bsl.start_server();
+                    let _ = bsl.connect().await;
+                }
+            };
         } else {
-             // If disabled, we still need to stop it
-             let bsl_client_state = app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
-             let bsl_client = bsl_client_state.inner();
-             if let Ok(mut bsl) = tokio::time::timeout(Duration::from_millis(500), bsl_client.lock()).await {
-                 bsl.stop();
-             };
+            // If disabled, we still need to stop it
+            let bsl_client_state =
+                app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+            let bsl_client = bsl_client_state.inner();
+            if let Ok(mut bsl) =
+                tokio::time::timeout(Duration::from_millis(500), bsl_client.lock()).await
+            {
+                bsl.stop();
+            };
         }
     }
 
@@ -214,7 +234,7 @@ impl McpManager {
         let settings = crate::settings::load_settings();
 
         let mut all_configs = settings.mcp_servers.clone();
-        
+
         // Add virtual BSL server
         all_configs.push(crate::settings::McpServerConfig {
             id: "bsl-ls".to_string(),
@@ -225,42 +245,43 @@ impl McpManager {
         });
 
         for config in all_configs {
-             let status = if !config.enabled {
-                 "disabled"
-             } else if let Some((_, session)) = sessions.get(&config.id) {
-                 if session.is_alive().await {
-                     "connected"
-                 } else {
-                     "stopped"
-                 }
-             } else if config.transport == McpTransport::Internal {
-                 let handlers = MCP_MANAGER.internal_handlers.lock().await;
-                 if handlers.contains_key(&config.id) {
-                     "connected"
-                 } else {
-                     "stopped"
-                 }
-             } else {
-                 "stopped" // Enabled but not in sessions (failed to start or never started)
-             };
+            let status = if !config.enabled {
+                "disabled"
+            } else if let Some((_, session)) = sessions.get(&config.id) {
+                if session.is_alive().await {
+                    "connected"
+                } else {
+                    "stopped"
+                }
+            } else if config.transport == McpTransport::Internal {
+                let handlers = MCP_MANAGER.internal_handlers.lock().await;
+                if handlers.contains_key(&config.id) {
+                    "connected"
+                } else {
+                    "stopped"
+                }
+            } else {
+                "stopped" // Enabled but not in sessions (failed to start or never started)
+            };
 
-             crate::app_log!("[DEBUG] MCP Server status for {}: {}", config.id, status);
-             
-             // Извлекаем прогресс индексации для 1С:Справка и 1С:Поиск
-             let (index_progress, index_message, help_status_str) = if config.id == "builtin-1c-help" || config.id == "builtin-1c-search" {
-                 if let Some((_, session)) = sessions.get(&config.id) {
-                     let progress = *session.help_progress.lock().await;
-                     let message = session.help_message.lock().await.clone();
-                     let hs = session.help_status.lock().await.clone();
-                     (progress, message, hs)
-                 } else {
-                     (0, String::new(), String::new())
-                 }
-             } else {
-                 (0, String::new(), String::new())
-             };
-             
-             statuses.push(McpServerStatus {
+            crate::app_log!("[DEBUG] MCP Server status for {}: {}", config.id, status);
+
+            // Извлекаем прогресс индексации для 1С:Справка и 1С:Поиск
+            let (index_progress, index_message, help_status_str) =
+                if config.id == "builtin-1c-help" || config.id == "builtin-1c-search" {
+                    if let Some((_, session)) = sessions.get(&config.id) {
+                        let progress = *session.help_progress.lock().await;
+                        let message = session.help_message.lock().await.clone();
+                        let hs = session.help_status.lock().await.clone();
+                        (progress, message, hs)
+                    } else {
+                        (0, String::new(), String::new())
+                    }
+                } else {
+                    (0, String::new(), String::new())
+                };
+
+            statuses.push(McpServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
                 status: status.to_string(),
@@ -270,7 +291,7 @@ impl McpManager {
                 help_status: help_status_str,
             });
         }
-        
+
         statuses
     }
 
@@ -298,16 +319,16 @@ pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
     let _app_handle_for_watcher = app_handle.clone();
     thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
-        
+
         // Use RecommendedWatcher
         let mut watcher = RecommendedWatcher::new(tx, Config::default()).unwrap();
-        
+
         // Watch the parent directory because atomic writes (rename) might change inode
         let config_dir = crate::settings::get_settings_dir();
 
         if let Err(e) = watcher.watch(&config_dir, RecursiveMode::NonRecursive) {
-             crate::app_log!(force: true, "Failed to watch settings dir: {}", e);
-             return;
+            crate::app_log!(force: true, "Failed to watch settings dir: {}", e);
+            return;
         }
 
         crate::app_log!("Started watching settings at {:?}", config_dir);
@@ -317,7 +338,10 @@ pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
                 Ok(event) => {
                     // Check if settings.json was modified
                     let interesting = event.paths.iter().any(|p| {
-                        p.file_name().and_then(|n| n.to_str()).map(|s| s == "settings.json").unwrap_or(false)
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s == "settings.json")
+                            .unwrap_or(false)
                     });
 
                     if interesting {
@@ -337,7 +361,7 @@ pub fn start_settings_watcher(app_handle: tauri::AppHandle) {
                             RECONFIGURE_IN_FLIGHT.store(false, Ordering::SeqCst);
                         });
                     }
-                },
+                }
                 Err(e) => crate::app_log!(force: true, "Watch error: {:?}", e),
             }
         }
@@ -350,23 +374,40 @@ pub struct McpClient {
 
 impl McpClient {
     pub async fn new(config: McpServerConfig) -> Result<Self, String> {
-       let session = McpManager::get_client(config).await?;
-       Ok(Self { session })
+        let session = McpManager::get_client(config).await?;
+        Ok(Self { session })
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpTool>, String> {
         // builtin-1c-search processes requests sequentially; a heavy find_references
         // may block the queue for tens of seconds, so match the call_tool timeout
-        let timeout_secs = if self.session.config.id == "builtin-1c-search" { 120 } else { 60 };
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.list_tools()).await {
+        let timeout_secs = if self.session.config.id == "builtin-1c-search" {
+            120
+        } else {
+            60
+        };
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.list_tools())
+            .await
+        {
             Ok(res) => res,
             Err(_) => Err("Timeout listing tools".to_string()),
         }
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
-        let timeout_secs = if self.session.config.id == "builtin-1c-search" || self.session.config.id == "builtin-1c-naparnik" { 120 } else { 30 };
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), self.session.call_tool(name, arguments)).await {
+        let timeout_secs = if self.session.config.id == "builtin-1c-search"
+            || self.session.config.id == "builtin-1c-naparnik"
+        {
+            120
+        } else {
+            30
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            self.session.call_tool(name, arguments),
+        )
+        .await
+        {
             Ok(res) => res,
             Err(_) => Err(format!("Timeout executing tool '{}'", name)),
         }
@@ -380,18 +421,18 @@ enum TransportImpl {
         login: Option<String>,
         password: Option<String>,
         extra_headers: std::collections::HashMap<String, String>,
-        // None = not initialized yet, Some(None) = initialized (no session id), Some(Some(id)) = initialized with session id
+        // None = unknown, Some(None) = direct HTTP flow works without session, Some(Some(id)) = initialized session
         http_state: Arc<tokio::sync::Mutex<Option<Option<String>>>>,
     },
     Stdio {
         tx: mpsc::Sender<JsonRpcRequest>,
         pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
         // We keep the child here just to keep the process alive
-        _child: Arc<Mutex<Child>>, 
+        _child: Arc<Mutex<Child>>,
     },
     Internal {
         handler: Arc<dyn InternalMcpHandler>,
-    }
+    },
 }
 
 pub struct McpSession {
@@ -432,15 +473,267 @@ impl McpSession {
     fn new_internal(config: McpServerConfig, handler: Arc<dyn InternalMcpHandler>) -> Self {
         Self {
             config,
-            transport: TransportImpl::Internal {
-                handler,
-            },
+            transport: TransportImpl::Internal { handler },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
             help_status: Arc::new(tokio::sync::Mutex::new(String::new())),
             help_progress: Arc::new(tokio::sync::Mutex::new(0)),
             help_message: Arc::new(tokio::sync::Mutex::new(String::new())),
         }
+    }
+
+    fn trim_http_body(body: &str) -> String {
+        const MAX_CHARS: usize = 240;
+
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let shortened: String = trimmed.chars().take(MAX_CHARS).collect();
+        if trimmed.chars().count() > MAX_CHARS {
+            format!("{}...", shortened)
+        } else {
+            shortened
+        }
+    }
+
+    fn parse_http_rpc_response(content_type: &str, body: &str) -> Option<JsonRpcResponse> {
+        if content_type.contains("text/event-stream") {
+            for line in body.lines() {
+                let line = line.trim();
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(data) {
+                        if parsed.result.is_some() || parsed.error.is_some() {
+                            return Some(parsed);
+                        }
+                    }
+                }
+            }
+
+            None
+        } else {
+            serde_json::from_str::<JsonRpcResponse>(body).ok()
+        }
+    }
+
+    async fn send_http_payload(
+        client: &Client,
+        url: &str,
+        login: &Option<String>,
+        password: &Option<String>,
+        extra_headers: &HashMap<String, String>,
+        payload: &Value,
+        session_id: Option<&str>,
+        expect_rpc_response: bool,
+    ) -> Result<HttpRpcResponse, String> {
+        let mut rb = client
+            .post(url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .json(payload);
+
+        if let Some(l) = login {
+            if !l.is_empty() {
+                rb = rb.basic_auth(l, password.as_deref());
+            }
+        }
+
+        for (k, v) in extra_headers {
+            rb = rb.header(k.as_str(), v.as_str());
+        }
+
+        if let Some(session_id) = session_id {
+            rb = rb.header("Mcp-Session-Id", session_id);
+        }
+
+        let response = rb.send().await.map_err(|e| e.to_string())?;
+        let status = response.status();
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let rpc_response = if expect_rpc_response {
+            Self::parse_http_rpc_response(&content_type, &body)
+        } else {
+            None
+        };
+
+        Ok(HttpRpcResponse {
+            status,
+            body,
+            rpc_response,
+            session_id,
+        })
+    }
+
+    fn describe_http_response(response: &HttpRpcResponse) -> String {
+        if let Some(rpc_response) = &response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                return format!("MCP Error {}: {}", err.code, err.message);
+            }
+        }
+
+        let body = Self::trim_http_body(&response.body);
+        if body.is_empty() {
+            format!("HTTP {}", response.status.as_u16())
+        } else {
+            format!("HTTP {}: {}", response.status.as_u16(), body)
+        }
+    }
+
+    fn extract_http_result(response: &HttpRpcResponse) -> Result<Value, String> {
+        if let Some(rpc_response) = &response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                Err(format!("MCP Error {}: {}", err.code, err.message))
+            } else {
+                Ok(rpc_response.result.clone().unwrap_or(Value::Null))
+            }
+        } else if response.status.is_success() {
+            let body = Self::trim_http_body(&response.body);
+            if body.is_empty() {
+                Err("Failed to parse JSON-RPC response".to_string())
+            } else {
+                Err(format!("Failed to parse JSON-RPC response: {}", body))
+            }
+        } else {
+            Err(Self::describe_http_response(response))
+        }
+    }
+
+    fn should_retry_with_initialize(response: &HttpRpcResponse) -> bool {
+        let rpc_error_text = response
+            .rpc_response
+            .as_ref()
+            .and_then(|rpc| rpc.error.as_ref())
+            .map(|err| err.message.to_lowercase())
+            .unwrap_or_default();
+        let body_text = response.body.to_lowercase();
+
+        let rpc_requires_initialize = rpc_error_text.contains("initialize")
+            || rpc_error_text.contains("initialized")
+            || rpc_error_text.contains("mcp-session-id")
+            || (rpc_error_text.contains("session") && rpc_error_text.contains("mcp"));
+
+        if rpc_requires_initialize {
+            return true;
+        }
+
+        let body_requires_initialize = body_text.contains("streamable http")
+            || body_text.contains("mcp-session-id")
+            || body_text.contains("initialize")
+            || body_text.contains("initialized")
+            || (body_text.contains("session") && body_text.contains("mcp"));
+
+        body_requires_initialize
+            && matches!(
+                response.status.as_u16(),
+                400 | 404 | 405 | 409 | 412 | 415 | 422 | 428
+            )
+    }
+
+    async fn initialize_http_session(
+        client: &Client,
+        url: &str,
+        login: &Option<String>,
+        password: &Option<String>,
+        extra_headers: &HashMap<String, String>,
+    ) -> Result<Option<String>, String> {
+        let init_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "mini-ai-1c", "version": "1.0" }
+            }
+        });
+
+        let init_response = Self::send_http_payload(
+            client,
+            url,
+            login,
+            password,
+            extra_headers,
+            &init_payload,
+            None,
+            true,
+        )
+        .await?;
+
+        if !init_response.status.is_success() {
+            return Err(format!(
+                "HTTP MCP initialize failed: {}",
+                Self::describe_http_response(&init_response)
+            ));
+        }
+
+        if let Some(rpc_response) = &init_response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                return Err(format!(
+                    "HTTP MCP initialize failed: MCP Error {}: {}",
+                    err.code, err.message
+                ));
+            }
+        }
+
+        let session_id = init_response.session_id.clone();
+        let initialized_notification =
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
+
+        match Self::send_http_payload(
+            client,
+            url,
+            login,
+            password,
+            extra_headers,
+            &initialized_notification,
+            session_id.as_deref(),
+            false,
+        )
+        .await
+        {
+            Ok(response) if !response.status.is_success() => {
+                crate::app_log!(
+                    "[MCP][HTTP] initialized notification returned HTTP {} for {}",
+                    response.status.as_u16(),
+                    url
+                );
+            }
+            Err(error) => {
+                crate::app_log!(
+                    "[MCP][HTTP] initialized notification failed for {}: {}",
+                    url,
+                    error
+                );
+            }
+            _ => {}
+        }
+
+        crate::app_log!(
+            "[MCP][HTTP] Session initialized for {}{}",
+            url,
+            session_id
+                .as_ref()
+                .map(|sid| format!(", id={}", sid))
+                .unwrap_or_default()
+        );
+
+        Ok(session_id)
     }
 
     async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
@@ -453,82 +746,114 @@ impl McpSession {
 
         if let Some(app_handle) = app_handle_opt.as_ref() {
             let cmd_lower = command.to_lowercase();
-            let is_stdio_node_launcher = cmd_lower == "npx" || cmd_lower == "npx.cmd" || cmd_lower == "node" || cmd_lower.contains("tsx");
-            
-            if is_stdio_node_launcher {
-                crate::app_log!("[MCP] Resolving resources for command '{}' with args {:?}", command, args);
+            let is_stdio_node_launcher = cmd_lower == "npx"
+                || cmd_lower == "npx.cmd"
+                || cmd_lower == "node"
+                || cmd_lower.contains("tsx");
 
-                // Embedded resources for "True Portability"
-                let embedded_servers = [
-                    ("1c-help.cjs", include_bytes!("../mcp-servers/1c-help.cjs") as &[u8]),
-                    ("1c-metadata.cjs", include_bytes!("../mcp-servers/1c-metadata.cjs") as &[u8]),
-                    ("1c-naparnik.cjs", include_bytes!("../mcp-servers/1c-naparnik.cjs") as &[u8]),
-                ];
+            if is_stdio_node_launcher {
+                crate::app_log!(
+                    "[MCP] Resolving resources for command '{}' with args {:?}",
+                    command,
+                    args
+                );
 
                 for arg in args.iter_mut() {
-                    if arg.contains("mcp-servers") && (arg.ends_with(".ts") || arg.ends_with(".js") || arg.ends_with(".cjs")) {
+                    if arg.contains("mcp-servers")
+                        && (arg.ends_with(".ts") || arg.ends_with(".js") || arg.ends_with(".cjs"))
+                    {
                         let filename = std::path::Path::new(&*arg)
                             .file_name()
                             .and_then(|f| f.to_str())
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| arg.to_string());
-                        
+
                         let js_filename = filename.replace(".ts", ".cjs").replace(".js", ".cjs");
                         let mut resolved = false;
 
-                        // Phase 1: Try to find embedded resource and extract it to AppData
-                        if let Some((_, bytes)) = embedded_servers.iter().find(|(name, _)| *name == js_filename) {
-                            let mcp_dir = crate::settings::get_settings_dir().join("mcp-servers");
-                            let _ = std::fs::create_dir_all(&mcp_dir);
-                            let target_path = mcp_dir.join(&js_filename);
-                            
-                            // Only write if not exists or different size (basic cache)
-                            let current_size = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
-                            if current_size != bytes.len() as u64 {
-                                crate::app_log!("[MCP] Extracting embedded server to: {:?}", target_path);
-                                if let Err(e) = std::fs::write(&target_path, bytes) {
-                                    crate::app_log!("[ERROR] Failed to extract embedded MCP: {}", e);
-                                }
-                            }
-
-                            if target_path.exists() {
-                                let path_str = target_path.to_string_lossy().to_string();
-                                *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                                crate::app_log!("[MCP] Using embedded/extracted resource: {}", arg);
-                                resolved = true;
-                            }
-                        }
-
-                        // Phase 2: Fallback to standard Tauri resource resolution (MSI case)
+                        // In bundled builds, prefer packaged resources to avoid self-extracting
+                        // helper scripts into user-writable directories.
                         if !resolved {
                             let js_subpath = format!("mcp-servers/{}", js_filename);
-                            if let Ok(path) = app_handle.path().resolve(&js_subpath, tauri::path::BaseDirectory::Resource) {
+                            if let Ok(path) = app_handle
+                                .path()
+                                .resolve(&js_subpath, tauri::path::BaseDirectory::Resource)
+                            {
                                 if path.exists() {
                                     let path_str = path.to_string_lossy().to_string();
-                                    *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                    *arg = path_str
+                                        .strip_prefix(r"\\?\")
+                                        .unwrap_or(&path_str)
+                                        .to_string();
                                     crate::app_log!("[MCP] Resolved to MSI resource: {}", arg);
                                     resolved = true;
                                 }
                             }
                         }
-                        
-                        // Phase 3: Last resort - check next to EXE
+
+                        // Next to the main executable (portable/dev launch).
                         if !resolved {
-                             if let Ok(exe_path) = std::env::current_exe() {
-                                 if let Some(exe_dir) = exe_path.parent() {
-                                     let local_path = exe_dir.join("mcp-servers").join(&js_filename);
-                                     if local_path.exists() {
-                                         let path_str = local_path.to_string_lossy().to_string();
-                                         *arg = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                                         crate::app_log!("[MCP] Resolved to EXE-relative resource: {}", arg);
-                                         resolved = true;
-                                     }
-                                 }
-                             }
+                            if let Ok(exe_path) = std::env::current_exe() {
+                                if let Some(exe_dir) = exe_path.parent() {
+                                    let local_path = exe_dir.join("mcp-servers").join(&js_filename);
+                                    if local_path.exists() {
+                                        let path_str = local_path.to_string_lossy().to_string();
+                                        *arg = path_str
+                                            .strip_prefix(r"\\?\")
+                                            .unwrap_or(&path_str)
+                                            .to_string();
+                                        crate::app_log!(
+                                            "[MCP] Resolved to EXE-relative resource: {}",
+                                            arg
+                                        );
+                                        resolved = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Dev mode fallback when cwd is the project root or src-tauri.
+                        if !resolved {
+                            let dev_path = std::path::PathBuf::from("src-tauri/mcp-servers")
+                                .join(&js_filename);
+                            if dev_path.exists() {
+                                if let Ok(abs) = std::fs::canonicalize(&dev_path) {
+                                    let path_str = abs.to_string_lossy().to_string();
+                                    *arg = path_str
+                                        .strip_prefix(r"\\?\")
+                                        .unwrap_or(&path_str)
+                                        .to_string();
+                                    crate::app_log!(
+                                        "[MCP] Resolved to Dev-relative resource: {}",
+                                        arg
+                                    );
+                                    resolved = true;
+                                }
+                            } else {
+                                let dev_path2 =
+                                    std::path::PathBuf::from("mcp-servers").join(&js_filename);
+                                if dev_path2.exists() {
+                                    if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
+                                        let path_str = abs.to_string_lossy().to_string();
+                                        *arg = path_str
+                                            .strip_prefix(r"\\?\")
+                                            .unwrap_or(&path_str)
+                                            .to_string();
+                                        crate::app_log!(
+                                            "[MCP] Resolved to Dev-relative resource: {}",
+                                            arg
+                                        );
+                                        resolved = true;
+                                    }
+                                }
+                            }
                         }
 
                         if !resolved {
-                             crate::app_log!("[WARN] Could not resolve MCP resource '{}' via any method", js_filename);
+                            crate::app_log!(
+                                "[WARN] Could not resolve MCP resource '{}' via any method",
+                                js_filename
+                            );
                         }
                     }
                 }
@@ -541,49 +866,36 @@ impl McpSession {
                 let exe_subpath = format!("mcp-servers/{}", exe_filename);
                 let mut exe_resolved = false;
 
-                // Phase 1: Embedded binary (True Portability — same approach as .cjs servers)
-                let embedded_exe_servers: &[(&str, &[u8])] = &[
-                    ("mcp-1c-search.exe", include_bytes!("../mcp-servers/mcp-1c-search.exe")),
-                ];
-                if let Some((_, bytes)) = embedded_exe_servers.iter().find(|(name, _)| *name == exe_filename) {
-                    let mcp_dir = crate::settings::get_settings_dir().join("mcp-servers");
-                    let _ = std::fs::create_dir_all(&mcp_dir);
-                    let target_path = mcp_dir.join(&exe_filename);
-                    let current_size = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
-                    if current_size != bytes.len() as u64 {
-                        crate::app_log!("[MCP] Extracting embedded .exe to: {:?}", target_path);
-                        if let Err(e) = std::fs::write(&target_path, bytes) {
-                            crate::app_log!("[ERROR] Failed to extract embedded .exe: {}", e);
-                        }
-                    }
-                    if target_path.exists() {
-                        let path_str = target_path.to_string_lossy().to_string();
-                        command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
-                        crate::app_log!("[MCP] Using embedded/extracted .exe: {}", command);
-                        exe_resolved = true;
-                    }
-                }
-
-                // Phase 2: Tauri resource (MSI/NSIS bundle)
+                // In bundled builds, run packaged helper binaries directly instead of
+                // writing embedded bytes to disk on first launch.
                 if !exe_resolved {
-                    if let Ok(path) = app_handle.path().resolve(&exe_subpath, tauri::path::BaseDirectory::Resource) {
+                    if let Ok(path) = app_handle
+                        .path()
+                        .resolve(&exe_subpath, tauri::path::BaseDirectory::Resource)
+                    {
                         if path.exists() {
                             let path_str = path.to_string_lossy().to_string();
-                            command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                            command = path_str
+                                .strip_prefix(r"\\?\")
+                                .unwrap_or(&path_str)
+                                .to_string();
                             crate::app_log!("[MCP] Resolved .exe to resource: {}", command);
                             exe_resolved = true;
                         }
                     }
                 }
 
-                // Phase 3: Next to main EXE
+                // Next to main EXE for portable/dev launches.
                 if !exe_resolved {
                     if let Ok(current_exe) = std::env::current_exe() {
                         if let Some(exe_dir) = current_exe.parent() {
                             let local = exe_dir.join("mcp-servers").join(&exe_filename);
                             if local.exists() {
                                 let path_str = local.to_string_lossy().to_string();
-                                command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                command = path_str
+                                    .strip_prefix(r"\\?\")
+                                    .unwrap_or(&path_str)
+                                    .to_string();
                                 crate::app_log!("[MCP] Resolved .exe EXE-relative: {}", command);
                                 exe_resolved = true;
                             }
@@ -591,13 +903,17 @@ impl McpSession {
                     }
                 }
 
-                // Phase 4: Dev mode fallback (src-tauri/mcp-servers)
+                // Dev mode fallback (src-tauri/mcp-servers)
                 if !exe_resolved {
-                    let dev_path = std::path::PathBuf::from("src-tauri/mcp-servers").join(&exe_filename);
+                    let dev_path =
+                        std::path::PathBuf::from("src-tauri/mcp-servers").join(&exe_filename);
                     if dev_path.exists() {
                         if let Ok(abs) = std::fs::canonicalize(&dev_path) {
                             let path_str = abs.to_string_lossy().to_string();
-                            command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                            command = path_str
+                                .strip_prefix(r"\\?\")
+                                .unwrap_or(&path_str)
+                                .to_string();
                             crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
                             exe_resolved = true;
                         }
@@ -605,9 +921,12 @@ impl McpSession {
                         // try just mcp-servers (if cwd is already src-tauri)
                         let dev_path2 = std::path::PathBuf::from("mcp-servers").join(&exe_filename);
                         if dev_path2.exists() {
-                             if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
+                            if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
                                 let path_str = abs.to_string_lossy().to_string();
-                                command = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string();
+                                command = path_str
+                                    .strip_prefix(r"\\?\")
+                                    .unwrap_or(&path_str)
+                                    .to_string();
                                 crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
                                 exe_resolved = true;
                             }
@@ -616,7 +935,10 @@ impl McpSession {
                 }
 
                 if !exe_resolved {
-                    crate::app_log!("[WARN] Could not resolve .exe '{}' — ensure mcp-1c-search is built", exe_filename);
+                    crate::app_log!(
+                        "[WARN] Could not resolve .exe '{}' — ensure mcp-1c-search is built",
+                        exe_filename
+                    );
                 }
             }
         }
@@ -639,34 +961,36 @@ impl McpSession {
         {
             let cmd_lower = command.to_lowercase();
             let is_tsx_launcher = cmd_lower.contains("npx") || cmd_lower.contains("tsx");
-            
+
             if is_tsx_launcher {
-                 let has_ts_or_js = args.iter().any(|a| a.ends_with(".ts") || a.ends_with(".js") || a.ends_with(".cjs"));
-                 if has_ts_or_js {
-                     crate::app_log!("[MCP] Production mode detected. Switching launcher to node for portability.");
-                     command = "node".to_string();
-                     // Filter out npx specific flags and switch .ts to .js
-                     let mut new_args = Vec::new();
-                     for arg in args {
-                         if arg == "--yes" || arg == "tsx" || arg.contains("node_modules") {
-                             continue;
-                         }
-                         // Since we already resolved absolute paths above, we just pass them to node
-                         if arg.ends_with(".ts") || arg.ends_with(".js") {
-                             new_args.push(arg.replace(".ts", ".cjs").replace(".js", ".cjs"));
-                         } else {
-                             new_args.push(arg);
-                         }
-                     }
-                     args = new_args;
-                 }
+                let has_ts_or_js = args
+                    .iter()
+                    .any(|a| a.ends_with(".ts") || a.ends_with(".js") || a.ends_with(".cjs"));
+                if has_ts_or_js {
+                    crate::app_log!("[MCP] Production mode detected. Switching launcher to node for portability.");
+                    command = "node".to_string();
+                    // Filter out npx specific flags and switch .ts to .js
+                    let mut new_args = Vec::new();
+                    for arg in args {
+                        if arg == "--yes" || arg == "tsx" || arg.contains("node_modules") {
+                            continue;
+                        }
+                        // Since we already resolved absolute paths above, we just pass them to node
+                        if arg.ends_with(".ts") || arg.ends_with(".js") {
+                            new_args.push(arg.replace(".ts", ".cjs").replace(".js", ".cjs"));
+                        } else {
+                            new_args.push(arg);
+                        }
+                    }
+                    args = new_args;
+                }
             }
         }
 
         crate::app_log!("[MCP] Spawning server process: {} {:?}", command, args);
 
         let mut cmd = Command::new(&command);
-        
+
         if let Some(env) = &config.env {
             cmd.envs(env);
         }
@@ -688,7 +1012,8 @@ impl McpSession {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
 
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("Failed to spawn {}: {}", command, e))?;
 
         // Assign child to Windows Job Object so it's killed when Mini AI 1C exits
@@ -702,7 +1027,7 @@ impl McpSession {
         let stderr = child.stderr.take().ok_or("Failed to open stderr")?;
 
         let (tx, mut rx) = mpsc::channel::<JsonRpcRequest>(32);
-        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> = 
+        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let logs = Arc::new(Mutex::new(VecDeque::with_capacity(100)));
@@ -750,9 +1075,9 @@ impl McpSession {
                                  crate::app_log!("[MCP][{}] STDOUT RAW: {}", server_id_for_logs, line);
                                  let trimmed = line.trim();
                                  if !trimmed.starts_with('{') {
-                                     continue; 
+                                     continue;
                                  }
-                                 
+
                                  match serde_json::from_str::<JsonRpcResponse>(trimmed) {
                                      Ok(response) => {
                                          if let Some(id) = response.id {
@@ -919,154 +1244,156 @@ impl McpSession {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
             params: params.clone(),
             id,
         };
+        let req_payload = serde_json::to_value(&req).map_err(|e| e.to_string())?;
 
         match &self.transport {
-            TransportImpl::Http { client, url, login, password, extra_headers, http_state } => {
-                // MCP Streamable HTTP requires initialize handshake before any request
-                let session_id: Option<String> = {
-                    let mut state = http_state.lock().await;
-                    if state.is_none() {
-                        crate::app_log!("[MCP][HTTP] Initializing session for {}", url);
-                        let init_req = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 0,
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": "2024-11-05",
-                                "capabilities": {},
-                                "clientInfo": { "name": "mini-ai-1c", "version": "1.0" }
-                            }
-                        });
-                        let mut rb = client.post(url)
-                            .header("Accept", "application/json, text/event-stream")
-                            .header("Content-Type", "application/json")
-                            .json(&init_req);
-                        if let Some(l) = login { if !l.is_empty() { rb = rb.basic_auth(l, password.as_deref()); } }
-                        for (k, v) in extra_headers { rb = rb.header(k.as_str(), v.as_str()); }
-
-                        let sid = match rb.send().await {
-                            Ok(resp) => {
-                                let sid = resp.headers()
-                                    .get("mcp-session-id")
-                                    .and_then(|v| v.to_str().ok())
-                                    .map(|s| s.to_string());
-                                let _ = resp.text().await; // consume body
-                                // Send initialized notification
-                                let notif = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
-                                let mut nb = client.post(url)
-                                    .header("Accept", "application/json, text/event-stream")
-                                    .header("Content-Type", "application/json")
-                                    .json(&notif);
-                                if let Some(l) = login { if !l.is_empty() { nb = nb.basic_auth(l, password.as_deref()); } }
-                                for (k, v) in extra_headers { nb = nb.header(k.as_str(), v.as_str()); }
-                                if let Some(ref s) = sid { nb = nb.header("Mcp-Session-Id", s.as_str()); }
-                                let _ = nb.send().await;
-                                crate::app_log!("[MCP][HTTP] Session initialized, id={:?}", sid);
-                                sid
-                            }
-                            Err(e) => {
-                                crate::app_log!("[MCP][HTTP] Initialize failed ({}), proceeding without handshake", e);
-                                None
-                            }
-                        };
-                        *state = Some(sid.clone());
-                        sid
-                    } else {
-                        state.as_ref().and_then(|s| s.clone())
-                    }
+            TransportImpl::Http {
+                client,
+                url,
+                login,
+                password,
+                extra_headers,
+                http_state,
+            } => {
+                let known_state = {
+                    let state = http_state.lock().await;
+                    state.clone()
                 };
+                let current_session_id = known_state.as_ref().and_then(|state| state.clone());
 
-                let mut rb = client.post(url)
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("Content-Type", "application/json")
-                    .json(&req);
-                if let Some(l) = login {
-                    if !l.is_empty() {
-                       rb = rb.basic_auth(l, password.as_deref());
-                    }
-                }
-                for (k, v) in extra_headers {
-                    rb = rb.header(k.as_str(), v.as_str());
-                }
-                if let Some(ref sid) = session_id {
-                    rb = rb.header("Mcp-Session-Id", sid.as_str());
-                }
-                let resp = rb.send().await.map_err(|e| e.to_string())?;
-                let content_type = resp.headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
+                let initial_response = Self::send_http_payload(
+                    client,
+                    url,
+                    login,
+                    password,
+                    extra_headers,
+                    &req_payload,
+                    current_session_id.as_deref(),
+                    true,
+                )
+                .await?;
 
-                let rpc_res: JsonRpcResponse = if content_type.contains("text/event-stream") {
-                    // Parse SSE: find first "data: {...}" line with a result or error
-                    let body = resp.text().await.map_err(|e| e.to_string())?;
-                    let mut found: Option<JsonRpcResponse> = None;
-                    for line in body.lines() {
-                        let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if data.is_empty() || data == "[DONE]" {
-                                continue;
-                            }
-                            if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(data) {
-                                if parsed.result.is_some() || parsed.error.is_some() {
-                                    found = Some(parsed);
-                                    break;
-                                }
+                match Self::extract_http_result(&initial_response) {
+                    Ok(result) => {
+                        if known_state.is_none() {
+                            let mut state = http_state.lock().await;
+                            if state.is_none() {
+                                *state = Some(None);
                             }
                         }
+                        Ok(result)
                     }
-                    found.ok_or_else(|| "No JSON-RPC response found in SSE stream".to_string())?
-                } else {
-                    resp.json().await.map_err(|e| e.to_string())?
-                };
+                    Err(initial_error) => {
+                        if !Self::should_retry_with_initialize(&initial_response) {
+                            return Err(initial_error);
+                        }
 
-                if let Some(err) = rpc_res.error {
-                    Err(format!("MCP Error {}: {}", err.code, err.message))
-                } else {
-                    Ok(rpc_res.result.unwrap_or(Value::Null))
+                        if current_session_id.is_some() {
+                            crate::app_log!("[MCP][HTTP] Refreshing MCP session for {}", url);
+                        } else {
+                            crate::app_log!(
+                                "[MCP][HTTP] Falling back to initialize handshake for {}",
+                                url
+                            );
+                        }
+
+                        let new_session_id = Self::initialize_http_session(
+                            client,
+                            url,
+                            login,
+                            password,
+                            extra_headers,
+                        )
+                        .await?;
+
+                        {
+                            let mut state = http_state.lock().await;
+                            *state = Some(new_session_id.clone());
+                        }
+
+                        let retry_response = Self::send_http_payload(
+                            client,
+                            url,
+                            login,
+                            password,
+                            extra_headers,
+                            &req_payload,
+                            new_session_id.as_deref(),
+                            true,
+                        )
+                        .await?;
+
+                        Self::extract_http_result(&retry_response)
+                    }
                 }
             }
-            TransportImpl::Stdio { tx, pending_requests, .. } => {
+            TransportImpl::Stdio {
+                tx,
+                pending_requests,
+                ..
+            } => {
                 let (auth_tx, auth_rx) = oneshot::channel();
                 {
                     let mut pending = pending_requests.lock().await;
                     pending.insert(id, auth_tx);
                 }
 
-                crate::app_log!("[MCP][{}] >>> Sending: {}", self.config.id, serde_json::to_string(&req).unwrap_or_default());
-                tx.send(req).await.map_err(|_| "Failed to send request to MCP process".to_string())?;
+                crate::app_log!(
+                    "[MCP][{}] >>> Sending: {}",
+                    self.config.id,
+                    serde_json::to_string(&req).unwrap_or_default()
+                );
+                tx.send(req)
+                    .await
+                    .map_err(|_| "Failed to send request to MCP process".to_string())?;
 
                 // builtin-1c-search: ripgrep over large configs; builtin-1c-naparnik: network requests to ИТС
-                let timeout_secs = if self.config.id == "builtin-1c-search" || self.config.id == "builtin-1c-naparnik" { 120 } else { 30 };
+                let timeout_secs = if self.config.id == "builtin-1c-search"
+                    || self.config.id == "builtin-1c-naparnik"
+                {
+                    120
+                } else {
+                    30
+                };
                 match tokio::time::timeout(Duration::from_secs(timeout_secs), auth_rx).await {
                     Ok(Ok(result)) => {
-                        crate::app_log!("[MCP][{}] <<< Received result for id {}", self.config.id, id);
+                        crate::app_log!(
+                            "[MCP][{}] <<< Received result for id {}",
+                            self.config.id,
+                            id
+                        );
                         result
-                    },
+                    }
                     Ok(Err(_)) => {
-                        crate::app_log!("[MCP][{}][ERROR] Response channel closed for id {}", self.config.id, id);
+                        crate::app_log!(
+                            "[MCP][{}][ERROR] Response channel closed for id {}",
+                            self.config.id,
+                            id
+                        );
                         Err("Channel closed".to_string())
-                    },
+                    }
                     Err(_) => {
                         let mut pending = pending_requests.lock().await;
                         pending.remove(&id);
-                        crate::app_log!("[MCP][{}][ERROR] Request timed out for id {}", self.config.id, id);
+                        crate::app_log!(
+                            "[MCP][{}][ERROR] Request timed out for id {}",
+                            self.config.id,
+                            id
+                        );
                         Err("Timeout waiting for MCP response".to_string())
                     }
                 }
             }
-            TransportImpl::Internal { handler } => {
-                handler.call_tool(method, params.clone()).await
-            }
+            TransportImpl::Internal { handler } => handler.call_tool(method, params.clone()).await,
         }
     }
 
@@ -1076,13 +1403,20 @@ impl McpSession {
             _ => {
                 let result = self.request("tools/list", json!({})).await?;
                 if let Some(tools_arr) = result.get("tools").and_then(|v| v.as_array()) {
-                        let tools = tools_arr.iter().filter_map(|v| {
-                        Some(McpTool {
-                            name: v.get("name")?.as_str()?.to_string(),
-                            description: v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                            input_schema: v.get("inputSchema")?.clone(),
+                    let tools = tools_arr
+                        .iter()
+                        .filter_map(|v| {
+                            Some(McpTool {
+                                name: v.get("name")?.as_str()?.to_string(),
+                                description: v
+                                    .get("description")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                input_schema: v.get("inputSchema")?.clone(),
+                            })
                         })
-                    }).collect();
+                        .collect();
                     Ok(tools)
                 } else {
                     Ok(Vec::new())
@@ -1095,16 +1429,83 @@ impl McpSession {
         crate::app_log!("[DEBUG] McpSession::call_tool: {}", name);
         match &self.transport {
             TransportImpl::Internal { handler } => {
-                crate::app_log!("[DEBUG] McpSession::call_tool handling Internal for {}", name);
+                crate::app_log!(
+                    "[DEBUG] McpSession::call_tool handling Internal for {}",
+                    name
+                );
                 handler.call_tool(name, arguments).await
             }
             _ => {
-                self.request("tools/call", json!({
-                    "name": name,
-                    "arguments": arguments
-                })).await
+                self.request(
+                    "tools/call",
+                    json!({
+                        "name": name,
+                        "arguments": arguments
+                    }),
+                )
+                .await
             }
         }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_initialize_requirement_from_rpc_error() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::OK,
+            body: String::new(),
+            rpc_response: Some(JsonRpcResponse {
+                _jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32000,
+                    message: "Session not initialized. Call initialize first.".to_string(),
+                }),
+                id: Some(1),
+            }),
+            session_id: None,
+        };
+
+        assert!(McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn detects_initialize_requirement_from_http_body() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "MCP Streamable HTTP session missing. Send initialize first.".to_string(),
+            rpc_response: None,
+            session_id: None,
+        };
+
+        assert!(McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn does_not_retry_on_unrelated_http_error() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "Unauthorized".to_string(),
+            rpc_response: None,
+            session_id: None,
+        };
+
+        assert!(!McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn parses_sse_json_rpc_payload() {
+        let parsed = McpSession::parse_http_rpc_response(
+            "text/event-stream",
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+        )
+        .expect("expected parsed SSE payload");
+
+        let result = parsed.result.expect("expected result object");
+        assert_eq!(result.get("ok"), Some(&Value::Bool(true)));
+    }
+}
