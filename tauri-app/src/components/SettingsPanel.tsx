@@ -299,6 +299,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                             <div className="max-w-2xl mx-auto">
                                 <MCPSettings
                                     servers={settings.mcp_servers}
+                                    bslEnabled={settings.bsl_server.enabled}
                                     onUpdate={(mcpServers) => setSettings({ ...settings, mcp_servers: mcpServers })}
                                 />
                             </div>

@@ -315,6 +315,8 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                             {mcpPopoverIndex === index && (
                                                 <div className="absolute bottom-full left-0 mb-1 z-50">
                                                     <McpToolsPopover
+                                                        mcpServersOverride={settings.mcp_servers}
+                                                        bslEnabledOverride={settings.bsl_server.enabled}
                                                         onToolSelect={(toolName: string) => {
                                                             const insertion = `@${toolName} `;
                                                             const ta = textareaRefs.current[cmd.id];

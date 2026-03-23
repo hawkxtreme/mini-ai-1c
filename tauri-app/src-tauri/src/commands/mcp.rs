@@ -113,31 +113,37 @@ pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
 
 /// List tools across all enabled MCP servers (cached)
 #[tauri::command]
-pub async fn list_mcp_tools(force_refresh: Option<bool>) -> Result<Vec<McpToolInfo>, String> {
+pub async fn list_mcp_tools(
+    force_refresh: Option<bool>,
+    mcp_servers_override: Option<Vec<McpServerConfig>>,
+    bsl_enabled_override: Option<bool>,
+) -> Result<Vec<McpToolInfo>, String> {
     let force = force_refresh.unwrap_or(false);
     let settings = load_settings();
-    let mut configs: Vec<McpServerConfig> = settings
-        .mcp_servers
+    let mcp_servers = mcp_servers_override.unwrap_or_else(|| settings.mcp_servers.clone());
+    let bsl_enabled = bsl_enabled_override.unwrap_or(settings.bsl_server.enabled);
+
+    let mut configs: Vec<McpServerConfig> = mcp_servers
         .iter()
         .filter(|server| server.enabled)
         .cloned()
         .collect();
 
     // Include internal BSL LS only when it isn't already represented in the configured MCP list.
-    if settings.bsl_server.enabled
+    if bsl_enabled
         && !configs.iter().any(|config| config.id == INTERNAL_BSL_SERVER_ID)
     {
         configs.push(crate::settings::McpServerConfig {
             id: INTERNAL_BSL_SERVER_ID.to_string(),
             name: "BSL Language Server".to_string(),
-            enabled: settings.bsl_server.enabled,
+            enabled: bsl_enabled,
             transport: crate::settings::McpTransport::Internal,
             ..Default::default()
         });
     }
 
-    let cache_key = serde_json::to_string(&configs)
-        .unwrap_or_else(|_| format!("fallback:{}:{}", configs.len(), settings.bsl_server.enabled));
+    let cache_key = serde_json::to_string(&(configs.clone(), bsl_enabled))
+        .unwrap_or_else(|_| format!("fallback:{}:{}", configs.len(), bsl_enabled));
 
     // Check cache
     if !force {

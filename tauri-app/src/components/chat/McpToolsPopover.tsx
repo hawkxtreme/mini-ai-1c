@@ -1,11 +1,14 @@
 import { useEffect, useState, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { McpToolInfo } from '@/types/mcp';
+import type { McpServerConfig } from '@/types/settings';
 import { Info, RefreshCw } from 'lucide-react';
 
 interface Props {
     onToolSelect: (toolName: string) => void;
     onClose: () => void;
+    mcpServersOverride?: McpServerConfig[];
+    bslEnabledOverride?: boolean;
 }
 
 function getToolIdentity(tool: McpToolInfo) {
@@ -31,7 +34,12 @@ function sanitizeTools(tools: McpToolInfo[]) {
     return deduped;
 }
 
-export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
+export default function McpToolsPopover({
+    onToolSelect,
+    onClose,
+    mcpServersOverride,
+    bslEnabledOverride,
+}: Props) {
     const [tools, setTools] = useState<McpToolInfo[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -41,7 +49,11 @@ export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
         setLoading(true);
         setError(null);
         try {
-            const res = (await invoke('list_mcp_tools', { force_refresh: force })) as McpToolInfo[];
+            const res = (await invoke('list_mcp_tools', {
+                force_refresh: force,
+                mcp_servers_override: mcpServersOverride,
+                bsl_enabled_override: bslEnabledOverride,
+            })) as McpToolInfo[];
             setTools(sanitizeTools(res));
         } catch (e: any) {
             setError(e?.toString() || 'Failed to fetch tools');
@@ -53,7 +65,7 @@ export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
     useEffect(() => {
         // The input popover should reflect just-saved MCP settings immediately.
         fetchTools(true);
-    }, []);
+    }, [mcpServersOverride, bslEnabledOverride]);
 
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {

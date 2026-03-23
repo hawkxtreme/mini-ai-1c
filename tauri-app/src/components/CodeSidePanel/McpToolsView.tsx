@@ -1,17 +1,24 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { McpToolInfo } from '@/types/mcp';
+import type { McpServerConfig } from '@/types/settings';
 import { Wrench, RefreshCw, Info } from 'lucide-react';
 
 interface McpToolsViewProps {
     serverName?: string | null;
+    mcpServersOverride?: McpServerConfig[];
+    bslEnabledOverride?: boolean;
 }
 
 function getToolIdentity(tool: McpToolInfo) {
     return `${tool.server_name}::${tool.tool_name}`;
 }
 
-export function McpToolsView({ serverName }: McpToolsViewProps) {
+export function McpToolsView({
+    serverName,
+    mcpServersOverride,
+    bslEnabledOverride,
+}: McpToolsViewProps) {
     const [tools, setTools] = useState<McpToolInfo[]>([]);
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
@@ -22,7 +29,11 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
         setError(null);
         try {
             // Tauri invoke: command name and single arg object
-            const res = (await invoke('list_mcp_tools', { force_refresh: force })) as McpToolInfo[];
+            const res = (await invoke('list_mcp_tools', {
+                force_refresh: force,
+                mcp_servers_override: mcpServersOverride,
+                bsl_enabled_override: bslEnabledOverride,
+            })) as McpToolInfo[];
             const filtered = serverName ? res.filter(t => t.server_name === serverName) : res;
             // Deduplicate tools by server_name + tool_name to avoid collisions across servers.
             const seen = new Set<string>();
@@ -44,7 +55,7 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
 
     useEffect(() => {
         fetchTools(false);
-    }, [serverName]);
+    }, [serverName, mcpServersOverride, bslEnabledOverride]);
 
     const grouped = tools.reduce<Record<string, McpToolInfo[]>>((acc, t) => {
         acc[t.server_name] = acc[t.server_name] || [];
