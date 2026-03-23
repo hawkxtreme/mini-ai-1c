@@ -8,6 +8,29 @@ interface Props {
     onClose: () => void;
 }
 
+function getToolIdentity(tool: McpToolInfo) {
+    return `${tool.server_name}::${tool.tool_name}`;
+}
+
+function sanitizeTools(tools: McpToolInfo[]) {
+    const seen = new Set<string>();
+    const deduped: McpToolInfo[] = [];
+
+    for (const tool of tools) {
+        if (!tool.is_enabled || tool.tool_name === '__server_unavailable__') {
+            continue;
+        }
+
+        const toolId = getToolIdentity(tool);
+        if (!seen.has(toolId)) {
+            seen.add(toolId);
+            deduped.push(tool);
+        }
+    }
+
+    return deduped;
+}
+
 export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
     const [tools, setTools] = useState<McpToolInfo[]>([]);
     const [loading, setLoading] = useState(true);
@@ -19,7 +42,7 @@ export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
         setError(null);
         try {
             const res = (await invoke('list_mcp_tools', { force_refresh: force })) as McpToolInfo[];
-            setTools(res);
+            setTools(sanitizeTools(res));
         } catch (e: any) {
             setError(e?.toString() || 'Failed to fetch tools');
         } finally {
@@ -28,7 +51,8 @@ export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
     };
 
     useEffect(() => {
-        fetchTools(false);
+        // The input popover should reflect just-saved MCP settings immediately.
+        fetchTools(true);
     }, []);
 
     useEffect(() => {
@@ -82,7 +106,7 @@ export default function McpToolsPopover({ onToolSelect, onClose }: Props) {
                         <div className="flex flex-col">
                             {arr.map(t => (
                                 <button
-                                    key={t.tool_name}
+                                    key={getToolIdentity(t)}
                                     onClick={() => onToolSelect(t.tool_name)}
                                     className="flex items-center justify-between px-3 py-2 hover:bg-zinc-800/50 text-left transition-colors"
                                 >

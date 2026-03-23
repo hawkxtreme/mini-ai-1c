@@ -4,6 +4,7 @@ use futures::future::join_all;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -18,10 +19,11 @@ pub struct McpToolInfo {
 }
 
 lazy_static! {
-    static ref MCP_TOOLS_CACHE: Mutex<Option<(Vec<McpToolInfo>, Instant)>> = Mutex::new(None);
+    static ref MCP_TOOLS_CACHE: Mutex<Option<(String, Vec<McpToolInfo>, Instant)>> = Mutex::new(None);
 }
 const MCP_TOOLS_CACHE_TTL_SECS: u64 = 300;
 const MCP_TOOLS_REQUEST_TIMEOUT_SECS: u64 = 8;
+const INTERNAL_BSL_SERVER_ID: &str = "bsl-ls";
 
 fn unavailable_tool(server_name: String, message: String) -> Vec<McpToolInfo> {
     vec![McpToolInfo {
@@ -64,6 +66,23 @@ async fn collect_server_tools(config: McpServerConfig) -> Vec<McpToolInfo> {
     }
 }
 
+fn get_tool_identity(tool: &McpToolInfo) -> String {
+    format!("{}::{}", tool.server_name, tool.tool_name)
+}
+
+fn dedupe_tools(tools: Vec<McpToolInfo>) -> Vec<McpToolInfo> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(tools.len());
+
+    for tool in tools {
+        if seen.insert(get_tool_identity(&tool)) {
+            deduped.push(tool);
+        }
+    }
+
+    deduped
+}
+
 /// Get available MCP tools from a specific server
 #[tauri::command]
 pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
@@ -96,18 +115,6 @@ pub async fn get_mcp_tools(server_id: String) -> Result<Vec<McpTool>, String> {
 #[tauri::command]
 pub async fn list_mcp_tools(force_refresh: Option<bool>) -> Result<Vec<McpToolInfo>, String> {
     let force = force_refresh.unwrap_or(false);
-
-    // Check cache
-    if !force {
-        if let Ok(cache_lock) = MCP_TOOLS_CACHE.lock() {
-            if let Some((cached, ts)) = &*cache_lock {
-                if ts.elapsed().as_secs() < MCP_TOOLS_CACHE_TTL_SECS {
-                    return Ok(cached.clone());
-                }
-            }
-        }
-    }
-
     let settings = load_settings();
     let mut configs: Vec<McpServerConfig> = settings
         .mcp_servers
@@ -116,10 +123,12 @@ pub async fn list_mcp_tools(force_refresh: Option<bool>) -> Result<Vec<McpToolIn
         .cloned()
         .collect();
 
-    // Include BSL LS as internal server if enabled
-    if settings.bsl_server.enabled {
+    // Include internal BSL LS only when it isn't already represented in the configured MCP list.
+    if settings.bsl_server.enabled
+        && !configs.iter().any(|config| config.id == INTERNAL_BSL_SERVER_ID)
+    {
         configs.push(crate::settings::McpServerConfig {
-            id: "bsl-ls".to_string(),
+            id: INTERNAL_BSL_SERVER_ID.to_string(),
             name: "BSL Language Server".to_string(),
             enabled: settings.bsl_server.enabled,
             transport: crate::settings::McpTransport::Internal,
@@ -127,15 +136,31 @@ pub async fn list_mcp_tools(force_refresh: Option<bool>) -> Result<Vec<McpToolIn
         });
     }
 
-    let result: Vec<McpToolInfo> = join_all(configs.into_iter().map(collect_server_tools))
+    let cache_key = serde_json::to_string(&configs)
+        .unwrap_or_else(|_| format!("fallback:{}:{}", configs.len(), settings.bsl_server.enabled));
+
+    // Check cache
+    if !force {
+        if let Ok(cache_lock) = MCP_TOOLS_CACHE.lock() {
+            if let Some((cached_key, cached, ts)) = &*cache_lock {
+                if cached_key == &cache_key && ts.elapsed().as_secs() < MCP_TOOLS_CACHE_TTL_SECS {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
+    let result = dedupe_tools(
+        join_all(configs.into_iter().map(collect_server_tools))
         .await
         .into_iter()
         .flatten()
-        .collect();
+        .collect(),
+    );
 
     // Update cache
     if let Ok(mut cache_lock) = MCP_TOOLS_CACHE.lock() {
-        *cache_lock = Some((result.clone(), Instant::now()));
+        *cache_lock = Some((cache_key, result.clone(), Instant::now()));
     }
 
     Ok(result)
