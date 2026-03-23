@@ -482,6 +482,70 @@ impl McpSession {
         }
     }
 
+    fn normalize_spawn_path(path: &std::path::Path) -> String {
+        let path_str = path.to_string_lossy().to_string();
+        path_str
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&path_str)
+            .to_string()
+    }
+
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    fn write_embedded_mcp_resource_to_dir(
+        base_dir: &std::path::Path,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<std::path::PathBuf, String> {
+        let mcp_dir = base_dir.join("mcp-servers");
+        std::fs::create_dir_all(&mcp_dir)
+            .map_err(|e| format!("Failed to create portable MCP dir '{}': {}", mcp_dir.display(), e))?;
+
+        let target_path = mcp_dir.join(filename);
+        let needs_write = match std::fs::read(&target_path) {
+            Ok(existing) => existing != bytes,
+            Err(_) => true,
+        };
+
+        if needs_write {
+            std::fs::write(&target_path, bytes).map_err(|e| {
+                format!(
+                    "Failed to write embedded MCP resource '{}' to '{}': {}",
+                    filename,
+                    target_path.display(),
+                    e
+                )
+            })?;
+        }
+
+        Ok(target_path)
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn embedded_mcp_resource_bytes(filename: &str) -> Option<&'static [u8]> {
+        match filename {
+            "1c-help.cjs" => Some(include_bytes!("../mcp-servers/1c-help.cjs")),
+            "1c-metadata.cjs" => Some(include_bytes!("../mcp-servers/1c-metadata.cjs")),
+            "1c-naparnik.cjs" => Some(include_bytes!("../mcp-servers/1c-naparnik.cjs")),
+            "mcp-1c-search.exe" => Some(include_bytes!("../mcp-servers/mcp-1c-search.exe")),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn ensure_portable_embedded_mcp(filename: &str) -> Option<String> {
+        let bytes = Self::embedded_mcp_resource_bytes(filename)?;
+        let exe_path = std::env::current_exe().ok()?;
+        let exe_dir = exe_path.parent()?;
+
+        match Self::write_embedded_mcp_resource_to_dir(exe_dir, filename, bytes) {
+            Ok(path) => Some(Self::normalize_spawn_path(&path)),
+            Err(error) => {
+                crate::app_log!("[WARN] {}", error);
+                None
+            }
+        }
+    }
+
     fn trim_http_body(body: &str) -> String {
         const MAX_CHARS: usize = 240;
 
@@ -797,11 +861,7 @@ impl McpSession {
                                 if let Some(exe_dir) = exe_path.parent() {
                                     let local_path = exe_dir.join("mcp-servers").join(&js_filename);
                                     if local_path.exists() {
-                                        let path_str = local_path.to_string_lossy().to_string();
-                                        *arg = path_str
-                                            .strip_prefix(r"\\?\")
-                                            .unwrap_or(&path_str)
-                                            .to_string();
+                                        *arg = Self::normalize_spawn_path(&local_path);
                                         crate::app_log!(
                                             "[MCP] Resolved to EXE-relative resource: {}",
                                             arg
@@ -809,6 +869,19 @@ impl McpSession {
                                         resolved = true;
                                     }
                                 }
+                            }
+                        }
+
+                        #[cfg(not(debug_assertions))]
+                        if !resolved {
+                            if let Some(path_str) = Self::ensure_portable_embedded_mcp(&js_filename)
+                            {
+                                *arg = path_str;
+                                crate::app_log!(
+                                    "[MCP] Resolved to embedded portable resource: {}",
+                                    arg
+                                );
+                                resolved = true;
                             }
                         }
 
@@ -891,15 +964,23 @@ impl McpSession {
                         if let Some(exe_dir) = current_exe.parent() {
                             let local = exe_dir.join("mcp-servers").join(&exe_filename);
                             if local.exists() {
-                                let path_str = local.to_string_lossy().to_string();
-                                command = path_str
-                                    .strip_prefix(r"\\?\")
-                                    .unwrap_or(&path_str)
-                                    .to_string();
+                                command = Self::normalize_spawn_path(&local);
                                 crate::app_log!("[MCP] Resolved .exe EXE-relative: {}", command);
                                 exe_resolved = true;
                             }
                         }
+                    }
+                }
+
+                #[cfg(not(debug_assertions))]
+                if !exe_resolved {
+                    if let Some(path_str) = Self::ensure_portable_embedded_mcp(&exe_filename) {
+                        command = path_str;
+                        crate::app_log!(
+                            "[MCP] Resolved .exe via embedded portable fallback: {}",
+                            command
+                        );
+                        exe_resolved = true;
                     }
                 }
 
@@ -1452,6 +1533,7 @@ impl McpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn detects_initialize_requirement_from_rpc_error() {
@@ -1507,5 +1589,50 @@ mod tests {
 
         let result = parsed.result.expect("expected result object");
         assert_eq!(result.get("ok"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn writes_embedded_resource_into_mcp_servers_subdir() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("expected monotonic clock")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("mini-ai-1c-mcp-test-{unique}"));
+        let bytes = b"console.log('portable');";
+
+        let path = McpSession::write_embedded_mcp_resource_to_dir(&base_dir, "test-tool.cjs", bytes)
+            .expect("expected embedded resource write to succeed");
+
+        assert_eq!(path, base_dir.join("mcp-servers").join("test-tool.cjs"));
+        assert_eq!(
+            std::fs::read(&path).expect("expected written file to exist"),
+            bytes
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn rewrites_embedded_resource_when_contents_change() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("expected monotonic clock")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("mini-ai-1c-mcp-test-{unique}"));
+        let path = base_dir.join("mcp-servers").join("test-tool.cjs");
+
+        std::fs::create_dir_all(path.parent().expect("expected parent dir"))
+            .expect("expected test dir creation");
+        std::fs::write(&path, b"old").expect("expected seed file");
+
+        McpSession::write_embedded_mcp_resource_to_dir(&base_dir, "test-tool.cjs", b"new")
+            .expect("expected embedded resource rewrite to succeed");
+
+        assert_eq!(
+            std::fs::read(&path).expect("expected rewritten file to exist"),
+            b"new"
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }
