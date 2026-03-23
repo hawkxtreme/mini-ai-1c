@@ -1,9 +1,9 @@
-import { X, AlertTriangle, AlertCircle, FileCode, ArrowLeftRight, ChevronUp, ChevronDown, Trash2, Maximize2, Minimize2 } from 'lucide-react';
+import { X, AlertTriangle, AlertCircle, FileCode, ArrowLeftRight, ChevronUp, ChevronDown, Trash2, Maximize2, Minimize2, Wrench } from 'lucide-react';
 import { useSettings } from '@/contexts/SettingsContext';
 
 interface HeaderProps {
-    viewMode: 'editor' | 'diff';
-    setViewMode: (mode: 'editor' | 'diff') => void;
+    viewMode: 'editor' | 'diff' | 'tools';
+    setViewMode: (mode: 'editor' | 'diff' | 'tools') => void;
     isValidating: boolean;
     errorCount: number;
     warningCount: number;
@@ -114,6 +114,16 @@ export function Header({
                     >
                         <ArrowLeftRight className="w-3 h-3" />
                         <span>Diff</span>
+                    </button>
+                    <button
+                        onClick={() => setViewMode('tools')}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors flex items-center gap-1.5 ${
+                            viewMode === 'tools' ? activeTabClass : inactiveTabClass
+                        }`}
+                        title="MCP Tools"
+                    >
+                        <Wrench className="w-3 h-3" />
+                        <span>MCP</span>
                     </button>
                 </div>
 

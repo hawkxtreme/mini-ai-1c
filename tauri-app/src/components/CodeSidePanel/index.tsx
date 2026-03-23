@@ -6,6 +6,7 @@ import { useResizing } from './useResizing';
 import { Header } from './Header';
 import { Footer } from './Footer';
 import { DiagnosticsView } from './DiagnosticsView';
+import McpToolsView from './McpToolsView';
 import { applyDiffWithDiagnostics, hasDiffBlocks } from '../../utils/diffViewer';
 import { useSettings } from '@/contexts/SettingsContext';
 
@@ -26,7 +27,7 @@ export function CodeSidePanel({
     onDiffRejected,
     isFullWidth
 }: CodeSidePanelProps) {
-    const [viewMode, setViewMode] = useState<'editor' | 'diff'>('diff');
+    const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'tools'>('diff');
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
     const { settings } = useSettings();
     const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
@@ -354,7 +355,7 @@ export function CodeSidePanel({
                             readOnly: false,
                         }}
                     />
-                ) : (
+                ) : viewMode === 'diff' ? (
                     <DiffEditor
                         height="100%"
                         language="bsl"
@@ -570,6 +571,8 @@ export function CodeSidePanel({
                             ignoreTrimWhitespace: false,
                         }}
                     />
+                ) : (
+                    <McpToolsView />
                 )}
             </div>
 

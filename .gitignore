@@ -28,13 +28,14 @@ tauri-app/mcp-1c-search/**/target/
 *.suo
 *.sln
 *.sw?
-
+.cursor/
 # Project specifics
 _archive/
 specs/
 temp/
 *.tmp
 temp_*.bsl
+memory-bank/
 
 # Sensitive info
 .env
