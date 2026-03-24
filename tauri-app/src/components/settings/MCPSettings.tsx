@@ -629,7 +629,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                                 }`}
                                                 title={lastChecked > 0 ? `Проверен: ${new Date(lastChecked * 1000).toLocaleString()}` : 'Не проверялся'}
                                             >
-                                                {isConnected ? 'LIVE' : isUnknown ? 'НЕ ПРОВЕРЕН' : isOffline ? 'OFFLINE' : isError ? 'ERROR' : isStopped ? 'STOPPED' : 'OFFLINE'}
+                                                {isConnected ? 'LIVE' : isUnknown ? 'UNVERIFIED' : isOffline ? 'OFFLINE' : isError ? 'ERROR' : isStopped ? 'STOPPED' : 'OFFLINE'}
                                             </span>
                                         )}
                                     </div>
