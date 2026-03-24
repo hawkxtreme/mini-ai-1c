@@ -159,12 +159,13 @@ export interface McpServerConfig {
 export interface McpServerStatus {
     id: string;
     name: string;
-    status: string;
+    status: string;              // 'connected' | 'unknown' | 'offline' | 'error' | 'stopped' | 'disabled'
     transport: string;
     // 1С:Справка — поля прогресса индексации
     index_progress?: number;     // 0-100 (%)
     index_message?: string;      // Сообщение прогресса
     help_status?: string;        // 'unavailable' | 'indexing' | 'ready' | ''
+    last_checked?: number;       // unix timestamp of last health check, 0 = never
 }
 
 interface MCPSettingsProps {
@@ -555,7 +556,10 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                         const status = statuses[server.id];
                         const isConnected = status?.status === 'connected';
                         const isUnknown = status?.status === 'unknown';
+                        const isOffline = status?.status === 'offline';
+                        const isError = status?.status === 'error';
                         const isStopped = status?.status === 'stopped';
+                        const lastChecked = status?.last_checked || 0;
                         const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
                         const isBslLs = server.id === BUILTIN_BSL_LS_ID;
                         const isHelp = server.id === BUILTIN_1C_HELP_ID;
@@ -582,7 +586,19 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                     }
                                 `}>
                                     <div className="flex items-center gap-3 min-w-0">
-                                        <div className={`w-2 h-2 rounded-full shrink-0 transition-all duration-300 ${server.enabled ? (isConnected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-red-500 animate-pulse') : 'bg-zinc-600'}`} title={server.enabled ? (isConnected ? "Connected" : "Disconnected") : "Disabled"} />
+                                        <div className={`w-2 h-2 rounded-full shrink-0 transition-all duration-300 ${
+                                            !server.enabled ? 'bg-zinc-600'
+                                            : isConnected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]'
+                                            : isUnknown ? 'bg-amber-500'
+                                            : 'bg-red-500 animate-pulse'
+                                        }`} title={
+                                            !server.enabled ? "Disabled"
+                                            : isConnected ? "Connected"
+                                            : isUnknown ? "Not checked"
+                                            : isOffline ? "Offline"
+                                            : isError ? "Error"
+                                            : "Stopped"
+                                        } />
 
                                         {isBuiltin ? (
                                             <div className="flex items-center gap-2 min-w-0">
@@ -603,14 +619,17 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                         )}
 
                                         {server.enabled && (
-                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${
-                                                isConnected
-                                                    ? 'bg-green-500/10 text-green-400 border-green-500/20'
-                                                    : isUnknown
-                                                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                                                        : 'bg-red-500/10 text-red-400 border-red-500/20'
-                                            }`}>
-                                                {isConnected ? 'LIVE' : isUnknown ? 'UNKNOWN' : (isStopped ? 'STOPPED' : 'OFFLINE')}
+                                            <span
+                                                className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${
+                                                    isConnected
+                                                        ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                                                        : isUnknown
+                                                            ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                                                            : 'bg-red-500/10 text-red-400 border-red-500/20'
+                                                }`}
+                                                title={lastChecked > 0 ? `Проверен: ${new Date(lastChecked * 1000).toLocaleString()}` : 'Не проверялся'}
+                                            >
+                                                {isConnected ? 'LIVE' : isUnknown ? 'НЕ ПРОВЕРЕН' : isOffline ? 'OFFLINE' : isError ? 'ERROR' : isStopped ? 'STOPPED' : 'OFFLINE'}
                                             </span>
                                         )}
                                     </div>

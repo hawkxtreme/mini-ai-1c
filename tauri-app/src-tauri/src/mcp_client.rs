@@ -19,6 +19,13 @@ use tauri::Manager;
 
 static RECONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 #[async_trait]
 pub trait InternalMcpHandler: Send + Sync {
     async fn list_tools(&self) -> Vec<McpTool>;
@@ -66,6 +73,7 @@ pub struct McpServerStatus {
     pub index_progress: u32,       // 0-100 (%)
     pub index_message: String,     // Текущее сообщение прогресса
     pub help_status: String,       // "unavailable" | "indexing" | "ready" | ""
+    pub last_checked: i64,         // unix timestamp of last health check, 0 = never
 }
 
 // Global manager to hold persistent sessions
@@ -218,13 +226,12 @@ impl McpManager {
     pub async fn get_statuses() -> Vec<McpServerStatus> {
         let sessions = MCP_MANAGER.sessions.lock().await;
         let mut statuses = Vec::new();
+        let mut probe_candidates: Vec<(Arc<McpSession>, Option<HttpHealthState>, i64)> = Vec::new();
 
-        // Load settings to get the full list of servers, including those not running
         let settings = crate::settings::load_settings();
 
         let mut all_configs = settings.mcp_servers.clone();
         
-        // Add virtual BSL server
         all_configs.push(crate::settings::McpServerConfig {
             id: "bsl-ls".to_string(),
             name: "BSL Language Server".to_string(),
@@ -234,28 +241,32 @@ impl McpManager {
         });
 
         for config in all_configs {
-             let status = if !config.enabled {
-                 "disabled"
+             let (status, last_checked_ts) = if !config.enabled {
+                 ("disabled".to_string(), 0i64)
              } else if let Some((_, session)) = sessions.get(&config.id) {
-                 if session.is_alive().await {
-                     "connected"
-                 } else {
-                     "stopped"
+                 let st = session.get_status_string().await;
+                 let lc = session.get_last_checked().await;
+
+                 // Collect HTTP servers for potential background probing
+                 if config.transport == McpTransport::Http {
+                     let h = session.get_health().await;
+                     probe_candidates.push((session.clone(), h, lc));
                  }
+
+                 (st, lc)
              } else if config.transport == McpTransport::Internal {
                  let handlers = MCP_MANAGER.internal_handlers.lock().await;
                  if handlers.contains_key(&config.id) {
-                     "connected"
+                     ("connected".to_string(), 0i64)
                  } else {
-                     "stopped"
+                     ("stopped".to_string(), 0i64)
                  }
              } else {
-                 "stopped" // Enabled but not in sessions (failed to start or never started)
+                 ("stopped".to_string(), 0i64)
              };
 
              crate::app_log!("[DEBUG] MCP Server status for {}: {}", config.id, status);
              
-             // Извлекаем прогресс индексации для 1С:Справка и 1С:Поиск
              let (index_progress, index_message, help_status_str) = if config.id == "builtin-1c-help" || config.id == "builtin-1c-search" {
                  if let Some((_, session)) = sessions.get(&config.id) {
                      let progress = *session.help_progress.lock().await;
@@ -272,14 +283,37 @@ impl McpManager {
              statuses.push(McpServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
-                status: status.to_string(),
+                status,
                 transport: format!("{:?}", config.transport).to_lowercase(),
                 index_progress,
                 index_message,
                 help_status: help_status_str,
+                last_checked: last_checked_ts,
             });
         }
-        
+
+        // Background probing for HTTP servers (lightweight, with backoff)
+        const PROBE_CONNECTED_SECS: i64 = 30;
+        const PROBE_FAILED_SECS: i64 = 120;
+        let now = now_unix();
+
+        for (session, health, lc) in probe_candidates {
+            let needs_probe = match health {
+                Some(HttpHealthState::Connected) => now - lc > PROBE_CONNECTED_SECS,
+                Some(HttpHealthState::Offline) | Some(HttpHealthState::Error) => now - lc > PROBE_FAILED_SECS,
+                _ => false,
+            };
+            if needs_probe {
+                let reset_init = health != Some(HttpHealthState::Connected);
+                tokio::spawn(async move {
+                    if reset_init {
+                        session.reset_http_state().await;
+                    }
+                    let _ = session.list_tools().await;
+                });
+            }
+        }
+
         statuses
     }
 
@@ -393,6 +427,8 @@ enum TransportImpl {
         http_state: Arc<tokio::sync::Mutex<Option<Option<String>>>>,
         // Health state for HTTP transport (Unknown until first probe / request)
         health: Arc<tokio::sync::Mutex<HttpHealthState>>,
+        // Unix timestamp of the last health check (0 = never checked)
+        last_checked: Arc<tokio::sync::Mutex<i64>>,
     },
     Stdio {
         tx: mpsc::Sender<JsonRpcRequest>,
@@ -409,7 +445,8 @@ enum TransportImpl {
 enum HttpHealthState {
     Unknown,    // session created, no request attempted yet
     Connected,  // last request succeeded
-    Error,      // last request failed
+    Offline,    // network/transport failure (server unreachable, timeout)
+    Error,      // server reachable but protocol/parse error
 }
 
 pub struct McpSession {
@@ -439,6 +476,7 @@ impl McpSession {
                 extra_headers,
                 http_state: Arc::new(tokio::sync::Mutex::new(None)),
                 health: Arc::new(tokio::sync::Mutex::new(HttpHealthState::Unknown)),
+                last_checked: Arc::new(tokio::sync::Mutex::new(0i64)),
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -932,11 +970,47 @@ impl McpSession {
                 *h == HttpHealthState::Connected
             },
             TransportImpl::Stdio { _child, .. } => {
-                // Check if child has exited
                 let mut child = _child.lock().await;
                 child.try_wait().map(|s| s.is_none()).unwrap_or(false)
             }
             TransportImpl::Internal { handler } => handler.is_alive(),
+        }
+    }
+
+    async fn get_status_string(&self) -> String {
+        match &self.transport {
+            TransportImpl::Http { health, .. } => {
+                let h = health.lock().await;
+                match *h {
+                    HttpHealthState::Unknown   => "unknown",
+                    HttpHealthState::Connected => "connected",
+                    HttpHealthState::Offline   => "offline",
+                    HttpHealthState::Error     => "error",
+                }.to_string()
+            },
+            _ => {
+                if self.is_alive().await { "connected".to_string() } else { "stopped".to_string() }
+            }
+        }
+    }
+
+    async fn get_last_checked(&self) -> i64 {
+        match &self.transport {
+            TransportImpl::Http { last_checked, .. } => *last_checked.lock().await,
+            _ => 0,
+        }
+    }
+
+    async fn get_health(&self) -> Option<HttpHealthState> {
+        match &self.transport {
+            TransportImpl::Http { health, .. } => Some(*health.lock().await),
+            _ => None,
+        }
+    }
+
+    async fn reset_http_state(&self) {
+        if let TransportImpl::Http { http_state, .. } = &self.transport {
+            *http_state.lock().await = None;
         }
     }
 
@@ -950,7 +1024,7 @@ impl McpSession {
         };
 
         match &self.transport {
-            TransportImpl::Http { client, url, login, password, extra_headers, http_state, health } => {
+            TransportImpl::Http { client, url, login, password, extra_headers, http_state, health, last_checked } => {
                 // MCP Streamable HTTP requires initialize handshake before any request
                 let session_id: Option<String> = {
                     let mut state = http_state.lock().await;
@@ -979,13 +1053,11 @@ impl McpSession {
                                     .get("mcp-session-id")
                                     .and_then(|v| v.to_str().ok())
                                     .map(|s| s.to_string());
-                                let _ = resp.text().await; // consume body
-                                // Mark HTTP as connected on successful initialize
+                                let _ = resp.text().await;
                                 {
-                                    let mut h = health.lock().await;
-                                    *h = HttpHealthState::Connected;
+                                    *health.lock().await = HttpHealthState::Connected;
+                                    *last_checked.lock().await = now_unix();
                                 }
-                                // Send initialized notification
                                 let notif = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
                                 let mut nb = client.post(url)
                                     .header("Accept", "application/json, text/event-stream")
@@ -999,10 +1071,9 @@ impl McpSession {
                                 sid
                             }
                             Err(e) => {
-                                // Initialization failed — mark as error so is_alive() stays false
                                 {
-                                    let mut h = health.lock().await;
-                                    *h = HttpHealthState::Error;
+                                    *health.lock().await = HttpHealthState::Offline;
+                                    *last_checked.lock().await = now_unix();
                                 }
                                 crate::app_log!("[MCP][HTTP] Initialize failed ({}), proceeding without handshake", e);
                                 None
@@ -1034,8 +1105,8 @@ impl McpSession {
                 let resp = match rb.send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        let mut h = health.lock().await;
-                        *h = HttpHealthState::Error;
+                        *health.lock().await = HttpHealthState::Offline;
+                        *last_checked.lock().await = now_unix();
                         return Err(e.to_string());
                     }
                 };
@@ -1047,12 +1118,11 @@ impl McpSession {
                     .to_string();
 
                 let rpc_res: JsonRpcResponse = if content_type.contains("text/event-stream") {
-                    // Parse SSE: find first "data: {...}" line with a result or error
                     let body = match resp.text().await {
                         Ok(b) => b,
                         Err(e) => {
-                            let mut h = health.lock().await;
-                            *h = HttpHealthState::Error;
+                            *health.lock().await = HttpHealthState::Error;
+                            *last_checked.lock().await = now_unix();
                             return Err(e.to_string());
                         }
                     };
@@ -1075,29 +1145,29 @@ impl McpSession {
                     if let Some(parsed) = found {
                         parsed
                     } else {
-                        let mut h = health.lock().await;
-                        *h = HttpHealthState::Error;
+                        *health.lock().await = HttpHealthState::Error;
+                        *last_checked.lock().await = now_unix();
                         return Err("No JSON-RPC response found in SSE stream".to_string());
                     }
                 } else {
                     match resp.json().await {
                         Ok(j) => j,
                         Err(e) => {
-                            let mut h = health.lock().await;
-                            *h = HttpHealthState::Error;
+                            *health.lock().await = HttpHealthState::Error;
+                            *last_checked.lock().await = now_unix();
                             return Err(e.to_string());
                         }
                     }
                 };
 
+                // JSON-RPC error = server is reachable (transport healthy), just application-level error
+                {
+                    *health.lock().await = HttpHealthState::Connected;
+                    *last_checked.lock().await = now_unix();
+                }
                 if let Some(err) = rpc_res.error {
-                    // Protocol-level JSON-RPC error — the transport itself worked (server parsed request
-                    // and returned a structured error). Do NOT mark the HTTP transport as `Error` here,
-                    // otherwise reachable servers that return method/tool errors will appear offline.
                     Err(format!("MCP Error {}: {}", err.code, err.message))
                 } else {
-                    let mut h = health.lock().await;
-                    *h = HttpHealthState::Connected;
                     Ok(rpc_res.result.unwrap_or(Value::Null))
                 }
             }
