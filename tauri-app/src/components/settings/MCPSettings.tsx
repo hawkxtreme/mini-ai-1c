@@ -170,6 +170,7 @@ export interface McpServerStatus {
 
 interface MCPSettingsProps {
     servers: McpServerConfig[];
+    bslEnabled?: boolean;
     onUpdate: (servers: McpServerConfig[]) => void;
 }
 
@@ -179,7 +180,7 @@ const BUILTIN_BSL_LS_ID = 'bsl-ls';
 const BUILTIN_1C_HELP_ID = 'builtin-1c-help';
 const BUILTIN_1C_SEARCH_ID = 'builtin-1c-search';
 
-export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
+export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
     const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
     const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
@@ -1275,7 +1276,11 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                             </button>
                         </div>
                         <div className="flex-1 overflow-auto">
-                            <McpToolsView serverName={servers.find(s => s.id === viewingToolsId)?.name ?? null} />
+                            <McpToolsView
+                                serverName={servers.find(s => s.id === viewingToolsId)?.name ?? null}
+                                mcpServersOverride={servers}
+                                bslEnabledOverride={bslEnabled}
+                            />
                         </div>
                     </div>
                 </div>

@@ -85,32 +85,27 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     };
 
     const handleSaveSettings = async () => {
-        if (!settings) return;
-        // Re-assert the Saved appearance and cancel any pending hide timeout so
-        // rapid clicks while in Saved state don't allow the Saved appearance to
-        // flicker away.
+        if (!settings || saving) return;
         if (savedTimeoutRef.current) {
             clearTimeout(savedTimeoutRef.current);
             savedTimeoutRef.current = null;
         }
-        setShowSaved(true);
+        setPressed(false);
+        setShowSaved(false);
         setSaving(true);
 
         try {
             await invoke('save_settings', { newSettings: settings });
             await loadSettings(); // Синхронизируем глобальный контекст
 
-            // Keep the Saved appearance and schedule hiding after a short delay.
             setShowSaved(true);
-            if (savedTimeoutRef.current) {
-                clearTimeout(savedTimeoutRef.current);
-            }
             savedTimeoutRef.current = setTimeout(() => {
                 setShowSaved(false);
                 savedTimeoutRef.current = null;
             }, 3000);
         } catch (err) {
             console.error('Failed to save settings:', err);
+            setShowSaved(false);
         } finally {
             setSaving(false);
         }
@@ -334,6 +329,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                             <div className="max-w-2xl mx-auto">
                                 <MCPSettings
                                     servers={settings.mcp_servers}
+                                    bslEnabled={settings.bsl_server.enabled}
                                     onUpdate={(mcpServers) => setSettings({ ...settings, mcp_servers: mcpServers })}
                                 />
                             </div>
@@ -363,17 +359,14 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                     {tab !== 'llm' && settings && (
                         <button
                             onClick={handleSaveSettings}
-                            // allow pressing while showing Saved (so it "presses" without
-                            // changing appearance); only fully disable when saving from
-                            // the non-saved state to avoid accidental double-saves there.
-                            disabled={saving && !showSaved}
+                            disabled={saving}
                             onPointerDown={() => setPressed(true)}
                             onPointerUp={() => setPressed(false)}
                             onPointerCancel={() => setPressed(false)}
                             onPointerLeave={() => setPressed(false)}
                             className={`flex items-center justify-center gap-2 w-44 px-6 py-2 text-white rounded-lg transform-gpu transition-transform duration-150 ease-out ${pressed ? 'scale-95' : 'scale-100'} disabled:opacity-50 shadow-lg ${showSaved ? 'bg-green-600 hover:bg-green-500 shadow-green-900/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-900/20'}`}
                         >
-                            {saving && !showSaved ? (
+                            {saving ? (
                                 <>
                                     <RefreshCw className="w-4 h-4 animate-spin" />
                                     Saving...

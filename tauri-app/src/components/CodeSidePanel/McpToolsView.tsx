@@ -1,13 +1,24 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { McpToolInfo } from '@/types/mcp';
+import type { McpServerConfig } from '@/types/settings';
 import { Wrench, RefreshCw, Info } from 'lucide-react';
 
 interface McpToolsViewProps {
     serverName?: string | null;
+    mcpServersOverride?: McpServerConfig[];
+    bslEnabledOverride?: boolean;
 }
 
-export function McpToolsView({ serverName }: McpToolsViewProps) {
+function getToolIdentity(tool: McpToolInfo) {
+    return `${tool.server_name}::${tool.tool_name}`;
+}
+
+export function McpToolsView({
+    serverName,
+    mcpServersOverride,
+    bslEnabledOverride,
+}: McpToolsViewProps) {
     const [tools, setTools] = useState<McpToolInfo[]>([]);
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
@@ -18,14 +29,19 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
         setError(null);
         try {
             // Tauri invoke: command name and single arg object
-            const res = (await invoke('list_mcp_tools', { force_refresh: force })) as McpToolInfo[];
-            let filtered = serverName ? res.filter(t => t.server_name === serverName) : res;
-            // Deduplicate tools by tool_name (keep first occurrence)
+            const res = (await invoke('list_mcp_tools', {
+                force_refresh: force,
+                mcp_servers_override: mcpServersOverride,
+                bsl_enabled_override: bslEnabledOverride,
+            })) as McpToolInfo[];
+            const filtered = serverName ? res.filter(t => t.server_name === serverName) : res;
+            // Deduplicate tools by server_name + tool_name to avoid collisions across servers.
             const seen = new Set<string>();
             const deduped: McpToolInfo[] = [];
             for (const t of filtered) {
-                if (!seen.has(t.tool_name)) {
-                    seen.add(t.tool_name);
+                const toolId = getToolIdentity(t);
+                if (!seen.has(toolId)) {
+                    seen.add(toolId);
                     deduped.push(t);
                 }
             }
@@ -39,7 +55,7 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
 
     useEffect(() => {
         fetchTools(false);
-    }, [serverName]);
+    }, [serverName, mcpServersOverride, bslEnabledOverride]);
 
     const grouped = tools.reduce<Record<string, McpToolInfo[]>>((acc, t) => {
         acc[t.server_name] = acc[t.server_name] || [];
@@ -85,12 +101,13 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
                         </div>
                         <div className="grid grid-cols-1 gap-2">
                             {grouped[server].map(tool => {
-                                const isExpanded = expandedTool === tool.tool_name;
+                                const toolId = getToolIdentity(tool);
+                                const isExpanded = expandedTool === toolId;
                                 return (
                                     <div
-                                        key={tool.tool_name}
+                                        key={toolId}
                                         className={`p-2 border border-zinc-700 rounded transition-colors ${isExpanded ? 'bg-zinc-900' : 'hover:bg-zinc-900'} cursor-pointer`}
-                                        onClick={() => setExpandedTool(isExpanded ? null : tool.tool_name)}
+                                        onClick={() => setExpandedTool(isExpanded ? null : toolId)}
                                         role="button"
                                         tabIndex={0}
                                     >
@@ -117,7 +134,7 @@ export function McpToolsView({ serverName }: McpToolsViewProps) {
                                                     title="Info"
                                                     onClick={(e) => {
                                                         e.stopPropagation();
-                                                        setExpandedTool(isExpanded ? null : tool.tool_name);
+                                                        setExpandedTool(isExpanded ? null : toolId);
                                                     }}
                                                 >
                                                     <Info className="w-4 h-4" />
