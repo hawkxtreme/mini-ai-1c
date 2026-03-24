@@ -415,6 +415,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
             setTestResults(prev => ({ ...prev, [config.id]: { success: false, message: e.toString() } }));
         } finally {
             setTestingId(null);
+            try { await fetchStatuses(); } catch { /* ignore */ }
         }
     };
 
@@ -553,6 +554,7 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                     {sortedServers.map((server) => {
                         const status = statuses[server.id];
                         const isConnected = status?.status === 'connected';
+                        const isUnknown = status?.status === 'unknown';
                         const isStopped = status?.status === 'stopped';
                         const isMetadata = server.id === BUILTIN_1C_METADATA_ID;
                         const isBslLs = server.id === BUILTIN_BSL_LS_ID;
@@ -601,8 +603,14 @@ export function MCPSettings({ servers, onUpdate }: MCPSettingsProps) {
                                         )}
 
                                         {server.enabled && (
-                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${isConnected ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
-                                                {isConnected ? 'LIVE' : (isStopped ? 'STOPPED' : 'OFFLINE')}
+                                            <span className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 ${
+                                                isConnected
+                                                    ? 'bg-green-500/10 text-green-400 border-green-500/20'
+                                                    : isUnknown
+                                                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                                                        : 'bg-red-500/10 text-red-400 border-red-500/20'
+                                            }`}>
+                                                {isConnected ? 'LIVE' : isUnknown ? 'UNKNOWN' : (isStopped ? 'STOPPED' : 'OFFLINE')}
                                             </span>
                                         )}
                                     </div>
