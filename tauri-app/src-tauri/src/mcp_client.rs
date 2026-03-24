@@ -56,6 +56,13 @@ struct JsonRpcError {
     message: String,
 }
 
+struct HttpRpcResponse {
+    status: reqwest::StatusCode,
+    body: String,
+    rpc_response: Option<JsonRpcResponse>,
+    session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
     pub name: String,
@@ -498,6 +505,242 @@ impl McpSession {
             help_progress: Arc::new(tokio::sync::Mutex::new(0)),
             help_message: Arc::new(tokio::sync::Mutex::new(String::new())),
         }
+    }
+
+    fn trim_http_body(body: &str) -> String {
+        const MAX_CHARS: usize = 240;
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        let shortened: String = trimmed.chars().take(MAX_CHARS).collect();
+        if trimmed.chars().count() > MAX_CHARS {
+            format!("{}...", shortened)
+        } else {
+            shortened
+        }
+    }
+
+    fn parse_http_rpc_response(content_type: &str, body: &str) -> Option<JsonRpcResponse> {
+        if content_type.contains("text/event-stream") {
+            for line in body.lines() {
+                let line = line.trim();
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(data) {
+                        if parsed.result.is_some() || parsed.error.is_some() {
+                            return Some(parsed);
+                        }
+                    }
+                }
+            }
+            None
+        } else {
+            serde_json::from_str::<JsonRpcResponse>(body).ok()
+        }
+    }
+
+    async fn send_http_payload(
+        client: &Client,
+        url: &str,
+        login: &Option<String>,
+        password: &Option<String>,
+        extra_headers: &HashMap<String, String>,
+        payload: &Value,
+        session_id: Option<&str>,
+        expect_rpc_response: bool,
+    ) -> Result<HttpRpcResponse, String> {
+        let mut rb = client
+            .post(url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .json(payload);
+
+        if let Some(l) = login {
+            if !l.is_empty() {
+                rb = rb.basic_auth(l, password.as_deref());
+            }
+        }
+        for (k, v) in extra_headers {
+            rb = rb.header(k.as_str(), v.as_str());
+        }
+        if let Some(session_id) = session_id {
+            rb = rb.header("Mcp-Session-Id", session_id);
+        }
+
+        let response = rb.send().await.map_err(|e| e.to_string())?;
+        let status = response.status();
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let rpc_response = if expect_rpc_response {
+            Self::parse_http_rpc_response(&content_type, &body)
+        } else {
+            None
+        };
+
+        Ok(HttpRpcResponse {
+            status,
+            body,
+            rpc_response,
+            session_id,
+        })
+    }
+
+    fn describe_http_response(response: &HttpRpcResponse) -> String {
+        if let Some(rpc_response) = &response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                return format!("MCP Error {}: {}", err.code, err.message);
+            }
+        }
+        let body = Self::trim_http_body(&response.body);
+        if body.is_empty() {
+            format!("HTTP {}", response.status.as_u16())
+        } else {
+            format!("HTTP {}: {}", response.status.as_u16(), body)
+        }
+    }
+
+    fn extract_http_result(response: &HttpRpcResponse) -> Result<Value, String> {
+        if let Some(rpc_response) = &response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                Err(format!("MCP Error {}: {}", err.code, err.message))
+            } else {
+                Ok(rpc_response.result.clone().unwrap_or(Value::Null))
+            }
+        } else if response.status.is_success() {
+            let body = Self::trim_http_body(&response.body);
+            if body.is_empty() {
+                Err("Failed to parse JSON-RPC response".to_string())
+            } else {
+                Err(format!("Failed to parse JSON-RPC response: {}", body))
+            }
+        } else {
+            Err(Self::describe_http_response(response))
+        }
+    }
+
+    fn should_retry_with_initialize(response: &HttpRpcResponse) -> bool {
+        let rpc_error_text = response
+            .rpc_response
+            .as_ref()
+            .and_then(|rpc| rpc.error.as_ref())
+            .map(|err| err.message.to_lowercase())
+            .unwrap_or_default();
+        let body_text = response.body.to_lowercase();
+
+        let rpc_requires_initialize = rpc_error_text.contains("initialize")
+            || rpc_error_text.contains("initialized")
+            || rpc_error_text.contains("mcp-session-id")
+            || (rpc_error_text.contains("session") && rpc_error_text.contains("mcp"));
+
+        if rpc_requires_initialize {
+            return true;
+        }
+
+        let body_requires_initialize = body_text.contains("streamable http")
+            || body_text.contains("mcp-session-id")
+            || body_text.contains("initialize")
+            || body_text.contains("initialized")
+            || (body_text.contains("session") && body_text.contains("mcp"));
+
+        body_requires_initialize
+            && matches!(
+                response.status.as_u16(),
+                400 | 404 | 405 | 409 | 412 | 415 | 422 | 428
+            )
+    }
+
+    async fn initialize_http_session(
+        client: &Client,
+        url: &str,
+        login: &Option<String>,
+        password: &Option<String>,
+        extra_headers: &HashMap<String, String>,
+    ) -> Result<Option<String>, String> {
+        let init_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "mini-ai-1c", "version": "1.0" }
+            }
+        });
+
+        let init_response = Self::send_http_payload(
+            client, url, login, password, extra_headers,
+            &init_payload, None, true,
+        )
+        .await?;
+
+        if !init_response.status.is_success() {
+            return Err(format!(
+                "HTTP MCP initialize failed: {}",
+                Self::describe_http_response(&init_response)
+            ));
+        }
+
+        if let Some(rpc_response) = &init_response.rpc_response {
+            if let Some(err) = &rpc_response.error {
+                return Err(format!(
+                    "HTTP MCP initialize failed: MCP Error {}: {}",
+                    err.code, err.message
+                ));
+            }
+        }
+
+        let session_id = init_response.session_id.clone();
+
+        let initialized_notification =
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
+
+        match Self::send_http_payload(
+            client, url, login, password, extra_headers,
+            &initialized_notification, session_id.as_deref(), false,
+        )
+        .await
+        {
+            Ok(response) if !response.status.is_success() => {
+                crate::app_log!(
+                    "[MCP][HTTP] initialized notification returned HTTP {} for {}",
+                    response.status.as_u16(),
+                    url
+                );
+            }
+            Err(error) => {
+                crate::app_log!(
+                    "[MCP][HTTP] initialized notification failed for {}: {}",
+                    url,
+                    error
+                );
+            }
+            _ => {}
+        }
+
+        crate::app_log!(
+            "[MCP][HTTP] Session initialized for {}{}",
+            url,
+            session_id
+                .as_ref()
+                .map(|sid| format!(", id={}", sid))
+                .unwrap_or_default()
+        );
+
+        Ok(session_id)
     }
 
     async fn new_stdio(config: McpServerConfig, debug_all: bool) -> Result<Self, String> {
@@ -1015,160 +1258,137 @@ impl McpSession {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
             params: params.clone(),
             id,
         };
+        let req_payload = serde_json::to_value(&req).map_err(|e| e.to_string())?;
 
         match &self.transport {
-            TransportImpl::Http { client, url, login, password, extra_headers, http_state, health, last_checked } => {
-                // MCP Streamable HTTP requires initialize handshake before any request
-                let session_id: Option<String> = {
-                    let mut state = http_state.lock().await;
-                    if state.is_none() {
-                        crate::app_log!("[MCP][HTTP] Initializing session for {}", url);
-                        let init_req = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 0,
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": "2024-11-05",
-                                "capabilities": {},
-                                "clientInfo": { "name": "mini-ai-1c", "version": "1.0" }
-                            }
-                        });
-                        let mut rb = client.post(url)
-                            .header("Accept", "application/json, text/event-stream")
-                            .header("Content-Type", "application/json")
-                            .json(&init_req);
-                        if let Some(l) = login { if !l.is_empty() { rb = rb.basic_auth(l, password.as_deref()); } }
-                        for (k, v) in extra_headers { rb = rb.header(k.as_str(), v.as_str()); }
-
-                        let sid = match rb.send().await {
-                            Ok(resp) => {
-                                let sid = resp.headers()
-                                    .get("mcp-session-id")
-                                    .and_then(|v| v.to_str().ok())
-                                    .map(|s| s.to_string());
-                                let _ = resp.text().await;
-                                {
-                                    *health.lock().await = HttpHealthState::Connected;
-                                    *last_checked.lock().await = now_unix();
-                                }
-                                let notif = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}});
-                                let mut nb = client.post(url)
-                                    .header("Accept", "application/json, text/event-stream")
-                                    .header("Content-Type", "application/json")
-                                    .json(&notif);
-                                if let Some(l) = login { if !l.is_empty() { nb = nb.basic_auth(l, password.as_deref()); } }
-                                for (k, v) in extra_headers { nb = nb.header(k.as_str(), v.as_str()); }
-                                if let Some(ref s) = sid { nb = nb.header("Mcp-Session-Id", s.as_str()); }
-                                let _ = nb.send().await;
-                                crate::app_log!("[MCP][HTTP] Session initialized, id={:?}", sid);
-                                sid
-                            }
-                            Err(e) => {
-                                {
-                                    *health.lock().await = HttpHealthState::Offline;
-                                    *last_checked.lock().await = now_unix();
-                                }
-                                crate::app_log!("[MCP][HTTP] Initialize failed ({}), proceeding without handshake", e);
-                                None
-                            }
-                        };
-                        *state = Some(sid.clone());
-                        sid
-                    } else {
-                        state.as_ref().and_then(|s| s.clone())
-                    }
+            TransportImpl::Http {
+                client,
+                url,
+                login,
+                password,
+                extra_headers,
+                http_state,
+                health,
+                last_checked,
+            } => {
+                let known_state = {
+                    let state = http_state.lock().await;
+                    state.clone()
                 };
+                let current_session_id = known_state.as_ref().and_then(|state| state.clone());
 
-                let mut rb = client.post(url)
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("Content-Type", "application/json")
-                    .json(&req);
-                if let Some(l) = login {
-                    if !l.is_empty() {
-                       rb = rb.basic_auth(l, password.as_deref());
-                    }
-                }
-                for (k, v) in extra_headers {
-                    rb = rb.header(k.as_str(), v.as_str());
-                }
-                if let Some(ref sid) = session_id {
-                    rb = rb.header("Mcp-Session-Id", sid.as_str());
-                }
-
-                let resp = match rb.send().await {
+                let initial_response = match Self::send_http_payload(
+                    client,
+                    url,
+                    login,
+                    password,
+                    extra_headers,
+                    &req_payload,
+                    current_session_id.as_deref(),
+                    true,
+                )
+                .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         *health.lock().await = HttpHealthState::Offline;
                         *last_checked.lock().await = now_unix();
-                        return Err(e.to_string());
+                        return Err(e);
                     }
                 };
 
-                let content_type = resp.headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-
-                let rpc_res: JsonRpcResponse = if content_type.contains("text/event-stream") {
-                    let body = match resp.text().await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            *health.lock().await = HttpHealthState::Error;
-                            *last_checked.lock().await = now_unix();
-                            return Err(e.to_string());
-                        }
-                    };
-                    let mut found: Option<JsonRpcResponse> = None;
-                    for line in body.lines() {
-                        let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if data.is_empty() || data == "[DONE]" {
-                                continue;
-                            }
-                            if let Ok(parsed) = serde_json::from_str::<JsonRpcResponse>(data) {
-                                if parsed.result.is_some() || parsed.error.is_some() {
-                                    found = Some(parsed);
-                                    break;
-                                }
+                match Self::extract_http_result(&initial_response) {
+                    Ok(result) => {
+                        if known_state.is_none() {
+                            let mut state = http_state.lock().await;
+                            if state.is_none() {
+                                *state = Some(None);
                             }
                         }
-                    }
-                    if let Some(parsed) = found {
-                        parsed
-                    } else {
-                        *health.lock().await = HttpHealthState::Error;
+                        *health.lock().await = HttpHealthState::Connected;
                         *last_checked.lock().await = now_unix();
-                        return Err("No JSON-RPC response found in SSE stream".to_string());
+                        Ok(result)
                     }
-                } else {
-                    match resp.json().await {
-                        Ok(j) => j,
-                        Err(e) => {
+                    Err(initial_error) => {
+                        if !Self::should_retry_with_initialize(&initial_response) {
                             *health.lock().await = HttpHealthState::Error;
                             *last_checked.lock().await = now_unix();
-                            return Err(e.to_string());
+                            return Err(initial_error);
+                        }
+
+                        if current_session_id.is_some() {
+                            crate::app_log!("[MCP][HTTP] Refreshing MCP session for {}", url);
+                        } else {
+                            crate::app_log!(
+                                "[MCP][HTTP] Falling back to initialize handshake for {}",
+                                url
+                            );
+                        }
+
+                        let new_session_id = match Self::initialize_http_session(
+                            client,
+                            url,
+                            login,
+                            password,
+                            extra_headers,
+                        )
+                        .await
+                        {
+                            Ok(sid) => sid,
+                            Err(e) => {
+                                *health.lock().await = HttpHealthState::Error;
+                                *last_checked.lock().await = now_unix();
+                                return Err(e);
+                            }
+                        };
+
+                        {
+                            let mut state = http_state.lock().await;
+                            *state = Some(new_session_id.clone());
+                        }
+
+                        let retry_response = match Self::send_http_payload(
+                            client,
+                            url,
+                            login,
+                            password,
+                            extra_headers,
+                            &req_payload,
+                            new_session_id.as_deref(),
+                            true,
+                        )
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                *health.lock().await = HttpHealthState::Offline;
+                                *last_checked.lock().await = now_unix();
+                                return Err(e);
+                            }
+                        };
+
+                        match Self::extract_http_result(&retry_response) {
+                            Ok(result) => {
+                                *health.lock().await = HttpHealthState::Connected;
+                                *last_checked.lock().await = now_unix();
+                                Ok(result)
+                            }
+                            Err(e) => {
+                                *health.lock().await = HttpHealthState::Error;
+                                *last_checked.lock().await = now_unix();
+                                Err(e)
+                            }
                         }
                     }
-                };
-
-                // JSON-RPC error = server is reachable (transport healthy), just application-level error
-                {
-                    *health.lock().await = HttpHealthState::Connected;
-                    *last_checked.lock().await = now_unix();
-                }
-                if let Some(err) = rpc_res.error {
-                    Err(format!("MCP Error {}: {}", err.code, err.message))
-                } else {
-                    Ok(rpc_res.result.unwrap_or(Value::Null))
                 }
             }
             TransportImpl::Stdio { tx, pending_requests, .. } => {
@@ -1241,6 +1461,67 @@ impl McpSession {
                 })).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_initialize_requirement_from_rpc_error() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::OK,
+            body: String::new(),
+            rpc_response: Some(JsonRpcResponse {
+                _jsonrpc: "2.0".to_string(),
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32000,
+                    message: "Session not initialized. Call initialize first.".to_string(),
+                }),
+                id: Some(1),
+            }),
+            session_id: None,
+        };
+
+        assert!(McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn detects_initialize_requirement_from_http_body() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "MCP Streamable HTTP session missing. Send initialize first.".to_string(),
+            rpc_response: None,
+            session_id: None,
+        };
+
+        assert!(McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn does_not_retry_on_unrelated_http_error() {
+        let response = HttpRpcResponse {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "Unauthorized".to_string(),
+            rpc_response: None,
+            session_id: None,
+        };
+
+        assert!(!McpSession::should_retry_with_initialize(&response));
+    }
+
+    #[test]
+    fn parses_sse_json_rpc_payload() {
+        let parsed = McpSession::parse_http_rpc_response(
+            "text/event-stream",
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+        )
+        .expect("expected parsed SSE payload");
+
+        let result = parsed.result.expect("expected result object");
+        assert_eq!(result.get("ok"), Some(&Value::Bool(true)));
     }
 }
 
