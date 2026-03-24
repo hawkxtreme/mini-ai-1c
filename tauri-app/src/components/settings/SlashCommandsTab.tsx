@@ -219,7 +219,9 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                         <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">Шаблон промпта</label>
                                     </div>
                                     <textarea
-                                        ref={el => (textareaRefs.current[cmd.id] = el)}
+                                        ref={(el) => {
+                                            textareaRefs.current[cmd.id] = el;
+                                        }}
                                         value={cmd.template}
                                         onChange={e => updateCommand(index, { template: e.target.value })}
                                         className="w-full h-32 bg-[#1e1e21] border border-white/[0.05] rounded-lg px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-blue-500/50 transition-colors resize-none font-mono leading-relaxed shadow-inner"
@@ -313,6 +315,8 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                             {mcpPopoverIndex === index && (
                                                 <div className="absolute bottom-full left-0 mb-1 z-50">
                                                     <McpToolsPopover
+                                                        mcpServersOverride={settings.mcp_servers}
+                                                        bslEnabledOverride={settings.bsl_server.enabled}
                                                         onToolSelect={(toolName: string) => {
                                                             const insertion = `@${toolName} `;
                                                             const ta = textareaRefs.current[cmd.id];
