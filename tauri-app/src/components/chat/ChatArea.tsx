@@ -921,12 +921,16 @@ export function ChatArea({
                             {/* Системное сообщение */}
                             {(msg.role as string) === 'system' ? (
                                 msg.variant === 'info' ? (
-                                    <div className="w-full max-w-full rounded-xl border border-orange-700/30 bg-orange-950/20 px-4 py-2.5 text-[12px] text-orange-300/80 shadow-sm">
-                                        <div className="flex items-center gap-2">
-                                            <Info className="w-3.5 h-3.5 text-orange-400/70 flex-shrink-0" />
-                                            <span className="leading-relaxed">{msg.content}</span>
+                                <div className="w-full max-w-full rounded-xl border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-[13px] text-orange-200 shadow-sm transition-all hover:bg-orange-500/15">
+                                    <div className="flex items-start gap-3">
+                                        <div className="mt-0.5 p-1 bg-orange-500/20 rounded-lg">
+                                            <Info className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                                        </div>
+                                        <div className="flex-1 leading-relaxed font-medium">
+                                            {msg.content}
                                         </div>
                                     </div>
+                                </div>
                                 ) : (
                                     <div className="w-full max-w-full rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-[13px] text-amber-300/90 shadow-sm">
                                         <div className="flex items-start gap-2">
