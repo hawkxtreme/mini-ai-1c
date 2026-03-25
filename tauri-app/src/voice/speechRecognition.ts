@@ -13,7 +13,7 @@ export class SpeechRecognitionService {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             this.recognition = new SpeechRecognition();
-            this.recognition.continuous = true;
+            this.recognition.continuous = false; // Улучшаем совместимость с WebView2
             this.recognition.interimResults = true;
             this.recognition.lang = 'ru-RU';
         } else {
