@@ -236,7 +236,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
                         <div className="space-y-1.5">
-                            {profiles.profiles.filter(p => p.provider !== 'QwenCli').map(p => (
+                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'OneCNaparnik').map(p => (
                                 <div
                                     key={p.id}
                                     onClick={() => setEditingId(p.id)}
