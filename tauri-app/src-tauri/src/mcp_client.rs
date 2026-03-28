@@ -19,6 +19,13 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 static RECONFIGURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 #[async_trait]
 pub trait InternalMcpHandler: Send + Sync {
     async fn list_tools(&self) -> Vec<McpTool>;
@@ -75,6 +82,7 @@ pub struct McpServerStatus {
     pub index_progress: u32,   // 0-100 (%)
     pub index_message: String, // Текущее сообщение прогресса
     pub help_status: String,   // "unavailable" | "indexing" | "ready" | ""
+    pub last_checked: i64,     // unix timestamp of last health check, 0 = never
 }
 
 // Global manager to hold persistent sessions
@@ -180,6 +188,13 @@ impl McpManager {
                     continue;
                 }
 
+                if config.transport == McpTransport::Http {
+                    let session = Arc::new(McpSession::new_http(config.clone()));
+                    crate::app_log!("Started HTTP MCP session: {}", config.id);
+                    sessions.insert(config.id.clone(), (config, session));
+                    continue;
+                }
+
                 match McpSession::new_stdio(config.clone(), new_settings.debug_mode).await {
                     Ok(session) => {
                         let session = Arc::new(session);
@@ -229,6 +244,7 @@ impl McpManager {
     pub async fn get_statuses() -> Vec<McpServerStatus> {
         let sessions = MCP_MANAGER.sessions.lock().await;
         let mut statuses = Vec::new();
+        let mut probe_candidates: Vec<(Arc<McpSession>, Option<HttpHealthState>, i64)> = Vec::new();
 
         // Load settings to get the full list of servers, including those not running
         let settings = crate::settings::load_settings();
@@ -245,23 +261,25 @@ impl McpManager {
         });
 
         for config in all_configs {
-            let status = if !config.enabled {
-                "disabled"
+            let (status, last_checked) = if !config.enabled {
+                ("disabled".to_string(), 0)
             } else if let Some((_, session)) = sessions.get(&config.id) {
-                if session.is_alive().await {
-                    "connected"
-                } else {
-                    "stopped"
+                let status = session.get_status_string().await;
+                let last_checked = session.get_last_checked().await;
+                if config.transport == McpTransport::Http {
+                    let health = session.get_health().await;
+                    probe_candidates.push((session.clone(), health, last_checked));
                 }
+                (status, last_checked)
             } else if config.transport == McpTransport::Internal {
                 let handlers = MCP_MANAGER.internal_handlers.lock().await;
                 if handlers.contains_key(&config.id) {
-                    "connected"
+                    ("connected".to_string(), 0)
                 } else {
-                    "stopped"
+                    ("stopped".to_string(), 0)
                 }
             } else {
-                "stopped" // Enabled but not in sessions (failed to start or never started)
+                ("stopped".to_string(), 0) // Enabled but not in sessions (failed to start or never started)
             };
 
             crate::app_log!("[DEBUG] MCP Server status for {}: {}", config.id, status);
@@ -284,11 +302,44 @@ impl McpManager {
             statuses.push(McpServerStatus {
                 id: config.id.clone(),
                 name: config.name.clone(),
-                status: status.to_string(),
+                status,
                 transport: format!("{:?}", config.transport).to_lowercase(),
                 index_progress,
                 index_message,
                 help_status: help_status_str,
+                last_checked,
+            });
+        }
+
+        drop(sessions);
+
+        const PROBE_CONNECTED_SECS: i64 = 30;
+        const PROBE_FAILED_SECS: i64 = 120;
+        let now = now_unix();
+
+        for (session, health, last_checked) in probe_candidates {
+            let needs_probe = match health {
+                Some(HttpHealthState::Connected) => now - last_checked >= PROBE_CONNECTED_SECS,
+                Some(HttpHealthState::Offline) | Some(HttpHealthState::Error) => {
+                    now - last_checked >= PROBE_FAILED_SECS
+                }
+                _ => false,
+            };
+
+            if !needs_probe || !session.try_begin_http_probe(now).await {
+                continue;
+            }
+
+            tokio::spawn(async move {
+                let reset_init = matches!(
+                    session.get_health().await,
+                    Some(HttpHealthState::Offline) | Some(HttpHealthState::Error)
+                );
+                if reset_init {
+                    session.reset_http_state().await;
+                }
+                let _ = session.list_tools().await;
+                session.finish_http_probe();
             });
         }
 
@@ -421,8 +472,12 @@ enum TransportImpl {
         login: Option<String>,
         password: Option<String>,
         extra_headers: std::collections::HashMap<String, String>,
-        // None = unknown, Some(None) = direct HTTP flow works without session, Some(Some(id)) = initialized session
+        // None = not initialized yet, Some(None) = direct HTTP flow works without session,
+        // Some(Some(id)) = initialized session
         http_state: Arc<tokio::sync::Mutex<Option<Option<String>>>>,
+        health: Arc<tokio::sync::Mutex<HttpHealthState>>,
+        last_checked: Arc<tokio::sync::Mutex<i64>>,
+        probe_in_flight: Arc<AtomicBool>,
     },
     Stdio {
         tx: mpsc::Sender<JsonRpcRequest>,
@@ -433,6 +488,14 @@ enum TransportImpl {
     Internal {
         handler: Arc<dyn InternalMcpHandler>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpHealthState {
+    Unknown,
+    Connected,
+    Offline,
+    Error,
 }
 
 pub struct McpSession {
@@ -461,6 +524,9 @@ impl McpSession {
                 password: config.password,
                 extra_headers,
                 http_state: Arc::new(tokio::sync::Mutex::new(None)),
+                health: Arc::new(tokio::sync::Mutex::new(HttpHealthState::Unknown)),
+                last_checked: Arc::new(tokio::sync::Mutex::new(0)),
+                probe_in_flight: Arc::new(AtomicBool::new(false)),
             },
             next_id: std::sync::atomic::AtomicU64::new(1),
             logs: Arc::new(Mutex::new(VecDeque::new())),
@@ -1349,6 +1415,9 @@ impl McpSession {
                 password,
                 extra_headers,
                 http_state,
+                health,
+                last_checked,
+                ..
             } => {
                 let known_state = {
                     let state = http_state.lock().await;
@@ -1356,7 +1425,7 @@ impl McpSession {
                 };
                 let current_session_id = known_state.as_ref().and_then(|state| state.clone());
 
-                let initial_response = Self::send_http_payload(
+                let initial_response = match Self::send_http_payload(
                     client,
                     url,
                     login,
@@ -1366,7 +1435,15 @@ impl McpSession {
                     current_session_id.as_deref(),
                     true,
                 )
-                .await?;
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        *health.lock().await = HttpHealthState::Offline;
+                        *last_checked.lock().await = now_unix();
+                        return Err(error);
+                    }
+                };
 
                 match Self::extract_http_result(&initial_response) {
                     Ok(result) => {
@@ -1376,10 +1453,24 @@ impl McpSession {
                                 *state = Some(None);
                             }
                         }
+                        *health.lock().await = HttpHealthState::Connected;
+                        *last_checked.lock().await = now_unix();
                         Ok(result)
                     }
                     Err(initial_error) => {
                         if !Self::should_retry_with_initialize(&initial_response) {
+                            let next_health = if initial_response
+                                .rpc_response
+                                .as_ref()
+                                .and_then(|response| response.error.as_ref())
+                                .is_some()
+                            {
+                                HttpHealthState::Connected
+                            } else {
+                                HttpHealthState::Error
+                            };
+                            *health.lock().await = next_health;
+                            *last_checked.lock().await = now_unix();
                             return Err(initial_error);
                         }
 
@@ -1392,21 +1483,29 @@ impl McpSession {
                             );
                         }
 
-                        let new_session_id = Self::initialize_http_session(
+                        let new_session_id = match Self::initialize_http_session(
                             client,
                             url,
                             login,
                             password,
                             extra_headers,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(session_id) => session_id,
+                            Err(error) => {
+                                *health.lock().await = HttpHealthState::Error;
+                                *last_checked.lock().await = now_unix();
+                                return Err(error);
+                            }
+                        };
 
                         {
                             let mut state = http_state.lock().await;
                             *state = Some(new_session_id.clone());
                         }
 
-                        let retry_response = Self::send_http_payload(
+                        let retry_response = match Self::send_http_payload(
                             client,
                             url,
                             login,
@@ -1416,9 +1515,38 @@ impl McpSession {
                             new_session_id.as_deref(),
                             true,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(error) => {
+                                *health.lock().await = HttpHealthState::Offline;
+                                *last_checked.lock().await = now_unix();
+                                return Err(error);
+                            }
+                        };
 
-                        Self::extract_http_result(&retry_response)
+                        match Self::extract_http_result(&retry_response) {
+                            Ok(result) => {
+                                *health.lock().await = HttpHealthState::Connected;
+                                *last_checked.lock().await = now_unix();
+                                Ok(result)
+                            }
+                            Err(error) => {
+                                let next_health = if retry_response
+                                    .rpc_response
+                                    .as_ref()
+                                    .and_then(|response| response.error.as_ref())
+                                    .is_some()
+                                {
+                                    HttpHealthState::Connected
+                                } else {
+                                    HttpHealthState::Error
+                                };
+                                *health.lock().await = next_health;
+                                *last_checked.lock().await = now_unix();
+                                Err(error)
+                            }
+                        }
                     }
                 }
             }
@@ -1531,6 +1659,74 @@ impl McpSession {
                 )
                 .await
             }
+        }
+    }
+
+    async fn get_status_string(&self) -> String {
+        match &self.transport {
+            TransportImpl::Http { health, .. } => match *health.lock().await {
+                HttpHealthState::Unknown => "unknown",
+                HttpHealthState::Connected => "connected",
+                HttpHealthState::Offline => "offline",
+                HttpHealthState::Error => "error",
+            }
+            .to_string(),
+            _ => {
+                if self.is_alive().await {
+                    "connected".to_string()
+                } else {
+                    "stopped".to_string()
+                }
+            }
+        }
+    }
+
+    async fn get_last_checked(&self) -> i64 {
+        match &self.transport {
+            TransportImpl::Http { last_checked, .. } => *last_checked.lock().await,
+            _ => 0,
+        }
+    }
+
+    async fn get_health(&self) -> Option<HttpHealthState> {
+        match &self.transport {
+            TransportImpl::Http { health, .. } => Some(*health.lock().await),
+            _ => None,
+        }
+    }
+
+    async fn reset_http_state(&self) {
+        if let TransportImpl::Http { http_state, .. } = &self.transport {
+            *http_state.lock().await = None;
+        }
+    }
+
+    async fn try_begin_http_probe(&self, now: i64) -> bool {
+        match &self.transport {
+            TransportImpl::Http {
+                last_checked,
+                probe_in_flight,
+                ..
+            } => {
+                if probe_in_flight
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    return false;
+                }
+                *last_checked.lock().await = now;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn finish_http_probe(&self) {
+        if let TransportImpl::Http {
+            probe_in_flight, ..
+        } = &self.transport
+        {
+            probe_in_flight.store(false, Ordering::SeqCst);
         }
     }
 }
