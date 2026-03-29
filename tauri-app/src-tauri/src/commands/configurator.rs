@@ -1690,29 +1690,18 @@ pub fn set_configurator_editor_bridge_enabled(enabled: bool) -> Result<(), Strin
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EditorBridgeStatus {
-    pub dotnet: bool,
     pub bridge: bool,
 }
 
-/// Check whether .NET 8.0 runtime and EditorBridge.exe are available.
+/// Check whether EditorBridge.exe is available.
+/// EditorBridge is a self-contained single-file exe — no .NET installation required.
 #[tauri::command]
 pub fn check_editor_bridge_status<R: Runtime>(_app: AppHandle<R>) -> EditorBridgeStatus {
-    // .NET check: run `dotnet --list-runtimes` and look for "Microsoft.NETCore.App 8."
-    let dotnet = std::process::Command::new("dotnet")
-        .args(["--list-runtimes"])
-        .output()
-        .ok()
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            out.contains("Microsoft.NETCore.App 8.")
-        })
-        .unwrap_or(false);
-
     let bridge = crate::editor_bridge::find_exe()
         .map(|path| path.exists())
         .unwrap_or(false);
 
-    EditorBridgeStatus { dotnet, bridge }
+    EditorBridgeStatus { bridge }
 }
 
 #[tauri::command]

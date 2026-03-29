@@ -4,7 +4,7 @@
 //! This module manages the bridge process lifecycle and provides a typed Rust API.
 //!
 //! Architecture:
-//!   EditorBridge.exe (C#, .NET Framework 4.8)
+//!   EditorBridge.exe (C#, .NET 8, self-contained single-file — no runtime install required)
 //!     ↕ \\.\pipe\mini-ai-editor-bridge  (JSON-RPC lines)
 //!   editor_bridge.rs  (Rust, this module)
 //!     ↕ function calls

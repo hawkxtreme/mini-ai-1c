@@ -4,7 +4,6 @@ import {
     CheckCircle,
     CircleHelp,
     Download,
-    ExternalLink,
     Monitor,
     RefreshCw,
     XCircle
@@ -23,7 +22,6 @@ interface ConfiguratorTabProps {
     testCaptureResult: string | null;
 }
 
-type DotNetStatus = 'checking' | 'installed' | 'missing' | 'unknown';
 type BridgeStatus = 'checking' | 'ready' | 'missing' | 'unknown';
 
 export function ConfiguratorTab({
@@ -34,7 +32,6 @@ export function ConfiguratorTab({
     testCapture,
     testCaptureResult
 }: ConfiguratorTabProps) {
-    const [dotNetStatus, setDotNetStatus] = useState<DotNetStatus>('unknown');
     const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('unknown');
     const [checking, setChecking] = useState(false);
     const [restartingBridge, setRestartingBridge] = useState(false);
@@ -53,15 +50,12 @@ export function ConfiguratorTab({
     async function checkStatus() {
         setChecking(true);
         setBridgeMessage(null);
-        setDotNetStatus('checking');
         setBridgeStatus('checking');
 
         try {
-            const result = await invoke<{ dotnet: boolean; bridge: boolean }>('check_editor_bridge_status');
-            setDotNetStatus(result.dotnet ? 'installed' : 'missing');
+            const result = await invoke<{ bridge: boolean }>('check_editor_bridge_status');
             setBridgeStatus(result.bridge ? 'ready' : 'missing');
         } catch {
-            setDotNetStatus('unknown');
             setBridgeStatus('unknown');
         } finally {
             setChecking(false);
@@ -155,21 +149,7 @@ export function ConfiguratorTab({
                     <div className="space-y-3 rounded-xl border border-zinc-700 bg-zinc-800/50 p-4">
                         <div className="mb-1 text-xs font-semibold uppercase text-zinc-400">Состояние</div>
 
-                        <StatusRow label=".NET Runtime 8.0" status={dotNetStatus} checking={checking} />
                         <StatusRow label="EditorBridge.exe" status={bridgeStatus} checking={checking} />
-
-                        {dotNetStatus === 'missing' && (
-                            <div className="mt-2 space-y-2 rounded-lg border border-yellow-700/50 bg-yellow-900/30 p-3 text-sm text-yellow-300">
-                                <p>Для работы Editor Bridge требуется .NET 8.0.</p>
-                                <p className="text-xs text-yellow-400">Это бесплатный компонент от Microsoft.</p>
-                                <button
-                                    className="flex items-center gap-1 text-xs text-blue-400 underline hover:text-blue-300"
-                                    onClick={() => invoke('open_url', { url: 'https://dotnet.microsoft.com/download/dotnet/8.0' })}
-                                >
-                                    Скачать .NET 8.0 <ExternalLink className="h-3 w-3" />
-                                </button>
-                            </div>
-                        )}
 
                         {detectedWindows.length === 0 && (
                             <div className="mt-1 flex items-center gap-1.5 text-xs italic text-zinc-500">
@@ -355,7 +335,7 @@ function StatusRow({
     checking
 }: {
     label: string;
-    status: DotNetStatus | BridgeStatus;
+    status: BridgeStatus;
     checking: boolean;
 }) {
     let icon: React.ReactNode;
@@ -366,9 +346,9 @@ function StatusRow({
         icon = <RefreshCw className="h-4 w-4 animate-spin text-zinc-400" />;
         text = 'Проверяю...';
         color = 'text-zinc-400';
-    } else if (status === 'installed' || status === 'ready') {
+    } else if (status === 'ready') {
         icon = <CheckCircle className="h-4 w-4 text-green-500" />;
-        text = status === 'installed' ? 'Установлен' : 'Готов';
+        text = 'Готов';
         color = 'text-green-400';
     } else if (status === 'missing') {
         icon = <XCircle className="h-4 w-4 text-red-500" />;
