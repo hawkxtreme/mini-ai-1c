@@ -8,7 +8,6 @@ import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle, ConfiguratorTitleContext } from '../../utils/configurator';
 import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
 import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info, Wrench } from 'lucide-react';
-import { useVoiceInput } from '../../voice/useVoiceInput';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
@@ -22,6 +21,7 @@ import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from '../settings/QwenAuthModal';
 import { QueuedMessages } from './QueuedMessages';
 import McpToolsPopover from './McpToolsPopover';
+import { VoiceInputControl } from '../voice/VoiceInputControl';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -177,7 +177,6 @@ export function ChatArea({
     const [configuratorTitleCtx, setConfiguratorTitleCtx] = useState<ConfiguratorTitleContext | null>(null);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [editText, setEditText] = useState('');
-    const [showVoiceHint, setShowVoiceHint] = useState(false);
 
     // Slash Commands state
     const [showCommands, setShowCommands] = useState(false);
@@ -301,25 +300,9 @@ export function ChatArea({
         settings?.mcp_servers,
     ]);
 
-    const { isRecording, toggleRecording, isSupported, error: voiceError, permissionState } = useVoiceInput((text) => {
+    const appendVoiceText = useCallback((text: string) => {
         setInput(prev => prev + (prev ? ' ' : '') + text);
-    }, selectedHwnd);
-
-    // Show hint if permission is denied or pending on first click
-    useEffect(() => {
-        if (voiceError === 'not-allowed') {
-            setShowVoiceHint(true);
-            const timer = setTimeout(() => setShowVoiceHint(false), 8000);
-            return () => clearTimeout(timer);
-        }
-    }, [voiceError]);
-
-    // Automatically stop recording when AI starts responding
-    useEffect(() => {
-        if (isLoading && isRecording) {
-            toggleRecording();
-        }
-    }, [isLoading, isRecording, toggleRecording]);
+    }, []);
 
     // Welcome message when switching to Напарник
     const NAPARNIK_INFO_MSG = '1С:Напарник подключён · Поиск по ИТС и документации 1С · Диффы и локальный MCP недоступны';
@@ -1530,9 +1513,15 @@ export function ChatArea({
 
                         {/* Правый блок кнопок (зафиксирован) */}
                         <div className="flex items-center gap-1.5 flex-shrink-0">
-                            {isSupported && (
+                            <VoiceInputControl
+                                onText={appendVoiceText}
+                                selectedHwnd={selectedHwnd}
+                                disabled={isLoading}
+                                variant="chat"
+                            />
+                            {false && (
                                 <div className="relative">
-                                    {showVoiceHint && (
+                                    {false && (
                                         <div className="absolute bottom-full right-0 mb-4 w-64 p-3 bg-blue-600 text-white text-xs rounded-xl shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-300 z-50">
                                             <div className="font-bold mb-1 flex items-center gap-2">
                                                 <Mic className="w-3 h-3" />
@@ -1542,25 +1531,6 @@ export function ChatArea({
                                             <div className="absolute top-full right-4 w-3 h-3 bg-blue-600 rotate-45 -translate-y-1.5" />
                                         </div>
                                     )}
-                                    <button
-                                        onClick={async () => {
-                                            if (isLoading) return;
-                                            const wasRecording = isRecording;
-                                            await toggleRecording();
-
-                                            // Show hint ONLY if we are starting AND permission is NOT granted
-                                            // 'unknown' is also treated as "maybe show" to be safe, but only if user hasn't seen it
-                                            if (!wasRecording && (permissionState === 'prompt' || permissionState === 'unknown')) {
-                                                setShowVoiceHint(true);
-                                                setTimeout(() => setShowVoiceHint(false), 5000);
-                                            }
-                                        }}
-                                        disabled={isLoading}
-                                        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all ${isLoading ? 'opacity-20 cursor-not-allowed' : ''} ${isRecording ? 'bg-red-500 text-white shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'}`}
-                                        title={isLoading ? 'Голосовой ввод недоступен во время генерации' : (isRecording ? 'Остановить запись' : 'Голосовой ввод')}
-                                    >
-                                        <Mic className={`w-4 h-4 ${isRecording ? 'animate-pulse' : ''}`} />
-                                    </button>
                                 </div>
                             )}
 

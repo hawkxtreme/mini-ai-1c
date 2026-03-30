@@ -5,9 +5,10 @@
  * restrained chrome, aligned shortcuts, compact spacing and controlled height.
  */
 
-import { Fragment, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { VoiceInputControl } from '../components/voice/VoiceInputControl';
 
 type Phase = 'menu' | 'input' | 'loading' | 'result';
 type ResultType = 'comment' | 'diff' | 'explain_only';
@@ -359,6 +360,10 @@ export function OverlayWindow() {
     const stateRef = useRef<OverlayState | null>(null);
     const applyingRef = useRef(false);
 
+    const appendVoiceTaskText = useCallback((text: string) => {
+        setInputText(prev => prev + (prev ? ' ' : '') + text);
+    }, []);
+
     stateRef.current = state;
     applyingRef.current = applying;
     runtimeApplyState = applyIncomingState;
@@ -681,7 +686,8 @@ export function OverlayWindow() {
                         <label className="overlay-input-label" htmlFor="overlay-task">
                             Задача для ассистента
                         </label>
-                        <textarea
+                        <div className="overlay-textarea-shell">
+                            <textarea
                             id="overlay-task"
                             ref={inputRef}
                             className="overlay-textarea"
@@ -696,6 +702,14 @@ export function OverlayWindow() {
                                 }
                             }}
                         />
+                            <div className="overlay-textarea-tools">
+                                <VoiceInputControl
+                                    onText={appendVoiceTaskText}
+                                    selectedHwnd={state?.confHwnd ?? null}
+                                    variant="overlay"
+                                />
+                            </div>
+                        </div>
                     </div>
 
                     <div className="overlay-btn-row">

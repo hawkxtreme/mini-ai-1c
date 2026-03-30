@@ -1,19 +1,26 @@
-
 export interface SpeechRecognitionResult {
     text: string;
     isFinal: boolean;
 }
 
+type SpeechRecognitionError =
+    | string
+    | {
+        error?: string;
+        message?: string;
+    };
+
 export class SpeechRecognitionService {
     private recognition: any;
-    private isListening: boolean = false;
+    private isListening = false;
 
     constructor() {
         // @ts-ignore
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             this.recognition = new SpeechRecognition();
-            this.recognition.continuous = false; // Улучшаем совместимость с WebView2
+            // Keep listening through short pauses so dictation feels closer to the main chat input.
+            this.recognition.continuous = true;
             this.recognition.interimResults = true;
             this.recognition.lang = 'ru-RU';
         } else {
@@ -21,8 +28,14 @@ export class SpeechRecognitionService {
         }
     }
 
-    public start(onResult: (result: SpeechRecognitionResult) => void, onError: (error: any) => void) {
-        if (!this.recognition || this.isListening) return;
+    public start(
+        onResult: (result: SpeechRecognitionResult) => void,
+        onError: (error: SpeechRecognitionError) => void,
+        onEnd?: () => void,
+    ): boolean {
+        if (!this.recognition || this.isListening) {
+            return false;
+        }
 
         this.recognition.onresult = (event: any) => {
             let interimTranscript = '';
@@ -38,33 +51,38 @@ export class SpeechRecognitionService {
 
             onResult({
                 text: finalTranscript || interimTranscript,
-                isFinal: !!finalTranscript
+                isFinal: !!finalTranscript,
             });
         };
 
         this.recognition.onerror = (event: any) => {
             this.isListening = false;
-            onError(event.error);
+            onError(event?.error ?? event);
         };
 
         this.recognition.onend = () => {
             this.isListening = false;
+            onEnd?.();
         };
 
         try {
             this.recognition.start();
             this.isListening = true;
-        } catch (e) {
-            console.error('Error starting speech recognition:', e);
-            onError(e);
+            return true;
+        } catch (error) {
+            console.error('Error starting speech recognition:', error);
+            onError(error instanceof Error ? error.message : 'speech-start-error');
+            return false;
         }
     }
 
-    public stop() {
+    public stop(): boolean {
         if (this.recognition && this.isListening) {
             this.recognition.stop();
-            this.isListening = false;
+            return true;
         }
+
+        return false;
     }
 
     public isSupported(): boolean {
