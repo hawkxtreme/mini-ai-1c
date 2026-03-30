@@ -93,6 +93,8 @@ interface CaptureResult {
   methodStartLine?: number | null;
   methodName?: string | null;
   runtimeId?: string | null;
+  /** Full method/module text for BSL error analysis when promptCode is a partial selection */
+  bslAnalysisCode?: string;
 }
 
 function normalizeOptionalText(text?: string | null): string {
@@ -451,7 +453,8 @@ async function captureQuickActionContext(
         return { scope: 'current_method', promptCode: ctx.current_method_text, originalCode: ctx.current_method_text, useSelectAll: false, caretLine: ctx.caret_line, methodStartLine: ctx.method_start_line, methodName: ctx.current_method_name, runtimeId: ctx.primary_runtime_id };
       }
       if (ctx.has_selection && ctx.selection_text.trim()) {
-        return { scope: 'selection', promptCode: ctx.selection_text, originalCode: ctx.selection_text, useSelectAll: false, runtimeId: ctx.primary_runtime_id };
+        const bslAnalysisCode = ctx.current_method_text || (ctx.module_text.trim() ? ctx.module_text : undefined);
+        return { scope: 'selection', promptCode: ctx.selection_text, originalCode: ctx.selection_text, useSelectAll: false, runtimeId: ctx.primary_runtime_id, bslAnalysisCode };
       }
       if (ctx.current_method_text) {
         return { scope: 'current_method', promptCode: ctx.current_method_text, originalCode: ctx.current_method_text, useSelectAll: false, caretLine: ctx.caret_line, methodStartLine: ctx.method_start_line, methodName: ctx.current_method_name, runtimeId: ctx.primary_runtime_id };
@@ -552,7 +555,7 @@ export function useQuickActions() {
           let diagnostics: BslDiagnostic[] | null = null;
           let diagnosticsError: string | null = null;
           try {
-            diagnostics = await analyzeBsl(capture.promptCode);
+            diagnostics = await analyzeBsl(capture.bslAnalysisCode ?? capture.promptCode);
           } catch (diagnosticsFailure) {
             diagnosticsError = String(diagnosticsFailure);
             console.warn('[useQuickActions] diagnostics lookup failed for fix action:', diagnosticsFailure);
@@ -560,7 +563,7 @@ export function useQuickActions() {
 
           if (isStaleRequest()) return;
 
-          if (diagnostics && diagnostics.length === 0) {
+          if (diagnostics && diagnostics.length === 0 && capture.scope !== 'selection') {
             await invoke('update_overlay_state', {
               state: buildOverlayMessageState({
                 action,
