@@ -841,7 +841,7 @@ pub fn get_text(hwnd: isize) -> Result<String, String> {
 
 /// Current selection: (has_selection, selection_text).
 pub fn get_selection(hwnd: isize) -> Result<(bool, String), String> {
-    let v = send_command("get_selection", Some(hwnd_args(hwnd)))?;
+    let v = send_command("get_selection", Some(editor_read_args(hwnd, false, true)))?;
     let has_sel = v["has_selection"].as_bool().unwrap_or(false);
     let text = v["text"].as_str().unwrap_or("").to_string();
     Ok((has_sel, text))
