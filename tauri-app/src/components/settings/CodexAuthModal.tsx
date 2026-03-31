@@ -10,25 +10,27 @@ interface CodexAuthModalProps {
     onSuccess: (accessToken: string, refreshToken: string | null, expiresAt: number) => void;
 }
 
-type Step = 'init' | 'browser' | 'waiting' | 'error';
+type Step = 'init' | 'waiting' | 'error';
 
 export function CodexAuthModal({ isOpen, onClose, onSuccess }: CodexAuthModalProps) {
     const [step, setStep] = useState<Step>('init');
     const [authData, setAuthData] = useState<CliAuthInitResponse | null>(null);
     const [timeLeft, setTimeLeft] = useState(0);
     const [error, setError] = useState<string | null>(null);
-    const [browserOpened, setBrowserOpened] = useState(false);
     const pollIntervalRef = useRef<any>(null);
 
     const startAuth = async () => {
         setStep('init');
         setError(null);
-        setBrowserOpened(false);
+        stopPolling();
         try {
             const data = await cliProvidersApi.authStart('codex');
             setAuthData(data);
             setTimeLeft(data.expires_in);
-            setStep('browser');
+            setStep('waiting');
+            // Auto-open browser and start polling immediately
+            try { await openUrl(data.verification_url); } catch { /* ignore */ }
+            startPolling(data.device_code, data.poll_interval, data.code_verifier);
         } catch (err: any) {
             setError(err.toString());
             setStep('error');
@@ -37,14 +39,7 @@ export function CodexAuthModal({ isOpen, onClose, onSuccess }: CodexAuthModalPro
 
     const openBrowser = async () => {
         if (!authData) return;
-        setBrowserOpened(true);
-        setStep('waiting');
-        try {
-            await openUrl(authData.verification_url);
-        } catch {
-            // Fallback: open in default browser via window.open won't work in Tauri, ignore
-        }
-        startPolling(authData.device_code, authData.poll_interval, authData.code_verifier);
+        try { await openUrl(authData.verification_url); } catch { /* ignore */ }
     };
 
     const startPolling = (deviceCode: string, initialIntervalSec: number, codeVerifier?: string) => {
@@ -98,10 +93,10 @@ export function CodexAuthModal({ isOpen, onClose, onSuccess }: CodexAuthModalPro
 
     // Countdown timer
     useEffect(() => {
-        if (timeLeft > 0 && (step === 'browser' || step === 'waiting')) {
+        if (timeLeft > 0 && step === 'waiting') {
             const timer = setTimeout(() => setTimeLeft(prev => prev - 1), 1000);
             return () => clearTimeout(timer);
-        } else if (timeLeft === 0 && (step === 'browser' || step === 'waiting')) {
+        } else if (timeLeft === 0 && step === 'waiting') {
             stopPolling();
             setStep('error');
             setError('Время ожидания истекло. Попробуйте снова.');
@@ -139,29 +134,6 @@ export function CodexAuthModal({ isOpen, onClose, onSuccess }: CodexAuthModalPro
                             <Loader2 className="w-10 h-10 text-emerald-500 animate-spin" />
                             <p className="text-zinc-400">Подготовка авторизации...</p>
                         </div>
-                    )}
-
-                    {step === 'browser' && authData && (
-                        <>
-                            <p className="text-zinc-400 text-sm leading-relaxed">
-                                Для авторизации через OpenAI нажмите кнопку ниже. Откроется браузер — войдите в аккаунт OpenAI и подтвердите доступ.
-                            </p>
-
-                            <div className="p-3 bg-zinc-900 rounded-lg border border-zinc-800 text-[10px] font-mono text-zinc-500 break-all">
-                                {authData.verification_url.substring(0, 80)}...
-                            </div>
-
-                            <button
-                                onClick={openBrowser}
-                                className="w-full h-12 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg shadow-lg shadow-emerald-900/20 text-sm font-bold transition-all active:scale-[0.98]"
-                            >
-                                <ExternalLink className="w-5 h-5" /> Открыть браузер для входа
-                            </button>
-
-                            <p className="text-[10px] text-zinc-600 text-center">
-                                После входа браузер перенаправит вас обратно автоматически
-                            </p>
-                        </>
                     )}
 
                     {step === 'waiting' && authData && (
