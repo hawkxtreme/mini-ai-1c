@@ -56,8 +56,10 @@ pub struct LLMProfile {
     pub disable_streaming: Option<bool>,
     #[serde(default)]
     pub stream_timeout_secs: Option<u32>,
+    /// Context compression strategy: "disabled" | "sliding_window" | "summarize"
     #[serde(default)]
-    pub auto_compress_context: bool,
+    pub context_compress_strategy: String,
+    /// Threshold: compress when dialog messages exceed this count (default 40)
     #[serde(default)]
     pub max_context_messages: Option<u32>,
 }
@@ -78,7 +80,7 @@ impl LLMProfile {
             enable_thinking: None,
             disable_streaming: None,
             stream_timeout_secs: None,
-            auto_compress_context: false,
+            context_compress_strategy: String::new(),
             max_context_messages: None,
         }
     }

@@ -45,7 +45,8 @@ export interface ChatMessage {
 // Helper to generate unique IDs
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
-function compressMessages(
+/** Sliding window: keep first message + last half, remove middle 50% */
+function slidingWindowCompress(
     msgs: ChatMessage[],
     maxMessages: number
 ): { compressed: ChatMessage[]; removedCount: number } {
@@ -54,9 +55,19 @@ function compressMessages(
     if (dialogMsgs.length <= maxMessages) {
         return { compressed: msgs, removedCount: 0 };
     }
-    const keep = dialogMsgs.slice(dialogMsgs.length - maxMessages);
+    // Keep first message + last (maxMessages - 1) messages
+    const first = dialogMsgs[0];
+    const tail = dialogMsgs.slice(-(maxMessages - 1));
     const removedCount = dialogMsgs.length - maxMessages;
-    return { compressed: [...systemMsgs, ...keep], removedCount };
+    const marker: ChatMessage = {
+        id: generateId(),
+        role: 'system',
+        content: `⚡ Скользящее окно: скрыто ${removedCount} сообщений`,
+        parts: [{ type: 'text', content: `⚡ Скользящее окно: скрыто ${removedCount} сообщений` }],
+        timestamp: Date.now(),
+        variant: 'info',
+    };
+    return { compressed: [...systemMsgs, first, marker, ...tail], removedCount };
 }
 
 interface ChatContextType {
@@ -512,22 +523,42 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
 
         try {
-            // Auto-compress context if enabled for active profile
+            // Context compression based on active profile strategy
             let currentMessages = messages;
-            if (activeProfile?.auto_compress_context) {
-                const maxMsgs = activeProfile.max_context_messages ?? 40;
-                const { compressed, removedCount } = compressMessages(currentMessages, maxMsgs);
+            const strategy = activeProfile?.context_compress_strategy;
+            const maxMsgs = activeProfile?.max_context_messages ?? 40;
+
+            if (strategy === 'sliding_window') {
+                const { compressed, removedCount } = slidingWindowCompress(currentMessages, maxMsgs);
                 if (removedCount > 0) {
-                    const noticeMsg: ChatMessage = {
-                        id: generateId(),
-                        role: 'system',
-                        content: `⚡ Контекст сжат: удалено ${removedCount} старых сообщений`,
-                        parts: [{ type: 'text', content: `⚡ Контекст сжат: удалено ${removedCount} старых сообщений` }],
-                        timestamp: Date.now(),
-                        variant: 'info'
-                    };
-                    currentMessages = [noticeMsg, ...compressed];
+                    currentMessages = compressed;
                     setMessages(currentMessages);
+                }
+            } else if (strategy === 'summarize') {
+                const dialogMsgs = currentMessages.filter(m => m.role !== 'system');
+                if (dialogMsgs.length > maxMsgs) {
+                    // Build payload for summarization (only dialog messages, no system)
+                    const toSummarize: api.ChatMessage[] = dialogMsgs.map(m => ({
+                        role: m.role as 'user' | 'assistant' | 'tool',
+                        content: m.content || '',
+                    }));
+                    try {
+                        const summary = await api.compactContext(JSON.stringify(toSummarize));
+                        const summaryMsg: ChatMessage = {
+                            id: generateId(),
+                            role: 'system',
+                            content: summary,
+                            parts: [{ type: 'text', content: summary }],
+                            timestamp: Date.now(),
+                            variant: 'info',
+                        };
+                        const systemMsgs = currentMessages.filter(m => m.role === 'system' && m.variant !== 'info');
+                        currentMessages = [...systemMsgs, summaryMsg];
+                        setMessages(currentMessages);
+                    } catch (e) {
+                        // Summarization failed — fall back silently, don't block the message
+                        console.warn('[ChatContext] Summarization failed, continuing without compression:', e);
+                    }
                 }
             }
 

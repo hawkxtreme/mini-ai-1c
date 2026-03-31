@@ -729,3 +729,108 @@ pub async fn stream_chat(
 
     result
 }
+
+/// Non-streaming context summarization.
+/// Takes the current chat history as JSON, calls the active LLM profile
+/// with a structured summarization prompt, returns the summary text.
+#[tauri::command]
+pub async fn compact_context(messages_json: String) -> Result<String, String> {
+    let profile = crate::llm_profiles::get_active_profile()
+        .ok_or_else(|| "Нет активного LLM профиля".to_string())?;
+
+    let history: Vec<ApiMessage> = serde_json::from_str(&messages_json)
+        .map_err(|e| format!("Ошибка парсинга истории: {}", e))?;
+
+    // Build conversation text for the summary prompt
+    let mut conv_text = String::new();
+    for msg in &history {
+        let role = &msg.role;
+        let content = msg.content.as_deref().unwrap_or("");
+        if content.is_empty() { continue; }
+        conv_text.push_str(&format!("[{}]: {}\n\n", role, content));
+    }
+
+    let system_prompt = "Ты — ассистент для сжатия контекста диалога. \
+Твоя задача — создать краткий и точный конспект переданного диалога. \
+Конспект должен сохранить всю важную техническую информацию: \
+задачи пользователя, принятые решения, написанный код, обнаруженные ошибки и их исправления, \
+текущий статус задач. Отвечай на русском языке. \
+Начни с фразы: «📋 Конспект предыдущего диалога:»";
+
+    let summarize_messages = vec![
+        ApiMessage {
+            role: "system".to_string(),
+            content: Some(system_prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+        ApiMessage {
+            role: "user".to_string(),
+            content: Some(format!(
+                "Сожми следующий диалог в краткий конспект:\n\n{}", conv_text
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+    ];
+
+    // Only standard OpenAI-compatible providers are supported for summarization
+    if matches!(
+        profile.provider,
+        crate::llm_profiles::LLMProvider::QwenCli | crate::llm_profiles::LLMProvider::OneCNaparnik
+    ) {
+        return Err("Суммаризация не поддерживается для этого провайдера (QwenCli / 1С:Напарник). Используйте стратегию 'sliding_window'.".to_string());
+    }
+
+    let api_key = crate::ai::client::resolve_profile_api_key(&profile)?;
+    let raw_url = profile.get_base_url();
+    let base_url = {
+        let trimmed = raw_url.trim_end_matches('/');
+        if matches!(
+            profile.provider,
+            crate::llm_profiles::LLMProvider::Ollama | crate::llm_profiles::LLMProvider::LMStudio
+        ) && !trimmed.ends_with("/v1") {
+            format!("{}/v1/chat/completions", trimmed)
+        } else {
+            format!("{}/chat/completions", trimmed)
+        }
+    };
+
+    let request_body = serde_json::json!({
+        "model": profile.model,
+        "messages": summarize_messages,
+        "stream": false,
+        "temperature": 0.3,
+        "max_tokens": 1024,
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&base_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка HTTP: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status, body));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Ошибка парсинга ответа: {}", e))?;
+
+    let summary = json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "Пустой ответ от LLM".to_string())?
+        .to_string();
+
+    Ok(summary)
+}

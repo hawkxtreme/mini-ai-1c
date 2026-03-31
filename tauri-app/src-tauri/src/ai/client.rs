@@ -202,7 +202,7 @@ fn provider_requires_api_key(provider: &LLMProvider) -> bool {
     )
 }
 
-fn resolve_profile_api_key(profile: &crate::llm_profiles::LLMProfile) -> Result<String, String> {
+pub fn resolve_profile_api_key(profile: &crate::llm_profiles::LLMProfile) -> Result<String, String> {
     let api_key = profile.try_get_api_key()?;
     if provider_requires_api_key(&profile.provider) && api_key.trim().is_empty() {
         return Err(format!(

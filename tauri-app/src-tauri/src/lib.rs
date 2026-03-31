@@ -57,6 +57,7 @@ pub fn run() {
             stream_chat,
             stop_chat,
             interrupt_chat,
+            compact_context,
             approve_tool,
             reject_tool,
             undo_last_change,

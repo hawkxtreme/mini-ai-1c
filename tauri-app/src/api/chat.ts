@@ -70,3 +70,7 @@ export async function rejectTool(): Promise<void> {
 export async function clearNaparnikSession(): Promise<void> {
     return await invoke('clear_naparnik_session');
 }
+
+export async function compactContext(messagesJson: string): Promise<string> {
+    return await invoke<string>('compact_context', { messagesJson });
+}
