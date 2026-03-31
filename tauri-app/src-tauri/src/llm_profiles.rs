@@ -23,6 +23,7 @@ pub enum LLMProvider {
     ZAI,
     Custom,
     QwenCli,
+    CodexCli,
     OneCNaparnik,
 }
 
@@ -133,6 +134,7 @@ impl LLMProfile {
                 LLMProvider::LMStudio => "http://localhost:1234/v1".to_string(),
                 LLMProvider::Custom => String::new(),
                 LLMProvider::QwenCli => "https://chat.qwen.ai/api/v1".to_string(),
+                LLMProvider::CodexCli => "https://api.openai.com".to_string(),
                 LLMProvider::OneCNaparnik => "https://code.1c.ai".to_string(),
             })
     }

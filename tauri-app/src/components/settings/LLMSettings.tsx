@@ -5,6 +5,7 @@ import { Plus, Save, RefreshCw, Trash2, Check, LogIn, LogOut, Info, X, ExternalL
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cliProvidersApi } from '../../api/cli_providers';
 import { QwenAuthModal } from './QwenAuthModal';
+import { CodexAuthModal } from './CodexAuthModal';
 import { CliStatus } from '../../types/settings';
 
 import { LLMProfile, ProfileStore } from '../../contexts/ProfileContext';
@@ -28,6 +29,7 @@ const PROVIDERS = [
     { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1', type: 'standard' },
     { value: 'LMStudio', label: 'LM Studio (Local)', defaultModel: '', defaultUrl: 'http://localhost:1234/v1', type: 'standard' },
     { value: 'QwenCli', label: 'Qwen Code (CLI)', defaultModel: 'coder-model', defaultUrl: 'https://portal.qwen.ai/v1', type: 'cli' },
+    { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'codex-mini-latest', defaultUrl: 'https://api.openai.com', type: 'cli' },
     { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '', type: 'standard' },
     { value: 'OneCNaparnik', label: '1С:Напарник', defaultModel: 'naparnik', defaultUrl: 'https://code.1c.ai', type: 'naparnik' },
 ];
@@ -43,6 +45,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
     const [isSaving, setIsSaving] = useState(false);
     const [showSaved, setShowSaved] = useState(false);
     const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+    const [isCodexAuthModalOpen, setIsCodexAuthModalOpen] = useState(false);
     const [cliStatus, setCliStatus] = useState<CliStatus | null>(null);
     const [loadingStatus, setLoadingStatus] = useState(false);
 
@@ -69,6 +72,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 // Fetch CLI status if it's a CLI provider
                 if (p.provider === 'QwenCli') {
                     fetchCliStatus(p.id, 'qwen');
+                } else if (p.provider === 'CodexCli') {
+                    fetchCliStatus(p.id, 'codex');
                 } else {
                     setCliStatus(null);
                 }
@@ -169,7 +174,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             api_key_encrypted: '',
             base_url: provider.defaultUrl,
             max_tokens: 4096,
-            temperature: providerValue === 'QwenCli' ? 0.1 : 0.7
+            temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli') ? 0.1 : 0.7
         };
         invoke('save_profile', { profile: newProfile, apiKey: null }).then(() => {
             onUpdate();
@@ -236,7 +241,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
                         <div className="space-y-1.5">
-                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'OneCNaparnik').map(p => (
+                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'CodexCli' && p.provider !== 'OneCNaparnik').map(p => (
                                 <div
                                     key={p.id}
                                     onClick={() => setEditingId(p.id)}
@@ -270,7 +275,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
                         <div className="space-y-1.5">
-                            {profiles.profiles.filter(p => p.provider === 'QwenCli').map(p => (
+                            {profiles.profiles.filter(p => p.provider === 'QwenCli' || p.provider === 'CodexCli').map(p => (
                                 <div
                                     key={p.id}
                                     onClick={() => setEditingId(p.id)}
@@ -292,7 +297,13 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 onClick={() => handleCreate('QwenCli')}
                                 className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
                             >
-                                <Plus className="w-3 h-3" /> Новый CLI провайдер
+                                <Plus className="w-3 h-3" /> Qwen Code
+                            </button>
+                            <button
+                                onClick={() => handleCreate('CodexCli')}
+                                className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
+                            >
+                                <Plus className="w-3 h-3" /> OpenAI Codex
                             </button>
                         </div>
                     </div>
@@ -487,6 +498,57 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 </div>
                             )}
 
+                            {editForm.provider === 'CodexCli' && (
+                                <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-xs text-zinc-500 uppercase font-bold">Authentication</label>
+                                            {loadingStatus && <RefreshCw className="w-3 h-3 animate-spin text-zinc-500" />}
+                                        </div>
+                                        {cliStatus?.is_authenticated ? (
+                                            <span className="flex items-center gap-1.5 text-[10px] bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full border border-emerald-500/20 font-medium whitespace-nowrap">
+                                                <Check className="w-3 h-3" /> Logged In
+                                            </span>
+                                        ) : (
+                                            <span className="flex items-center gap-1.5 text-[10px] bg-red-500/10 text-red-500 px-2 py-0.5 rounded-full border border-red-500/20 font-medium whitespace-nowrap">
+                                                <X className="w-3 h-3" /> Logged Out
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {cliStatus?.is_authenticated ? (
+                                        <>
+                                            {cliStatus.auth_expires_at && (
+                                                <p className="text-[10px] text-zinc-500 flex items-center gap-1">
+                                                    <Info className="w-3 h-3" />
+                                                    Токен действителен до: {new Date(cliStatus.auth_expires_at).toLocaleString()}
+                                                </p>
+                                            )}
+                                            <button
+                                                onClick={async () => {
+                                                    await cliProvidersApi.logout(editForm.id, 'codex');
+                                                    fetchCliStatus(editForm.id, 'codex');
+                                                }}
+                                                className="w-full h-10 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg border border-zinc-700 text-sm font-medium transition-all"
+                                            >
+                                                <LogOut className="w-4 h-4" /> Logout from OpenAI
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <button
+                                            onClick={() => setIsCodexAuthModalOpen(true)}
+                                            className="w-full h-12 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg shadow-lg shadow-emerald-900/10 text-sm font-bold transition-all active:scale-[0.98]"
+                                        >
+                                            <LogIn className="w-5 h-5" /> Войти через браузер
+                                        </button>
+                                    )}
+                                    <p className="text-[10px] text-zinc-500 leading-relaxed px-1">
+                                        OpenAI Codex CLI использует OAuth2+PKCE через браузер.
+                                        Токен хранится в системном Keychain.
+                                    </p>
+                                </div>
+                            )}
+
                             {editForm.provider === 'OneCNaparnik' && (
                                 <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-3">
                                     <label className="text-xs text-zinc-500 uppercase font-bold">Токен code.1c.ai</label>
@@ -516,7 +578,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 </div>
                             )}
 
-                        {editForm.provider !== 'QwenCli' && editForm.provider !== 'OneCNaparnik' && (
+                        {editForm.provider !== 'QwenCli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && (
                                 <div>
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
                                     <input
@@ -531,7 +593,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             )}
                         </div>
 
-                        {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && editForm.provider !== 'OneCNaparnik' && (
+                        {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && (
                             <div>
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Base URL</label>
                                 <input
@@ -744,6 +806,19 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         await fetchCliStatus(editForm.id, 'qwen');
                     } catch (err) {
                         console.error('[DEBUG] LLMSettings: Failed to save token:', err);
+                    }
+                }}
+            />
+            <CodexAuthModal
+                isOpen={isCodexAuthModalOpen}
+                onClose={() => setIsCodexAuthModalOpen(false)}
+                onSuccess={async (access_token, refresh_token, expires_at) => {
+                    if (!editForm) return;
+                    try {
+                        await cliProvidersApi.saveToken(editForm.id, 'codex', access_token, refresh_token, expires_at, null);
+                        await fetchCliStatus(editForm.id, 'codex');
+                    } catch (err) {
+                        console.error('[Codex] Failed to save token:', err);
                     }
                 }}
             />

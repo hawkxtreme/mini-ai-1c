@@ -1,4 +1,5 @@
 pub mod client;
+pub mod codex_client;
 pub mod models;
 pub mod naparnik_client;
 pub mod prompts;

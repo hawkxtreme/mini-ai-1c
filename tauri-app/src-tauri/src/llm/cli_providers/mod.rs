@@ -1,3 +1,4 @@
+pub mod codex;
 pub mod qwen;
 
 use serde::{Deserialize, Serialize};

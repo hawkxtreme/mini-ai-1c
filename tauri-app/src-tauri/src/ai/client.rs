@@ -225,6 +225,9 @@ pub async fn stream_chat_completion(
         if matches!(p.provider, LLMProvider::OneCNaparnik) {
             return super::naparnik_client::stream_naparnik_completion(messages, app_handle).await;
         }
+        if matches!(p.provider, LLMProvider::CodexCli) {
+            return super::codex_client::stream_codex_completion(messages, app_handle).await;
+        }
     }
 
     let profile = get_active_profile().ok_or("No active LLM profile")?;
