@@ -809,12 +809,11 @@ impl BSLClient {
                     },
                     "options": {
                         "tabSize": 4,
-                        "insertSpaces": true
+                        "insertSpaces": false
                     }
                 }),
             )
             .await?;
-
         // Close document
         self.send_notification(
             "textDocument/didClose",
