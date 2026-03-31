@@ -305,7 +305,11 @@ export function ChatArea({
     }, []);
 
     // Welcome message when switching to Напарник
-    const NAPARNIK_INFO_MSG = '1С:Напарник подключён · Поиск по ИТС и документации 1С · Диффы и локальный MCP недоступны';
+    const NAPARNIK_INFO_MSG = [
+        '1С:Напарник подключён',
+        'Доступно: поиск по ИТС и документации 1С',
+        'Недоступно: диффы и локальный MCP'
+    ].join('\n');
     const prevProfileIdRef = useRef<string | null>(null);
     useEffect(() => {
         if (prevProfileIdRef.current === activeProfileId) return;
@@ -1441,11 +1445,12 @@ export function ChatArea({
                             {/* Напарник badge */}
                             {isNaparnikActive && (
                                 <div
-                                    className="flex-shrink-0 flex items-center gap-1 px-2 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 text-orange-400/80 text-[10px] font-semibold uppercase tracking-wide cursor-default select-none"
-                                    title="1С:Напарник · Поиск по ИТС и документации 1С · Диффы и локальный MCP недоступны"
+                                    className="flex-shrink-0 flex items-center gap-2 px-2.5 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 text-orange-300 text-[11px] font-medium cursor-default select-none"
+                                    title={NAPARNIK_INFO_MSG}
                                 >
-                                    <Info className="w-3 h-3" />
-                                    ИТС
+                                    <Info className="w-3.5 h-3.5 text-orange-400" />
+                                    <span className="font-semibold">Напарник</span>
+                                    <span className="text-orange-200/70">ИТС/документация</span>
                                 </div>
                             )}
 
