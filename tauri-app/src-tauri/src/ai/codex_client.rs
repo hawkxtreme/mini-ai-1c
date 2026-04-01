@@ -95,8 +95,6 @@ struct SseEvent {
     item: Option<Value>,
     #[serde(default)]
     call_id: Option<String>,
-    #[serde(default)]
-    response: Option<Value>,
 }
 
 // ─── Message translation ─────────────────────────────────────────────────────
@@ -448,7 +446,6 @@ pub async fn stream_codex_completion(
                         delta: None,
                         item: None,
                         call_id: None,
-                        response: None,
                     }
                 }
             };
