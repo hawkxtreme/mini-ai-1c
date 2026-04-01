@@ -150,6 +150,7 @@ export function ChatArea({
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
+    const isLight = settings?.theme === 'light';
     const {
         detectedWindows,
         selectedHwnd,
@@ -908,13 +909,32 @@ export function ChatArea({
                             {/* Системное сообщение */}
                             {(msg.role as string) === 'system' ? (
                                 msg.variant === 'info' ? (
-                                <div className="w-full max-w-full rounded-xl border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-[13px] text-orange-200 shadow-sm transition-all hover:bg-orange-500/15">
+                                <div className={`w-full max-w-full rounded-xl border border-l-4 px-4 py-3 text-[13px] shadow-sm transition-all ${isLight
+                                    ? 'border-orange-200 border-l-orange-400 bg-orange-50 hover:bg-orange-100'
+                                    : 'border-orange-800/40 border-l-orange-500 bg-orange-950/30 hover:bg-orange-950/50'}`}>
                                     <div className="flex items-start gap-3">
-                                        <div className="mt-0.5 p-1 bg-orange-500/20 rounded-lg">
-                                            <Info className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                                        <div className={`mt-0.5 p-1 rounded-lg ${isLight ? 'bg-orange-100' : 'bg-orange-900/40'}`}>
+                                            <Info className={`w-4 h-4 flex-shrink-0 ${isLight ? 'text-orange-500' : 'text-orange-400'}`} />
                                         </div>
-                                        <div className="flex-1 leading-relaxed font-medium">
-                                            {msg.content}
+                                        <div className="flex-1 leading-relaxed">
+                                            {msg.content.split('\n').map((line, idx) => {
+                                                if (idx === 0) return (
+                                                    <div key={idx} className={`font-bold mb-1.5 ${isLight ? 'text-orange-800' : 'text-orange-200'}`}>{line}</div>
+                                                );
+                                                if (line.startsWith('Доступно:')) return (
+                                                    <div key={idx} className={`flex items-center gap-1.5 text-[12px] mb-0.5 ${isLight ? 'text-emerald-700' : 'text-emerald-400'}`}>
+                                                        <span className="font-bold">✓</span>
+                                                        <span>{line}</span>
+                                                    </div>
+                                                );
+                                                if (line.startsWith('Недоступно:')) return (
+                                                    <div key={idx} className={`flex items-center gap-1.5 text-[12px] ${isLight ? 'text-gray-500' : 'text-gray-400'}`}>
+                                                        <span className="font-bold">✗</span>
+                                                        <span>{line}</span>
+                                                    </div>
+                                                );
+                                                return <div key={idx} className={`text-[12px] ${isLight ? 'text-orange-700' : 'text-orange-300'}`}>{line}</div>;
+                                            })}
                                         </div>
                                     </div>
                                 </div>
@@ -1442,17 +1462,6 @@ export function ChatArea({
                                 )}
                             </div>
 
-                            {/* Напарник badge */}
-                            {isNaparnikActive && (
-                                <div
-                                    className="flex-shrink-0 flex items-center gap-2 px-2.5 h-7 rounded-lg bg-orange-500/10 border border-orange-500/20 text-orange-300 text-[11px] font-medium cursor-default select-none"
-                                    title={NAPARNIK_INFO_MSG}
-                                >
-                                    <Info className="w-3.5 h-3.5 text-orange-400" />
-                                    <span className="font-semibold">Напарник</span>
-                                    <span className="text-orange-200/70">ИТС/документация</span>
-                                </div>
-                            )}
 
                             {/* Объединенный Конфигуратор & Код */}
                             <div className="relative flex-shrink-0" id="tour-get-code">
