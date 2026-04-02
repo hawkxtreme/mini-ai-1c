@@ -10,7 +10,7 @@ export interface ChatToolCall {
 }
 
 export interface ChatMessage {
-    role: 'user' | 'assistant' | 'tool';
+    role: 'user' | 'assistant' | 'tool' | 'system';
     content: string;
     tool_calls?: ChatToolCall[];
     tool_call_id?: string;

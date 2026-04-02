@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import { Fragment, useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { BslDiagnostic } from '../../api/bsl';
 import { useChat, ToolCall, ChatMessage } from '../../contexts/ChatContext';
@@ -135,6 +135,34 @@ function DiffSummaryBanner({ content, onApply, onReject, disabled }: { content: 
     );
 }
 
+function CompressionDivider({ label, isLightTheme }: { label: string; isLightTheme: boolean }) {
+    return (
+        <div className="w-full py-1" data-testid="compression-divider">
+            <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4">
+                <div className={`h-px ${isLightTheme ? 'bg-zinc-300/90' : 'bg-zinc-800/90'}`} />
+                <div
+                    className={`inline-flex items-center justify-center rounded-full px-4 py-1.5 text-[10px] font-semibold uppercase leading-none tracking-[0.16em] ${
+                        isLightTheme
+                            ? 'border border-sky-200/80 bg-white text-sky-700 shadow-[0_4px_14px_rgba(56,189,248,0.10)]'
+                            : 'border border-zinc-800 bg-zinc-950/95 text-zinc-100 shadow-[0_10px_30px_rgba(0,0,0,0.32)]'
+                    }`}
+                    title="Предыдущий диалог свёрнут в служебный конспект для продолжения чата"
+                >
+                    <span>{label}</span>
+                </div>
+                <div className={`h-px ${isLightTheme ? 'bg-zinc-300/90' : 'bg-zinc-800/90'}`} />
+            </div>
+        </div>
+    );
+}
+
+function isCompressionSystemMessage(msg: ChatMessage): boolean {
+    return msg.role === 'system' && (
+        msg.variant === 'compression' ||
+        (msg.variant === 'info' && msg.content.startsWith('📋 Конспект предыдущего диалога:'))
+    );
+}
+
 export function ChatArea({
     originalCode,
     modifiedCode,
@@ -146,10 +174,11 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
+    const { messages, compressionIndicator, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
+    const isLightTheme = settings?.theme === 'light';
     const {
         detectedWindows,
         selectedHwnd,
@@ -904,20 +933,26 @@ export function ChatArea({
 
                 <div className={`flex flex-col pb-4 gap-4 px-4 w-full pt-4`}>
                     {messages.map((msg, i) => (
-                        <div key={msg.id || i} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <Fragment key={msg.id || i}>
+                        {compressionIndicator?.anchorMessageId === msg.id && (
+                            <CompressionDivider label={compressionIndicator.label} isLightTheme={isLightTheme} />
+                        )}
+                        <div className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                             {/* Системное сообщение */}
                             {(msg.role as string) === 'system' ? (
-                                msg.variant === 'info' ? (
-                                <div className="w-full max-w-full rounded-xl border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-[13px] text-orange-200 shadow-sm transition-all hover:bg-orange-500/15">
-                                    <div className="flex items-start gap-3">
-                                        <div className="mt-0.5 p-1 bg-orange-500/20 rounded-lg">
-                                            <Info className="w-4 h-4 text-orange-400 flex-shrink-0" />
-                                        </div>
-                                        <div className="flex-1 leading-relaxed font-medium">
-                                            {msg.content}
+                                isCompressionSystemMessage(msg) ? (
+                                    <CompressionDivider label="Контекст сжат" isLightTheme={isLightTheme} />
+                                ) : msg.variant === 'info' ? (
+                                    <div className="w-full max-w-full rounded-xl border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-[13px] text-orange-200 shadow-sm transition-all hover:bg-orange-500/15">
+                                        <div className="flex items-start gap-3">
+                                            <div className="mt-0.5 p-1 bg-orange-500/20 rounded-lg">
+                                                <Info className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                                            </div>
+                                            <div className="flex-1 leading-relaxed font-medium">
+                                                {msg.content}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
                                 ) : (
                                     <div className="w-full max-w-full rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-[13px] text-amber-300/90 shadow-sm">
                                         <div className="flex items-start gap-2">
@@ -1188,6 +1223,7 @@ export function ChatArea({
                                 </div>
                             )}
                         </div>
+                        </Fragment>
                     ))}
                     {/* Индикатор ожидания первого ответа (пока нет assistant-сообщения) */}
                     {isLoading && (messages.length === 0 || messages[messages.length - 1].role === 'user') && (

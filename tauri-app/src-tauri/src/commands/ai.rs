@@ -789,12 +789,61 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
 
     let api_key = crate::ai::client::resolve_profile_api_key(&profile)?;
     let raw_url = profile.get_base_url();
+    let client = reqwest::Client::new();
+
+    if matches!(profile.provider, crate::llm_profiles::LLMProvider::Ollama) {
+        let trimmed = raw_url.trim_end_matches('/');
+        let root_url = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        let base_url = format!("{}/api/chat", root_url);
+
+        let request_body = serde_json::json!({
+            "model": profile.model,
+            "messages": summarize_messages,
+            "stream": false,
+            "think": false,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": 1024,
+            },
+        });
+
+        let mut request = client
+            .post(&base_url)
+            .header("Content-Type", "application/json");
+        if !api_key.trim().is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("РћС€РёР±РєР° HTTP: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("API error {}: {}", status, body));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("РћС€РёР±РєР° РїР°СЂСЃРёРЅРіР° РѕС‚РІРµС‚Р°: {}", e))?;
+
+        let summary = json["message"]["content"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "РџСѓСЃС‚РѕР№ РѕС‚ LLM".to_string())?
+            .to_string();
+
+        return Ok(summary);
+    }
+
     let base_url = {
         let trimmed = raw_url.trim_end_matches('/');
-        if matches!(
-            profile.provider,
-            crate::llm_profiles::LLMProvider::Ollama | crate::llm_profiles::LLMProvider::LMStudio
-        ) && !trimmed.ends_with("/v1")
+        if matches!(profile.provider, crate::llm_profiles::LLMProvider::LMStudio) && !trimmed.ends_with("/v1")
         {
             format!("{}/v1/chat/completions", trimmed)
         } else {
@@ -833,6 +882,8 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
 
     let summary = json["choices"][0]["message"]["content"]
         .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| "Пустой ответ от LLM".to_string())?
         .to_string();
 
