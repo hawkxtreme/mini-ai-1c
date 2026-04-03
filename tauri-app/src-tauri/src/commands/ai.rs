@@ -142,6 +142,41 @@ fn estimate_tokens(messages: &[ApiMessage]) -> usize {
         .sum()
 }
 
+/// Payload emitted as `context-usage` Tauri event to update the UI indicator.
+#[derive(Serialize, Clone)]
+struct ContextUsagePayload {
+    estimated_tokens: usize,
+    context_window: usize,
+    percent: f32,
+    warning_level: &'static str,
+}
+
+/// Emits `context-usage` event with current token estimate and fill percentage.
+fn emit_context_usage(app: &AppHandle, messages: &[ApiMessage], context_window: usize) {
+    let tokens = estimate_tokens(messages);
+    let percent = if context_window > 0 {
+        (tokens as f32 / context_window as f32 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let warning_level: &'static str = if percent >= 85.0 {
+        "critical"
+    } else if percent >= 70.0 {
+        "warning"
+    } else {
+        "ok"
+    };
+    let _ = app.emit(
+        "context-usage",
+        ContextUsagePayload {
+            estimated_tokens: tokens,
+            context_window,
+            percent,
+            warning_level,
+        },
+    );
+}
+
 /// Prunes old tool-call rounds from the context to keep it under `max_tokens`.
 ///
 /// A "round" = one assistant message with tool_calls + all following tool messages.
@@ -337,6 +372,11 @@ pub async fn stream_chat(
         })
         .collect();
 
+    // Resolve effective context window for UI indicator (override → profile default → 128k fallback)
+    let effective_context_window = crate::llm_profiles::get_active_profile()
+        .and_then(|p| p.context_window_override)
+        .unwrap_or(128_000) as usize;
+
     // Spawn the work into a cancellable task
     let task_app_handle = app_handle.clone();
 
@@ -365,6 +405,7 @@ pub async fn stream_chat(
 
             // Prune old tool rounds to keep context under threshold
             prune_tool_context(&mut api_messages, CONTEXT_PRUNE_THRESHOLD);
+            emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
 
             // Stream chat completion
             let response_msg =
@@ -395,6 +436,7 @@ pub async fn stream_chat(
                 m
             };
             api_messages.push(assistant_msg_to_push);
+            emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
 
             // 1. Check for tool calls (use original to get full count for UI)
             if let Some(tool_calls) = &assistant_msg.tool_calls {
