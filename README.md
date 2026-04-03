@@ -5,13 +5,15 @@
 ---
 
 <!-- release-news:start -->
-> **📋 Последний релиз: версия 1.2.0** — 30 марта 2026
+> **📋 Последний релиз: версия 1.2.1** — 3 апреля 2026
 >
-> - Интеграция с Конфигуратором 1С: стабильнее чтение и возврат кода через EditorBridge, лучше handoff в основной чат и удобнее быстрые действия `Ctrl + ПКМ`
-> - Из последних PR вошли улучшения хедера и voice input: [#94](https://github.com/hawkxtreme/mini-ai-1c/pull/94), [#93](https://github.com/hawkxtreme/mini-ai-1c/pull/93), [#92](https://github.com/hawkxtreme/mini-ai-1c/pull/92), [#91](https://github.com/hawkxtreme/mini-ai-1c/pull/91)
-> - Полезная часть [PR #87](https://github.com/hawkxtreme/mini-ai-1c/pull/87) от @z03ps00 тоже вошла в релиз: статусы HTTP MCP теперь виднее в настройках
+> - Новый провайдер **OpenAI Codex CLI** с авторизацией через браузер
+> - **Управление сессиями чата** — история и переключение чатов прямо из шапки
+> - **Стратегия сжатия контекста** — выбор алгоритма в основных настройках
+> - Нормализация BSL-отступов при вставке кода, фикс баннера Напарника, устранено зависание Monaco на RDP
+> - Улучшена стабильность: graceful error handling в Rust, MCP init flow, Qwen rate-limit UX
 >
-> [Подробнее о релизе →](https://github.com/hawkxtreme/mini-ai-1c/releases/tag/v1.2.0) · [Все релизы →](https://github.com/hawkxtreme/mini-ai-1c/releases)
+> [Подробнее о релизе →](https://github.com/hawkxtreme/mini-ai-1c/releases/tag/v1.2.1) · [Все релизы →](https://github.com/hawkxtreme/mini-ai-1c/releases)
 <!-- release-news:end -->
 
 > 🐛 **Нашли баг или есть вопрос?** Прочитайте [как правильно сообщить о проблеме →](how-to-report-an-issue.md) — там пошагово: что написать, как снять логи приложения и MCP-логи, и готовый шаблон issue.
