@@ -12,8 +12,9 @@ use super::prompts::*;
 use super::tools::*;
 use crate::llm_profiles::{get_active_profile, LLMProvider};
 
-const QWEN_MIN_REQUEST_GAP_MS: u64 = 1_500;
-const QWEN_MAX_COOLDOWN_SECS: u64 = 60;
+const QWEN_MIN_REQUEST_GAP_MS: u64 = 1_100;
+const QWEN_MAX_RETRY_DELAY_SECS: u64 = 10;
+const QWEN_MAX_429_ATTEMPTS: u32 = 3;
 
 static QWEN_REQUEST_SLOTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
@@ -22,11 +23,33 @@ struct QwenRateLimitContext {
     retry_after_secs: Option<u64>,
     message: Option<String>,
     is_quota_exceeded: bool,
+    is_hard_quota_exhausted: bool,
     is_burst_limited: bool,
 }
 
 fn qwen_request_slots() -> &'static Mutex<HashMap<String, Instant>> {
     QWEN_REQUEST_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn wait_with_chat_status<F>(
+    app_handle: &tauri::AppHandle,
+    duration: Duration,
+    mut format_status: F,
+) where
+    F: FnMut(u64) -> String,
+{
+    if duration.is_zero() {
+        return;
+    }
+
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        let display_secs = remaining.as_secs().max(1);
+        let _ = app_handle.emit("chat-status", format_status(display_secs));
+        let tick = remaining.min(Duration::from_secs(1));
+        tokio::time::sleep(tick).await;
+        remaining = remaining.saturating_sub(tick);
+    }
 }
 
 async fn wait_for_qwen_request_slot(profile_id: &str, app_handle: &tauri::AppHandle) {
@@ -42,19 +65,20 @@ async fn wait_for_qwen_request_slot(profile_id: &str, app_handle: &tauri::AppHan
     };
 
     if !wait_for.is_zero() {
-        let wait_secs = wait_for.as_secs().max(1);
-        let _ = app_handle.emit(
-            "chat-status",
-            format!("Qwen: выравниваю частоту запросов (жду {}с)...", wait_secs),
-        );
-        tokio::time::sleep(wait_for).await;
+        wait_with_chat_status(app_handle, wait_for, |secs| {
+            format!(
+                "Qwen выравнивает частоту запросов. Отправлю запрос через {}с.",
+                secs
+            )
+        })
+        .await;
     }
 }
 
 fn extend_qwen_cooldown(profile_id: &str, cooldown: Duration) {
     let mut slots = qwen_request_slots()
         .lock()
-        .expect("Qwen request slots lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     let candidate = Instant::now() + cooldown;
     let entry = slots
         .entry(profile_id.to_string())
@@ -69,7 +93,7 @@ fn extract_retry_after_secs(headers: &HeaderMap) -> Option<u64> {
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(|secs| secs.clamp(1, QWEN_MAX_COOLDOWN_SECS))
+        .map(|secs| secs.clamp(1, QWEN_MAX_RETRY_DELAY_SECS))
 }
 
 fn parse_qwen_rate_limit_context(headers: &HeaderMap, error_body: &str) -> QwenRateLimitContext {
@@ -82,12 +106,17 @@ fn parse_qwen_rate_limit_context(headers: &HeaderMap, error_body: &str) -> QwenR
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
         });
+    let is_hard_quota_exhausted = body_lower.contains("free allocated quota exceeded")
+        || body_lower.contains("commodity has not purchased yet")
+        || body_lower.contains("prepaid bill is overdue")
+        || body_lower.contains("postpaid bill is overdue");
 
     QwenRateLimitContext {
         retry_after_secs: extract_retry_after_secs(headers),
         is_quota_exceeded: body_lower.contains("insufficient_quota")
             || body_lower.contains("allocated quota exceeded")
             || body_lower.contains("current quota"),
+        is_hard_quota_exhausted,
         is_burst_limited: body_lower.contains("request rate increased too quickly")
             || body_lower.contains("rate limit exceeded")
             || body_lower.contains("too many requests"),
@@ -95,14 +124,28 @@ fn parse_qwen_rate_limit_context(headers: &HeaderMap, error_body: &str) -> QwenR
     }
 }
 
-fn qwen_retry_delay(attempt: u32, ctx: &QwenRateLimitContext) -> Duration {
-    if let Some(retry_after) = ctx.retry_after_secs {
-        return Duration::from_secs(retry_after);
+fn qwen_retry_delay(attempt: u32, ctx: &QwenRateLimitContext) -> Option<Duration> {
+    if ctx.is_hard_quota_exhausted {
+        return None;
     }
 
-    let base_secs = if ctx.is_quota_exceeded { 30 } else { 15 };
-    let multiplier = 1u64 << attempt.saturating_sub(1).min(2);
-    Duration::from_secs((base_secs * multiplier).min(QWEN_MAX_COOLDOWN_SECS))
+    if let Some(retry_after) = ctx.retry_after_secs {
+        return Some(Duration::from_secs(retry_after));
+    }
+
+    let retry_secs = if ctx.is_quota_exceeded || ctx.is_burst_limited {
+        match attempt {
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        }
+    } else if attempt == 1 {
+        2
+    } else {
+        return None;
+    };
+
+    Some(Duration::from_secs(retry_secs))
 }
 
 fn qwen_has_tool_heavy_context(messages: &[ApiMessage]) -> bool {
@@ -170,14 +213,19 @@ fn build_qwen_rate_limit_message(ctx: &QwenRateLimitContext) -> String {
         .as_deref()
         .unwrap_or("Qwen временно ограничил запросы.");
 
-    if ctx.is_quota_exceeded {
+    if ctx.is_hard_quota_exhausted {
         format!(
-            "Qwen отклонил запрос из-за лимита токенов/квоты: {} Попробуйте подождать до минуты, сократить объём запроса или повторить без лишних metadata-циклов.",
+            "Qwen отклонил запрос из-за исчерпанной или недоступной квоты: {} Это не похоже на кратковременный всплеск нагрузки, поэтому автоматический повтор не помог бы. Дождитесь сброса бесплатной квоты или подключите подходящий план/подписку, если она требуется для этой модели.",
+            provider_message
+        )
+    } else if ctx.is_quota_exceeded {
+        format!(
+            "Qwen отклонил запрос по лимиту квоты или токенов: {} Я уже сделал короткие автоповторы, но окно лимита ещё не восстановилось. По официальной документации такой код часто означает краткосрочный TPS/TPM/RPM-лимит, поэтому подождите 10-60 секунд, сократите объём запроса или используйте тариф с более высокими лимитами.",
             provider_message
         )
     } else if ctx.is_burst_limited {
         format!(
-            "Qwen временно ограничил частоту запросов: {} Попробуйте повторить чуть позже.",
+            "Qwen временно ограничил частоту запросов: {} Я уже сделал короткие автоповторы, но окно лимита ещё не освободилось. Попробуйте повторить чуть позже.",
             provider_message
         )
     } else {
@@ -245,6 +293,8 @@ pub async fn stream_chat_completion(
         {
             if let Some(rt) = refresh_token.as_deref() {
                 crate::app_log!(force: true, "[Qwen] Token expired/near-expiry, attempting refresh...");
+                let _ =
+                    app_handle.emit("chat-status", "Qwen: обновляю токен доступа...".to_string());
                 match crate::llm::cli_providers::qwen::QwenCliProvider::refresh_access_token(
                     &profile.id,
                     rt,
@@ -511,6 +561,12 @@ pub async fn stream_chat_completion(
         attempt += 1;
         if matches!(profile.provider, LLMProvider::QwenCli) {
             wait_for_qwen_request_slot(&profile.id, &app_handle).await;
+            let status = if attempt == 1 {
+                "Qwen: отправляю запрос..."
+            } else {
+                "Qwen: повторяю запрос..."
+            };
+            let _ = app_handle.emit("chat-status", status.to_string());
         }
         let res = client
             .post(&url)
@@ -520,7 +576,15 @@ pub async fn stream_chat_completion(
             .await;
 
         match res {
-            Ok(r) if r.status().is_success() => break r,
+            Ok(r) if r.status().is_success() => {
+                if matches!(profile.provider, LLMProvider::QwenCli) {
+                    let _ = app_handle.emit(
+                        "chat-status",
+                        "Qwen: запрос принят, жду первый ответ...".to_string(),
+                    );
+                }
+                break r;
+            }
             Ok(r) if r.status().as_u16() == 500 && attempt < max_retries => {
                 crate::app_log!(
                     "[AI][RETRY] Attempt {} failed with 500. Retrying in 2s...",
@@ -541,34 +605,50 @@ pub async fn stream_chat_completion(
                 );
                 if matches!(profile.provider, LLMProvider::QwenCli) && status.as_u16() == 429 {
                     let ctx = parse_qwen_rate_limit_context(&response_headers, &error_body);
-                    let retry_delay = qwen_retry_delay(attempt, &ctx);
-                    extend_qwen_cooldown(&profile.id, retry_delay);
+                    if attempt < QWEN_MAX_429_ATTEMPTS {
+                        if let Some(retry_delay) = qwen_retry_delay(attempt, &ctx) {
+                            extend_qwen_cooldown(&profile.id, retry_delay);
+                            let request_changed = reduce_qwen_request_pressure(
+                                &mut request_body,
+                                has_tool_heavy_context,
+                                ctx.is_quota_exceeded,
+                            );
+                            crate::app_log!(
+                                "[Qwen][RETRY] 429 on attempt {}. cooldown={}s quota={} hard_quota={} burst={} request_changed={} max_tokens={} thinking_budget={:?}",
+                                attempt,
+                                retry_delay.as_secs(),
+                                ctx.is_quota_exceeded,
+                                ctx.is_hard_quota_exhausted,
+                                ctx.is_burst_limited,
+                                request_changed,
+                                request_body.max_tokens,
+                                request_body.thinking_budget_tokens
+                            );
+                            let _ = app_handle
+                                .emit("chat-status", format!("Qwen временно ограничил запросы."));
+                            wait_with_chat_status(&app_handle, retry_delay, |secs| {
+                                format!(
+                                    "Qwen временно ограничил запросы. Повторю автоматически через {}с.",
+                                    secs
+                                )
+                            })
+                            .await;
+                            let _ = app_handle
+                                .emit("chat-status", "Qwen: повторяю запрос...".to_string());
+                            continue;
+                        }
+                    }
 
-                    if attempt < max_retries {
-                        let request_changed = reduce_qwen_request_pressure(
-                            &mut request_body,
-                            has_tool_heavy_context,
-                            ctx.is_quota_exceeded,
-                        );
+                    if ctx.is_hard_quota_exhausted {
                         crate::app_log!(
-                            "[Qwen][RETRY] 429 on attempt {}. cooldown={}s quota={} burst={} request_changed={} max_tokens={} thinking_budget={:?}",
-                            attempt,
-                            retry_delay.as_secs(),
-                            ctx.is_quota_exceeded,
-                            ctx.is_burst_limited,
-                            request_changed,
-                            request_body.max_tokens,
-                            request_body.thinking_budget_tokens
+                            "[Qwen][RETRY] 429 on attempt {} classified as hard quota exhaustion; failing fast",
+                            attempt
                         );
-                        let _ = app_handle.emit(
-                            "chat-status",
-                            format!(
-                                "Qwen ограничил запросы, жду {}с и повторяю...",
-                                retry_delay.as_secs().max(1)
-                            ),
+                    } else {
+                        crate::app_log!(
+                            "[Qwen][RETRY] 429 on attempt {} exhausted short retries; returning error",
+                            attempt
                         );
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
                     }
 
                     return Err(build_qwen_rate_limit_message(&ctx));
@@ -1391,6 +1471,7 @@ mod tests {
         );
 
         assert!(ctx.is_quota_exceeded);
+        assert!(!ctx.is_hard_quota_exhausted);
         assert!(!ctx.is_burst_limited);
     }
 
@@ -1420,6 +1501,62 @@ mod tests {
     fn clamps_qwen_budget_for_tool_heavy_context() {
         assert_eq!(qwen_max_tokens(65_536, true), 16_384);
         assert_eq!(qwen_thinking_budget(20_000, true), 8_192);
+    }
+
+    #[test]
+    fn insufficient_quota_uses_short_retry_schedule() {
+        let ctx = QwenRateLimitContext {
+            retry_after_secs: None,
+            message: Some("quota".to_string()),
+            is_quota_exceeded: true,
+            is_hard_quota_exhausted: false,
+            is_burst_limited: false,
+        };
+
+        assert_eq!(qwen_retry_delay(1, &ctx), Some(Duration::from_secs(2)));
+        assert_eq!(qwen_retry_delay(2, &ctx), Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn hard_quota_exhaustion_does_not_schedule_retry() {
+        let ctx = QwenRateLimitContext {
+            retry_after_secs: None,
+            message: Some("free quota".to_string()),
+            is_quota_exceeded: true,
+            is_hard_quota_exhausted: true,
+            is_burst_limited: false,
+        };
+
+        assert_eq!(qwen_retry_delay(1, &ctx), None);
+    }
+
+    #[test]
+    fn burst_limit_uses_short_retry_schedule() {
+        let ctx = QwenRateLimitContext {
+            retry_after_secs: None,
+            message: Some("burst".to_string()),
+            is_quota_exceeded: false,
+            is_hard_quota_exhausted: false,
+            is_burst_limited: true,
+        };
+
+        assert_eq!(qwen_retry_delay(1, &ctx), Some(Duration::from_secs(2)));
+        assert_eq!(qwen_retry_delay(2, &ctx), Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn retry_after_is_clamped_to_short_wait() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("30"));
+
+        let ctx =
+            parse_qwen_rate_limit_context(&headers, r#"{"error":{"message":"Too many requests"}}"#);
+
+        assert_eq!(ctx.retry_after_secs, Some(QWEN_MAX_RETRY_DELAY_SECS));
+        assert_eq!(
+            qwen_retry_delay(1, &ctx),
+            Some(Duration::from_secs(QWEN_MAX_RETRY_DELAY_SECS))
+        );
     }
 
     #[test]

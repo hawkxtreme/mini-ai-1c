@@ -55,12 +55,56 @@ const CONTEXT_PRUNE_THRESHOLD: usize = 7000;
 const MAX_TOOL_RESULT_CHARS: usize = 8000;
 const MAX_CODEX_TOOL_NAME_LEN: usize = 64;
 
+fn build_initial_chat_status() -> String {
+    "Подготавливаю запрос...".to_string()
+}
+
 fn is_tool_result_cacheable(server_id: &str) -> bool {
     matches!(server_id, "builtin-1c-metadata")
 }
 
-fn build_tool_cache_key(server_id: &str, tool_name: &str, raw_arguments: &str) -> String {
-    format!("{server_id}::{tool_name}::{raw_arguments}")
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort_unstable();
+
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                if let Some(child) = map.get(&key) {
+                    canonical.insert(key, canonicalize_json_value(child));
+                }
+            }
+
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize_json_value).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn normalize_tool_cache_arguments(
+    raw_arguments: &str,
+    parsed_arguments: Option<&serde_json::Value>,
+) -> String {
+    if let Some(arguments) = parsed_arguments {
+        serde_json::to_string(&canonicalize_json_value(arguments))
+            .unwrap_or_else(|_| raw_arguments.trim().to_string())
+    } else {
+        raw_arguments.trim().to_string()
+    }
+}
+
+fn build_tool_cache_key(
+    server_id: &str,
+    tool_name: &str,
+    raw_arguments: &str,
+    parsed_arguments: Option<&serde_json::Value>,
+) -> String {
+    let normalized_arguments = normalize_tool_cache_arguments(raw_arguments, parsed_arguments);
+    format!("{server_id}::{tool_name}::{normalized_arguments}")
 }
 
 fn sanitize_tool_name(name: &str) -> String {
@@ -298,7 +342,7 @@ pub async fn stream_chat(
 
     let join_handle = tokio::spawn(async move {
         // 1. Initial status
-        let _ = task_app_handle.emit("chat-status", "Инициализация...");
+        let _ = task_app_handle.emit("chat-status", build_initial_chat_status());
 
         let bsl_state =
             task_app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
@@ -393,8 +437,13 @@ pub async fn stream_chat(
                     let _ =
                         task_app_handle.emit("chat-status", format!("Вызов MCP: {}...", tool_name));
                     let raw_arguments = tool_call.function.arguments.clone();
-                    let arguments: serde_json::Value =
-                        serde_json::from_str(&raw_arguments).unwrap_or(serde_json::json!({}));
+                    let parsed_arguments =
+                        serde_json::from_str::<serde_json::Value>(&raw_arguments);
+                    let arguments = parsed_arguments
+                        .as_ref()
+                        .ok()
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
 
                     crate::app_log!(
                         "[AI][TOOL] Executing: {} with args: {}",
@@ -430,8 +479,12 @@ pub async fn stream_chat(
                                 });
 
                                 if let Some(t) = target_tool {
-                                    let cache_key =
-                                        build_tool_cache_key(&config.id, &t.name, &raw_arguments);
+                                    let cache_key = build_tool_cache_key(
+                                        &config.id,
+                                        &t.name,
+                                        &raw_arguments,
+                                        parsed_arguments.as_ref().ok(),
+                                    );
                                     if is_tool_result_cacheable(&config.id) {
                                         if let Some(cached_result) =
                                             tool_result_cache.get(&cache_key)
@@ -904,4 +957,57 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
         .to_string();
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_is_stable_for_equivalent_json_arguments() {
+        let left = serde_json::json!({
+            "object": "Заказ",
+            "filters": {
+                "includeTables": true,
+                "lang": "ru"
+            }
+        });
+        let right = serde_json::json!({
+            "filters": {
+                "lang": "ru",
+                "includeTables": true
+            },
+            "object": "Заказ"
+        });
+
+        let left_key = build_tool_cache_key(
+            "builtin-1c-metadata",
+            "get_metadata_structure",
+            r#"{"object":"Заказ","filters":{"includeTables":true,"lang":"ru"}}"#,
+            Some(&left),
+        );
+        let right_key = build_tool_cache_key(
+            "builtin-1c-metadata",
+            "get_metadata_structure",
+            r#"{"filters":{"lang":"ru","includeTables":true},"object":"Заказ"}"#,
+            Some(&right),
+        );
+
+        assert_eq!(left_key, right_key);
+    }
+
+    #[test]
+    fn cache_key_falls_back_to_trimmed_raw_arguments_when_json_is_invalid() {
+        let cache_key = build_tool_cache_key(
+            "builtin-1c-metadata",
+            "get_metadata_structure",
+            "  {invalid json}  ",
+            None,
+        );
+
+        assert_eq!(
+            cache_key,
+            "builtin-1c-metadata::get_metadata_structure::{invalid json}"
+        );
+    }
 }

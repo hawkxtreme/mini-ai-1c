@@ -116,6 +116,66 @@ function formatCliUsageSummary(status?: CliStatus, isCodex?: boolean) {
     return null;
 }
 
+function parseWaitingChatStatus(chatStatus: string) {
+    if (!chatStatus) {
+        return null;
+    }
+
+    const normalized = chatStatus.toLowerCase();
+    const isExplicitWait =
+        normalized.includes('повторю автоматически')
+        || normalized.includes('отправлю запрос через')
+        || normalized.includes('жду ');
+
+    if (!isExplicitWait) {
+        return null;
+    }
+
+    const waitMatch = chatStatus.match(/(?:через|жду)\s+(\d+)с/i);
+    const seconds = waitMatch ? Number.parseInt(waitMatch[1], 10) : null;
+
+    let title = 'Ожидание ответа';
+    if (normalized.includes('повторю автоматически')) {
+        title = 'Qwen повторит запрос автоматически';
+    } else if (normalized.includes('отправлю запрос через')) {
+        title = 'Qwen ждёт окно лимита';
+    }
+
+    const details = normalized.includes('повторю автоматически')
+        ? 'Сервис временно ограничил частоту запросов. Повтор выполнится автоматически.'
+        : 'Приложение выравнивает частоту запросов, чтобы не упереться в лимит Qwen.';
+
+    return {
+        title,
+        seconds: Number.isFinite(seconds) ? seconds : null,
+        details
+    };
+}
+
+function WaitingStatusNotice({ chatStatus }: { chatStatus: string }) {
+    const waitingState = parseWaitingChatStatus(chatStatus);
+    if (!waitingState) {
+        return null;
+    }
+
+    return (
+        <div className="mt-2 rounded-xl border border-amber-300/60 bg-amber-50/95 px-3 py-2.5 text-amber-950 shadow-sm dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-100">
+            <div className="flex items-center gap-2 text-[11px] font-semibold">
+                <Info className="w-3.5 h-3.5 flex-shrink-0" />
+                <span>{waitingState.title}</span>
+                {waitingState.seconds !== null && (
+                    <span className="ml-auto rounded-full border border-amber-300/80 bg-white/70 px-2 py-0.5 font-mono text-[10px] text-amber-900 dark:border-amber-300/20 dark:bg-amber-200/10 dark:text-amber-50">
+                        {waitingState.seconds}с
+                    </span>
+                )}
+            </div>
+            <div className="mt-1 text-[11px] leading-relaxed text-amber-800 dark:text-amber-100/80">
+                {waitingState.details}
+            </div>
+        </div>
+    );
+}
+
 type ChatCliProvider = 'qwen' | 'codex';
 
 function getCliProviderType(provider: string): ChatCliProvider | null {
@@ -1140,12 +1200,17 @@ export function ChatArea({
                                                     {isLoading && i === messages.length - 1 && (
                                                         <div className="flex items-center gap-2 mt-1 pt-2 border-t border-zinc-800/40">
                                                             <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 flex-shrink-0" />
-                                                            <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
-                                                            {currentIteration > 1 && (
-                                                                <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono ml-1">
-                                                                    Шаг {currentIteration}
-                                                                </span>
-                                                            )}
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
+                                                                    {currentIteration > 1 && (
+                                                                        <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono ml-1">
+                                                                            Шаг {currentIteration}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <WaitingStatusNotice chatStatus={chatStatus} />
+                                                            </div>
                                                         </div>
                                                     )}
                                                 </>
@@ -1318,14 +1383,19 @@ export function ChatArea({
                     {/* Индикатор ожидания первого ответа (пока нет assistant-сообщения) */}
                     {isLoading && (messages.length === 0 || messages[messages.length - 1].role === 'user') && (
                         <div className="w-full px-0">
-                            <div className="p-4 rounded-xl border border-zinc-800/50 bg-zinc-900/40 flex items-center gap-3">
+                            <div className="p-4 rounded-xl border border-zinc-800/50 bg-zinc-900/40 flex items-start gap-3">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
-                                {currentIteration > 1 && (
-                                    <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono">
-                                        Шаг {currentIteration}
-                                    </span>
-                                )}
+                                <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-zinc-400 text-xs">{chatStatus || 'Выполнение...'}</span>
+                                        {currentIteration > 1 && (
+                                            <span className="text-[10px] bg-zinc-800 text-zinc-500 px-1.5 py-0.5 rounded-full border border-zinc-700 font-mono">
+                                                Шаг {currentIteration}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <WaitingStatusNotice chatStatus={chatStatus} />
+                                </div>
                             </div>
                         </div>
                     )}

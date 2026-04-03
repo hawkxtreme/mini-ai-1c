@@ -3,11 +3,14 @@ use crate::mcp_client::McpClient;
 use crate::settings::load_settings;
 use lazy_static::lazy_static;
 use std::sync::Mutex;
+use std::time::Duration;
 
 lazy_static! {
     pub static ref TOOLS_CACHE: Mutex<Option<(std::time::Instant, Vec<ToolInfo>)>> =
         Mutex::new(None);
 }
+
+const CHAT_TOOL_DISCOVERY_TIMEOUT_SECS: u64 = 2;
 
 /// Collect all tools from enabled MCP servers to inject into LLM request
 pub async fn get_available_tools() -> Vec<ToolInfo> {
@@ -64,34 +67,37 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
                 server_id
             );
 
-            match McpClient::new(config).await {
-                Ok(client) => match client.list_tools().await {
-                    Ok(tools) => {
-                        let duration = start.elapsed().as_millis();
-                        crate::app_log!(
-                            "[MCP][TOOLS] Server {} returned {} tools in {} ms.",
-                            server_name,
-                            tools.len(),
-                            duration
-                        );
-                        Ok((server_id, tools))
-                    }
-                    Err(e) => {
-                        crate::app_log!(
-                            "[MCP][TOOLS][ERROR] Failed to list tools for {}: {}",
-                            server_name,
-                            e
-                        );
-                        Err(e)
-                    }
-                },
-                Err(e) => {
+            match tokio::time::timeout(Duration::from_secs(CHAT_TOOL_DISCOVERY_TIMEOUT_SECS), async {
+                let client = McpClient::new(config).await?;
+                client.list_tools().await
+            })
+            .await
+            {
+                Ok(Ok(tools)) => {
+                    let duration = start.elapsed().as_millis();
                     crate::app_log!(
-                        "[MCP][TOOLS][ERROR] Failed to connect to {}: {}",
+                        "[MCP][TOOLS] Server {} returned {} tools in {} ms.",
+                        server_name,
+                        tools.len(),
+                        duration
+                    );
+                    Ok((server_id, tools))
+                }
+                Ok(Err(e)) => {
+                    crate::app_log!(
+                        "[MCP][TOOLS][ERROR] Failed to list tools for {}: {}",
                         server_name,
                         e
                     );
                     Err(e)
+                }
+                Err(_) => {
+                    crate::app_log!(
+                        "[MCP][TOOLS][WARN] Timed out while loading tools for {} after {}s. Chat will continue without waiting for this server.",
+                        server_name,
+                        CHAT_TOOL_DISCOVERY_TIMEOUT_SECS
+                    );
+                    Err("Timeout listing tools".to_string())
                 }
             }
         });
