@@ -42,8 +42,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "mcp-servers/*",
-      "editor-bridge/EditorBridge.exe"
+      "mcp-servers/*"
     ]
   }
 }
