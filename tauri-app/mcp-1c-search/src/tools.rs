@@ -594,7 +594,7 @@ async fn handle_search_code(
                 .collect();
             let total_files = all_files.len();
             let page = &all_files[offset.min(total_files)..];
-            let returned_files: Vec<_> = page.iter().take(head_limit).collect();
+            let returned_files: Vec<_> = page.iter().take(head_limit).cloned().collect();
             let next_offset = if offset + head_limit < total_files {
                 Some(offset + head_limit)
             } else {
@@ -626,21 +626,18 @@ async fn handle_search_code(
                 "items": items
             });
 
-            let summary = if include_summary {
-                format!(
-                    "По запросу \"{}\"{}: {} файлов (показаны {}-{}, {}мс){}",
-                    query, scope_label,
-                    total_files,
-                    offset + 1, offset + returned_files.len(), elapsed,
-                    if timed_out { " ⚠️ неполный результат (таймаут)" } else { "" }
-                )
-            } else {
-                String::new()
-            };
-
             let mut content_arr = vec![];
             if include_summary {
-                content_arr.push(json!({ "type": "text", "text": summary }));
+                let summary_text = build_files_with_matches_summary(
+                    &query,
+                    &scope_label,
+                    total_files,
+                    offset,
+                    elapsed,
+                    timed_out,
+                    &returned_files,
+                );
+                content_arr.push(json!({ "type": "text", "text": summary_text }));
             }
             Ok(json!({ "content": content_arr, "search_result": search_result }))
         }
@@ -757,6 +754,50 @@ async fn handle_search_code(
             Ok(json!({ "content": content_arr, "search_result": search_result }))
         }
     }
+}
+
+fn build_files_with_matches_summary(
+    query: &str,
+    scope_label: &str,
+    total_files: usize,
+    offset: usize,
+    elapsed: u128,
+    timed_out: bool,
+    returned_files: &[(String, (usize, Vec<(u32, String)>))],
+) -> String {
+    if total_files == 0 {
+        let timeout_note = if timed_out {
+            " Поиск прерван по таймауту — попробуйте сузить `scope` или сначала использовать `output_mode=\"count\"`."
+        } else {
+            ""
+        };
+        return format!(
+            "По запросу \"{}\"{} ничего не найдено. ({}мс){}",
+            query, scope_label, elapsed, timeout_note
+        );
+    }
+
+    let mut summary_text = format!(
+        "По запросу \"{}\"{}: {} файлов (показаны {}-{}, {}мс){}\n\n",
+        query,
+        scope_label,
+        total_files,
+        offset + 1,
+        offset + returned_files.len(),
+        elapsed,
+        if timed_out { " ⚠️ неполный результат (таймаут)" } else { "" }
+    );
+
+    for (file, (count, examples)) in returned_files {
+        summary_text.push_str(&format!("**{}** ({} совп.)\n", file, count));
+        for (line, snippet) in examples.iter().take(2) {
+            let snippet = snippet.replace('`', "\\`");
+            summary_text.push_str(&format!("  строка {}: `{}`\n", line, snippet));
+        }
+        summary_text.push('\n');
+    }
+
+    summary_text
 }
 
 /// Shared execution core: index-guided or streaming scan.
@@ -2248,4 +2289,56 @@ fn infer_object_from_path(rel: &str) -> (Option<String>, Option<String>, Option<
         if obj_name.is_empty() { None } else { Some(obj_name.to_string()) },
         module_kind.map(|s| s.to_string()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_files_with_matches_summary;
+
+    #[test]
+    fn files_with_matches_summary_lists_files_and_examples() {
+        let returned_files = vec![
+            (
+                "CommonModules/УчетНДС/Module.bsl".to_string(),
+                (
+                    2,
+                    vec![
+                        (15, "Функция ЗначениеСтавкиНДС(ЭлементСправочника) Экспорт".to_string()),
+                        (18, "Возврат Перечисления.СтавкиНДС.БезНДС;".to_string()),
+                    ],
+                ),
+            ),
+        ];
+
+        let summary = build_files_with_matches_summary(
+            "СтавкиНДС",
+            " в scope `CommonModule.УчетНДС`",
+            1,
+            0,
+            357,
+            false,
+            &returned_files,
+        );
+
+        assert!(summary.contains("По запросу \"СтавкиНДС\" в scope `CommonModule.УчетНДС`: 1 файлов"));
+        assert!(summary.contains("**CommonModules/УчетНДС/Module.bsl** (2 совп.)"));
+        assert!(summary.contains("строка 15"));
+        assert!(summary.contains("ЗначениеСтавкиНДС"));
+    }
+
+    #[test]
+    fn files_with_matches_summary_handles_empty_results() {
+        let summary = build_files_with_matches_summary(
+            "СтавкиНДС",
+            "",
+            0,
+            0,
+            120,
+            true,
+            &[],
+        );
+
+        assert!(summary.contains("ничего не найдено"));
+        assert!(summary.contains("таймауту"));
+    }
 }

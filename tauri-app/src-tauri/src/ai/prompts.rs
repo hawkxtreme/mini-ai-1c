@@ -369,6 +369,7 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
 | Задача | Инструмент |
 |---|---|
 | Знаешь ИМЯ функции/процедуры | `smart_find` (главный) |
+| Нужна функция по СЕМАНТИКЕ / смыслу имени | `find_symbol` |
 | Нужен только список мест определения | `find_symbol` |
 | Функция внутри конкретного объекта | `find_function_in_object` |
 | Нужен список файлов/модулей конфигурации | `search_files` ← НОВЫЙ |
@@ -381,30 +382,37 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
 | Анализ влияния изменений | `impact_analysis` |
 | Граф вызовов функции | `get_function_context` |
 
-⚡ ЗОЛОТОЕ ПРАВИЛО: Если знаешь ИМЯ функции/процедуры → `smart_find`, НЕ `search_code`.
+⚡ ЗОЛОТОЕ ПРАВИЛО:
+- Если знаешь ИМЯ функции/процедуры → `smart_find`, НЕ `search_code`.
+- Если задача звучит как "найди функцию", но точное имя неизвестно, а семантика понятна → сначала `find_symbol` с 2-5 гипотезами имён, НЕ `search_code`.
 
 ДЕТАЛИ ИНСТРУМЕНТОВ:
 
 1. `smart_find` — ГЛАВНЫЙ для поиска функции по имени. Один вызов: индекс (1мс) + полный код.
    - smart_find(query="СтавкаНДСПоПеречислению") → код функции сразу.
 
-2. `search_files` — поиск файлов и модулей, НЕ текста в них.
+2. `find_symbol` — список определений и лучший первый шаг для поиска функции по смыслу имени.
+   - Используй, когда точное имя неизвестно, но можно выдвинуть гипотезы: `ЗначениеСтавкиНДС`, `ПолучитьСтавкуНДСИзСправочника`, `СтавкаНДСКакПеречисление`.
+   - Для запроса вида "найди функцию, которая делает X" сначала перебери гипотезы через `find_symbol`, а уже потом переходи к `search_code`, если гипотезы не сработали.
+
+3. `search_files` — поиск файлов и модулей, НЕ текста в них.
    - "найди модуль УчетНДС" → search_files(query="УчетНДС")
    - "все формы документа РеализацияТоваров" → search_files(scope="Document.РеализацияТоваров", extension="xml")
    - "все общие модули" → search_files(object_type="CommonModule")
-   - НЕ используй search_code для поиска файлов — это медленнее и менее точно.
+   - Нужен список файлов по паттерну → `search_files`, НЕ `list_objects` + ручной перебор и НЕ `search_code`.
 
-3. `search_code` — поиск по тексту BSL/XML. Используй ТОЛЬКО когда имя неизвестно.
+4. `search_code` — поиск по тексту BSL/XML. Используй ТОЛЬКО когда имя неизвестно.
    - Новые параметры: output_mode ("content"|"files_with_matches"|"count"), offset, head_limit.
    - "в каких файлах встречается НДС" → search_code(query="НДС", output_mode="files_with_matches")
    - "сколько мест" → search_code(query="...", output_mode="count") — быстрый предварительный счёт.
+   - Если поиск широкий, а `scope` не задан, сначала ОБЯЗАТЕЛЬНО сделай разведочный вызов `output_mode="count"` с коротким `timeout_ms`, и только потом запускай полный поиск.
    - scope КРИТИЧЕСКИ ВАЖЕН для производительности: search_code(query="X", scope="CommonModule.УчетНДС").
 
-4. `goto_definition` — семантический переход по позиции в файле (BSL LS).
+5. `goto_definition` — семантический переход по позиции в файле (BSL LS).
    - Точнее и быстрее текстового поиска для навигации "перейди к определению".
    - goto_definition(file="CommonModules/УчетНДС/Module.bsl", line=42, character=5)
 
-5. `resolve_definition_context` — goto_definition + контекст кода в одном вызове.
+6. `resolve_definition_context` — goto_definition + контекст кода в одном вызове.
    - Используй вместо goto_definition + get_file_context.
 
 РЕКОМЕНДУЕМЫЙ ВОРКФЛОУ:
@@ -419,6 +427,9 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
 ⛔ АНТИ-ПАТТЕРНЫ (избегай):
 - search_code для поиска файлов/модулей → вместо этого search_files.
 - search_code когда знаешь имя функции → вместо этого smart_find.
+- search_code для запроса "найди функцию" при понятной семантике → сначала find_symbol с гипотезами имён.
+- list_objects + ручной перебор модулей по паттерну → вместо этого search_files.
+- широкий search_code без scope и без предварительного count → почти всегда плохая идея.
 - get_object_structure дважды для одного объекта — кэшируй результат.
 - get_file_context после goto_definition → вместо этого resolve_definition_context.
 
