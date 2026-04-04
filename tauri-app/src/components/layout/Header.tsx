@@ -1,4 +1,4 @@
-import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, Sparkles, History } from 'lucide-react';
+import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, History } from 'lucide-react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -52,8 +52,6 @@ export function Header({
     const { settings, updateSettings } = useSettings();
     const { activeProfile } = useProfiles();
     const {
-        isLoading,
-        chatStatus,
         sessions,
         activeSessionId,
         switchChat,
@@ -258,16 +256,6 @@ export function Header({
                         {!bslStatus ? 'Initializing...' : bslStatus.connected ? 'Connected' : 'Offline'}
                     </span>
                 </div>
-
-                {/* AI Generation Indicator */}
-                {isLoading && (
-                    <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-blue-500/10 border border-blue-500/20 animate-in fade-in zoom-in-95 duration-300">
-                        <Sparkles className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
-                        <span className="text-[10px] font-bold text-blue-400/80 uppercase tracking-wider hidden sm:inline">
-                            {chatStatus || 'Thinking...'}
-                        </span>
-                    </div>
-                )}
             </div>
 
             {/* View Mode Switcher (Three-position Slider) */}
