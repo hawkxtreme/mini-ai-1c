@@ -240,6 +240,8 @@ fn init_db(db_path: &Path) -> Result<Connection, rusqlite::Error> {
     )?;
     // Phase 2: file catalog columns (additive migration — safe to call on existing DBs)
     migrate_file_catalog_schema(&conn);
+    // Phase 3: semantic search tables (FTS5 symbol_terms, symbol_weights, domain_aliases)
+    crate::semantic::ensure_semantic_schema(&conn);
     Ok(conn)
 }
 
@@ -386,6 +388,7 @@ pub fn search_files_in_catalog(
 }
 
 /// Fill file catalog columns for a single file path (called during build/sync).
+#[allow(dead_code)]
 pub fn upsert_file_catalog(
     conn: &Connection,
     rel_path: &str,
@@ -500,6 +503,51 @@ pub fn migrate_if_needed(db_path: &Path) {
     if sym_count > 0 && calls_count == 0 {
         eprintln!("[1c-search] Migrating: resetting indexed_files to rebuild call graph...");
         let _ = conn.execute("DELETE FROM indexed_files", []);
+    }
+}
+
+/// If symbol_terms FTS table is empty or uses old contentless schema, rebuild it.
+/// Handles upgrade from versions without semantic search or with wrong schema.
+pub fn migrate_semantic_fts_if_needed(db_path: &Path) {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let sym_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .unwrap_or(0);
+    if sym_count == 0 {
+        return;
+    }
+
+    // Detect old contentless FTS5 schema: column values come back as NULL
+    let needs_rebuild = {
+        let sample = conn.query_row(
+            "SELECT symbol_id FROM symbol_terms LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        );
+        match sample {
+            Ok(Some(_)) => false,           // content stored, OK
+            Ok(None) => true,               // NULL → contentless schema → rebuild
+            Err(_) => {
+                // Table empty or doesn't exist
+                let fts_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM symbol_terms", [], |r| r.get(0))
+                    .unwrap_or(0);
+                fts_count == 0              // rebuild only if empty
+            }
+        }
+    };
+
+    if needs_rebuild {
+        eprintln!("[1c-search] Migrating: dropping old FTS schema and rebuilding ({} symbols)...", sym_count);
+        // Drop and recreate with correct schema (no content='')
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS symbol_terms;");
+        crate::semantic::ensure_semantic_schema(&conn);
+        build_semantic_fts(&conn);
+        crate::semantic::rebuild_symbol_weights(&conn);
+        eprintln!("[1c-search] Semantic FTS migration complete");
     }
 }
 
@@ -800,6 +848,10 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
          PRAGMA synchronous=NORMAL;"
     );
 
+    // Sync FTS5 semantic index for changed/new/deleted files
+    sync_semantic_fts(&conn, &deleted, &parsed);
+    crate::semantic::rebuild_symbol_weights(&conn);
+
     // Update built_at timestamp
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -972,6 +1024,11 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
          PRAGMA synchronous=NORMAL;"
     );
 
+    // Build FTS5 semantic index (symbol_terms)
+    eprintln!("SEARCH_STATUS:indexing:99:Семантическая индексация...");
+    build_semantic_fts(&conn);
+    crate::semantic::rebuild_symbol_weights(&conn);
+
     // Save build timestamp
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -986,6 +1043,79 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
     save_stats_to_meta(&conn);
 
     Ok(total_symbols)
+}
+
+/// (Re)build symbol_terms FTS5 table from current symbols.
+/// Runs in a single transaction for speed. Used after full build_index.
+fn build_semantic_fts(conn: &Connection) {
+    let _ = conn.execute_batch("DELETE FROM symbol_terms;");
+    let pairs: Vec<(i64, String)> = {
+        match conn.prepare("SELECT id, name FROM symbols") {
+            Ok(mut stmt) => stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default(),
+            Err(_) => return,
+        }
+    };
+    if pairs.is_empty() {
+        return;
+    }
+    if let Ok(tx) = conn.unchecked_transaction() {
+        if let Ok(mut ins) = tx.prepare(
+            "INSERT INTO symbol_terms (symbol_id, name_tokens, comment_head, param_tokens)
+             VALUES (?1, ?2, '', '')"
+        ) {
+            for (id, name) in &pairs {
+                let tokens = crate::semantic::tokenize_identifier(name).join(" ");
+                let _ = ins.execute(params![id.to_string(), tokens]);
+            }
+        }
+        let _ = tx.commit();
+    }
+    eprintln!("[1c-search] semantic FTS built: {} symbols", pairs.len());
+}
+
+/// Incrementally sync symbol_terms FTS after sync_index.
+/// Removes FTS entries for deleted-file symbols, upserts entries for newly parsed files.
+fn sync_semantic_fts(conn: &Connection, deleted: &[String], parsed: &[ParsedFile]) {
+    // Cleanup orphans (symbols from deleted files were already removed from symbols table)
+    let _ = conn.execute_batch(
+        "DELETE FROM symbol_terms
+         WHERE CAST(symbol_id AS INTEGER) NOT IN (SELECT id FROM symbols);"
+    );
+
+    // Upsert FTS for each newly parsed file
+    let file_pairs: Vec<(i64, String)> = parsed.iter().flat_map(|pf| {
+        conn.prepare("SELECT id, name FROM symbols WHERE file = ?1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([&pf.rel_path], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .ok()
+                .map(|rows| rows.flatten().collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
+    }).collect();
+
+    if file_pairs.is_empty() && deleted.is_empty() {
+        return;
+    }
+
+    if let Ok(tx) = conn.unchecked_transaction() {
+        if let Ok(mut ins) = tx.prepare(
+            "INSERT OR REPLACE INTO symbol_terms (symbol_id, name_tokens, comment_head, param_tokens)
+             VALUES (?1, ?2, '', '')"
+        ) {
+            for (id, name) in &file_pairs {
+                let tokens = crate::semantic::tokenize_identifier(name).join(" ");
+                let _ = ins.execute(params![id.to_string(), tokens]);
+            }
+        }
+        let _ = tx.commit();
+    }
+    eprintln!("[1c-search] semantic FTS synced: {} symbols updated", file_pairs.len());
 }
 
 /// Query the index for symbols matching the query.

@@ -8,6 +8,7 @@ mod tools;
 mod parser;
 mod index;
 mod metadata;
+mod semantic;
 
 /// Returns SQLite DB file size in MB (0.0 if not found).
 pub fn db_size_mb(path: &std::path::Path) -> f64 {
@@ -107,6 +108,10 @@ async fn main() {
             // Migrate: if calls table is empty but symbols exist, reset indexed_files
             // so the next sync will re-parse all files and populate the call graph.
             index::migrate_if_needed(&db_for_index);
+
+            // Migrate: if symbol_terms FTS is empty but symbols exist → rebuild FTS.
+            // Happens when upgrading from a version without semantic search.
+            index::migrate_semantic_fts_if_needed(&db_for_index);
 
             // Build metadata if missing, or if objects exist but have no attributes
             // (happens when ConfigDumpInfo.xml was absent on first run — per-object XMLs will be parsed now)

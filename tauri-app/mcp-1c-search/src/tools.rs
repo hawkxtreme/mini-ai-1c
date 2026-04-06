@@ -67,8 +67,37 @@ fn resolve_scope(scope: &str) -> Option<PathBuf> {
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
+            "name": "semantic_find",
+            "description": "🔍 ПЕРВЫЙ ИНСТРУМЕНТ при поиске функции по описанию задачи. Семантический поиск по именам функций, комментариям, параметрам. ОБЯЗАТЕЛЕН как первый шаг если не знаешь точное имя функции. Запрос на русском языке: что делает функция, какой объект обрабатывает. Возвращает ТОП-5 функций с score — если score ≥ 0.5 это сильный результат.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Описание задачи на русском языке или часть имени функции."
+                    },
+                    "context_objects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Объекты 1С для усиления релевантности. Форматы: 'Catalog.СтавкиНДС', 'Document.РеализацияТоваров'. Функции из этих объектов получают дополнительный вес."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Максимум результатов (по умолчанию 5, максимум 20).",
+                        "default": 5
+                    },
+                    "include_code": {
+                        "type": "boolean",
+                        "description": "Включить код лучшего результата в ответ (по умолчанию true).",
+                        "default": true
+                    }
+                }
+            }
+        }),
+        json!({
             "name": "search_code",
-            "description": "Быстрый поиск по исходному коду конфигурации 1С (BSL и XML файлы). Возвращает совпадения с файлом и номером строки. Поддерживает output_mode: content | files_with_matches | count и пагинацию через offset/head_limit.",
+            "description": "Поиск по тексту кода 1С (BSL/XML). ⚠️ СТОП: если ищешь функцию по описанию задачи и не знаешь её имя — сначала вызови semantic_find (он специально создан для этого и работает за 1 вызов). search_code используй только когда semantic_find не помог или ты знаешь конкретный текстовый паттерн для поиска.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,6 +435,7 @@ pub async fn call_tool(
         "get_function_context" => handle_get_function_context(args, db_path).await,
         "get_module_functions" => handle_get_module_functions(args, db_path).await,
         "smart_find" => handle_smart_find(args, config_path, db_path).await,
+        "semantic_find" => handle_semantic_find(args, config_path, db_path).await,
         "find_function_in_object" => handle_find_function_in_object(args, config_path, db_path).await,
         "stats" => handle_stats(db_path).await,
         "sync_index" => handle_sync_index(config_path, db_path).await,
@@ -429,6 +459,43 @@ async fn handle_search_code(
     if query.trim().is_empty() {
         return Err("Параметр 'query' не может быть пустым".to_string());
     }
+
+    // Auto-semantic: if query looks like natural language (function search by description),
+    // prepend semantic_find results before the text search results.
+    // Heuristic: query has spaces, no code-pattern chars, not too short.
+    let is_natural_query = {
+        let has_spaces = query.contains(' ');
+        let no_code_chars = !query.contains('.') && !query.contains('(') && !query.contains('"')
+            && !query.contains('=') && !query.contains(';');
+        let word_count = query.split_whitespace().count();
+        has_spaces && no_code_chars && word_count >= 3
+    };
+    let semantic_prefix = if is_natural_query {
+        db_path.as_ref()
+            .and_then(|db| rusqlite::Connection::open(db).ok())
+            .map(|conn| {
+                let results = crate::semantic::semantic_search(&conn, query, &[], 3);
+                if results.is_empty() {
+                    String::new()
+                } else {
+                    let mut prefix = String::from(
+                        "💡 SEMANTIC HINT (автоматически): найдены функции по описанию — используй их прежде чем продолжать поиск:\n"
+                    );
+                    for (i, r) in results.iter().enumerate() {
+                        prefix.push_str(&format!(
+                            "{}. **{}** ({}) — `{}` строки {}-{} | score={:.3} calls={}\n",
+                            i + 1, r.name, r.kind, r.file,
+                            r.start_line, r.end_line, r.final_score, r.call_count
+                        ));
+                    }
+                    prefix.push_str("\n---\n");
+                    prefix
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     // head_limit takes priority over limit (backward compat alias)
     let head_limit = args["head_limit"].as_u64()
@@ -554,6 +621,9 @@ async fn handle_search_code(
             };
 
             let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
             if include_summary {
                 content_arr.push(json!({ "type": "text", "text": summary }));
             }
@@ -627,6 +697,9 @@ async fn handle_search_code(
             });
 
             let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
             if include_summary {
                 let summary_text = build_files_with_matches_summary(
                     &query,
@@ -748,6 +821,9 @@ async fn handle_search_code(
             });
 
             let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
             if include_summary {
                 content_arr.push(json!({ "type": "text", "text": summary_text }));
             }
@@ -1791,6 +1867,126 @@ async fn handle_smart_find(
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }
 
+// ─── semantic_find ────────────────────────────────────────────────────────────
+
+async fn handle_semantic_find(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let query = args["query"].as_str().ok_or("Параметр 'query' обязателен")?;
+    if query.trim().is_empty() {
+        return Err("Параметр 'query' не может быть пустым".to_string());
+    }
+
+    let db = db_path.as_ref().ok_or(
+        "Индекс символов не готов. Убедитесь, что указан путь к конфигурации и индексация завершена."
+    )?;
+
+    let limit = args["limit"].as_u64().unwrap_or(5).min(20) as usize;
+    let include_code = args["include_code"].as_bool().unwrap_or(true);
+    let context_objects: Vec<String> = args["context_objects"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let db_clone = db.clone();
+    let query_owned = query.to_string();
+    let ctx_clone = context_objects.clone();
+
+    let results = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db_clone)
+            .map_err(|e| format!("Ошибка БД: {}", e))?;
+        Ok::<_, String>(crate::semantic::semantic_search(&conn, &query_owned, &ctx_clone, limit))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))??;
+
+    if results.is_empty() {
+        // Check if FTS index actually has data (vs index not ready yet)
+        let fts_count = {
+            let db_clone2 = db.clone();
+            tokio::task::spawn_blocking(move || {
+                rusqlite::Connection::open(&db_clone2).ok()
+                    .and_then(|c| c.query_row("SELECT COUNT(*) FROM symbol_terms", [], |r| r.get::<_, i64>(0)).ok())
+                    .unwrap_or(0)
+            }).await.unwrap_or(0)
+        };
+
+        let msg = if fts_count == 0 {
+            format!(
+                "⚠️ Семантический индекс ещё не готов (FTS пуст). Индекс строится в фоне после запуска сервера — подожди 1-2 минуты и повтори запрос.\n\nПока индекс строится, используй `find_symbol` с гипотезами имён: например, `ЗначениеСтавкиНДС`, `ПолучитьСтавкуНДС`, `СтавкаНДСПоПеречислению`.",
+            )
+        } else {
+            format!(
+                "Семантический поиск по запросу \"{}\" не дал результатов (FTS строк: {}).\n\nПопробуйте `find_symbol` с конкретным именем или `search_code` с ключевыми словами.",
+                query, fts_count
+            )
+        };
+        return Ok(json!({ "content": [{ "type": "text", "text": msg }] }));
+    }
+
+    // Build summary text
+    let mut text = format!(
+        "Семантический поиск по запросу \"{}\": найдено {} результат(ов)\n\n",
+        query, results.len()
+    );
+    for (i, r) in results.iter().enumerate() {
+        let export_mark = if r.is_export { " Экспорт" } else { "" };
+        text.push_str(&format!(
+            "{}. **{}** ({}{}) — `{}`  строки {}-{}\n   score={:.3}  calls={}\n",
+            i + 1, r.name, r.kind, export_mark,
+            r.file, r.start_line, r.end_line,
+            r.final_score, r.call_count
+        ));
+    }
+
+    // Include code for top result
+    if include_code {
+        if let (Some(root), Some(best)) = (config_path, results.first()) {
+            let file_path = root.join(best.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = (best.start_line as usize).saturating_sub(1);
+                let end = (best.end_line as usize).min(lines.len());
+                if start < lines.len() {
+                    let body = lines[start..end].join("\n");
+                    let export_mark = if best.is_export { " Экспорт" } else { "" };
+                    text.push_str(&format!(
+                        "\n\n---\n**Код: {}{}** (`{}` строки {}-{}):\n\n```bsl\n{}\n```",
+                        best.name, export_mark, best.file,
+                        best.start_line, best.end_line, body
+                    ));
+                }
+            }
+        }
+    }
+
+    // Build structured search_result for programmatic use
+    let items: Vec<Value> = results.iter().enumerate().map(|(i, r)| json!({
+        "rank": i + 1,
+        "name": r.name,
+        "kind": r.kind,
+        "file": r.file,
+        "start_line": r.start_line,
+        "end_line": r.end_line,
+        "is_export": r.is_export,
+        "bm25_score": r.bm25_score,
+        "call_count": r.call_count,
+        "final_score": r.final_score,
+    })).collect();
+
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "search_result": {
+            "tool": "semantic_find",
+            "query": query,
+            "context_objects": context_objects,
+            "items": items
+        }
+    }))
+}
+
 // ─── find_function_in_object ─────────────────────────────────────────────────
 
 async fn handle_find_function_in_object(
@@ -2086,8 +2282,8 @@ async fn handle_search_files(
                 "module_kind": fi.module_kind
             })).collect();
 
-            let summary = format!(
-                "Найдено {} файлов{}{}{}{}{}",
+            let mut summary = format!(
+                "Найдено {} файлов{}{}{}{}{}\n\n",
                 total,
                 if !query.is_empty() { format!(" по «{}»", query) } else { String::new() },
                 object_type_filter.as_deref().map(|t| format!(", тип: {}", t)).unwrap_or_default(),
@@ -2095,6 +2291,13 @@ async fn handle_search_files(
                 scope_prefix.as_deref().map(|s| format!(", в: {}", s)).unwrap_or_default(),
                 if truncated { format!(" (показаны {}-{})", offset + 1, offset + returned) } else { String::new() }
             );
+            for fi in &page {
+                let obj_label = match (&fi.object_type, &fi.object_name) {
+                    (Some(_t), Some(n)) => format!(" [{}]", n),
+                    _ => String::new(),
+                };
+                summary.push_str(&format!("- `{}`{}\n", fi.filepath, obj_label));
+            }
 
             return Ok(json!({
                 "content": [{ "type": "text", "text": summary }],
@@ -2204,12 +2407,17 @@ async fn handle_search_files(
     let truncated = offset + returned < total;
     let next_offset = if truncated { Some(offset + returned) } else { None };
 
-    let summary = format!(
-        "Найдено {} файлов{}{}",
+    let mut summary = format!(
+        "Найдено {} файлов{}{}\n\n",
         total,
         if !query.is_empty() { format!(" по «{}»", query) } else { String::new() },
         if truncated { format!(" (показаны {}-{})", offset + 1, offset + returned) } else { String::new() }
     );
+    for item in &page {
+        let obj_name = item["object_name"].as_str().unwrap_or("");
+        let obj_label = if !obj_name.is_empty() { format!(" [{}]", obj_name) } else { String::new() };
+        summary.push_str(&format!("- `{}`{}\n", item["file"].as_str().unwrap_or(""), obj_label));
+    }
 
     Ok(json!({
         "content": [{ "type": "text", "text": summary }],
