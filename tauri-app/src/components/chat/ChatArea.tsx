@@ -23,6 +23,7 @@ import { CodexAuthModal } from '../settings/CodexAuthModal';
 import { QueuedMessages } from './QueuedMessages';
 import McpToolsPopover from './McpToolsPopover';
 import { VoiceInputControl } from '../voice/VoiceInputControl';
+import { ContextUsageBar } from './ContextUsageBar';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -282,7 +283,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, compressionIndicator, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
+    const { messages, compressionIndicator, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue, clearChat } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
@@ -1471,6 +1472,10 @@ export function ChatArea({
                     onRemove={removeQueuedMessage}
                     onUpdate={updateQueuedMessage}
                     onClearAll={clearQueue}
+                />
+                <ContextUsageBar
+                    onNewChat={clearChat}
+                    profileId={activeProfileId ?? undefined}
                 />
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
 

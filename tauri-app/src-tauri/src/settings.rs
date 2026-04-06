@@ -286,7 +286,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub context_compress_strategy: String,
 
-    /// Порог сжатия (кол-во сообщений диалога, default 40)
+    /// Порог сжатия в токенах (chars/4 эвристика, default 8000).
+    /// Заменяет max_context_messages — сжатие теперь по токенам, а не по числу сообщений.
+    #[serde(default)]
+    pub max_context_tokens: Option<u32>,
+
+    /// Устаревшее поле — сохранено для миграции старых конфигов.
     #[serde(default)]
     pub max_context_messages: Option<u32>,
 }

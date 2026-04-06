@@ -154,6 +154,9 @@ export interface AppSettings {
     max_agent_iterations?: number | null;
     theme?: 'light' | 'dark';
     context_compress_strategy?: 'disabled' | 'sliding_window' | 'summarize';
+    /** Порог сжатия в токенах (chars/4). Приоритет над max_context_messages. Default: 8000 */
+    max_context_tokens?: number;
+    /** @deprecated Устарело — используй max_context_tokens */
     max_context_messages?: number;
 }
 

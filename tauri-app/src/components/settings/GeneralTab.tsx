@@ -139,29 +139,30 @@ export function GeneralTab({
                                 <div>
                                     <div className="text-sm font-medium text-zinc-200">Порог сжатия</div>
                                     <div className="text-xs text-zinc-500">
-                                        Сжимать когда диалог превышает N сообщений
+                                        Сжимать когда история превышает N токенов (~символов÷4)
                                     </div>
                                 </div>
                                 <input
                                     type="number"
-                                    min={10}
-                                    max={200}
-                                    value={settings.max_context_messages ?? 40}
+                                    min={1000}
+                                    max={50000}
+                                    step={1000}
+                                    value={settings.max_context_tokens ?? 8000}
                                     onChange={(e) =>
                                         setSettings({
                                             ...settings,
-                                            max_context_messages: parseInt(e.target.value, 10) || 40,
+                                            max_context_tokens: parseInt(e.target.value, 10) || 8000,
                                         })
                                     }
-                                    className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
+                                    className="w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
                                 />
                             </div>
                         )}
 
                         {settings.context_compress_strategy === 'summarize' && (
                             <p className="text-[11px] text-zinc-600">
-                                ⚠ Суммаризация недоступна для QwenCLI и 1С:Напарника, будет использован fallback
-                                без сжатия.
+                                ⚠ Суммаризация недоступна для CodexCLI, QwenCLI и 1С:Напарника — автоматически
+                                используется скользящее окно.
                             </p>
                         )}
                     </div>

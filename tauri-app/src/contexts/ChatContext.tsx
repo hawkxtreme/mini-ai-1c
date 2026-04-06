@@ -63,20 +63,32 @@ function stripCompressionMessages(msgs: ChatMessage[]): ChatMessage[] {
     return msgs.filter(msg => !isCompressionMessage(msg));
 }
 
-/** Sliding window for payload: keep first message + last (maxMessages - 1), without UI markers */
+/** Estimates token count for a list of messages (chars / 4, matching Rust backend heuristic). */
+function estimateMsgTokens(msgs: ChatMessage[]): number {
+    return msgs.reduce((sum, m) => sum + Math.ceil((m.content?.length ?? 0) / 4), 0);
+}
+
+/**
+ * Sliding window for payload: keep first dialog message + as many trailing messages as fit
+ * within maxTokens. Drops messages from the middle (after first) until under threshold.
+ */
 function slidingWindowCompress(
     msgs: ChatMessage[],
-    maxMessages: number
+    maxTokens: number
 ): { compressed: ChatMessage[]; removedCount: number } {
     const systemMsgs = msgs.filter(m => m.role === 'system');
     const dialogMsgs = msgs.filter(m => m.role !== 'system');
-    if (dialogMsgs.length <= maxMessages) {
+    if (estimateMsgTokens(dialogMsgs) <= maxTokens) {
         return { compressed: msgs, removedCount: 0 };
     }
-    // Keep first message + last (maxMessages - 1) messages
+    // Keep first message; drop from position 1 forward until under threshold
     const first = dialogMsgs[0];
-    const tail = dialogMsgs.slice(-(maxMessages - 1));
-    const removedCount = dialogMsgs.length - maxMessages;
+    let tail = dialogMsgs.slice(1);
+    let removedCount = 0;
+    while (tail.length > 0 && estimateMsgTokens([first, ...tail]) > maxTokens) {
+        tail = tail.slice(1);
+        removedCount++;
+    }
     return { compressed: [...systemMsgs, first, ...tail], removedCount };
 }
 
@@ -546,16 +558,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         let indicator: CompressionIndicator | null = null;
 
         const strategy = settings?.context_compress_strategy;
-        const maxMsgs = settings?.max_context_messages ?? 40;
+        // Token threshold: prefer max_context_tokens; fall back to max_context_messages * 200
+        // (rough average tokens per message), then default 8000.
+        const maxTokens: number =
+            settings?.max_context_tokens ??
+            ((settings?.max_context_messages ?? 0) > 0
+                ? (settings!.max_context_messages! * 200)
+                : 8000);
 
         if (strategy === 'sliding_window') {
-            const { compressed } = slidingWindowCompress(historyMessages, maxMsgs);
+            const { compressed } = slidingWindowCompress(historyMessages, maxTokens);
             payloadSourceMessages = compressed;
         } else if (strategy === 'summarize') {
             const previousMessages = historyMessages.slice(0, -1);
             const dialogMsgs = previousMessages.filter(m => m.role !== 'system');
 
-            if (dialogMsgs.length > maxMsgs) {
+            if (estimateMsgTokens(dialogMsgs) > maxTokens) {
                 try {
                     const toSummarize: api.ChatMessage[] = dialogMsgs.map(m => ({
                         role: m.role as api.ChatMessage['role'],
@@ -588,7 +606,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         label: 'Контекст сжат',
                     };
                 } catch (error) {
-                    console.warn('[ChatContext] Summarization failed, continuing without compression:', error);
+                    // Summarization unavailable for this provider (CodexCli / QwenCli / Naparnik)
+                    // or other failure — fall back to sliding_window so context is still trimmed.
+                    console.warn('[ChatContext] Summarization failed, falling back to sliding_window:', error);
+                    const { compressed } = slidingWindowCompress(historyMessages, maxTokens);
+                    payloadSourceMessages = compressed;
                 }
             }
         }
