@@ -26,6 +26,26 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Format a Unix timestamp as "ДД.ММ.ГГГГ ЧЧ:ММ" in UTC+3 (Moscow time).
+fn format_unix_msk(unix: u64) -> String {
+    if unix == 0 { return String::new(); }
+    let msk = unix as i64 + 3 * 3600;
+    let days = msk / 86400;
+    let h = (msk % 86400) / 3600;
+    let m = (msk % 3600) / 60;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365*yoe + yoe/4 - yoe/100);
+    let mp = (5*doy + 2) / 153;
+    let d = doy - (153*mp + 2)/5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{:02}.{:02}.{} {:02}:{:02}", d, mo, y, h, m)
+}
+
 pub(crate) const BUILTIN_1C_SEARCH_SERVER_ID: &str = "builtin-1c-search";
 
 pub(crate) fn builtin_search_unavailable_reason(config: &McpServerConfig) -> Option<String> {
@@ -1396,8 +1416,38 @@ impl McpSession {
                                  }
                              }
                              // Парсим SEARCH_STATUS строки от 1С:Поиск (mcp-1c-search)
-                             // Format: SEARCH_STATUS:{state}:{sym_count}:{db_size_mb}:{built_at_unix}
-                             if is_search_server && line.starts_with("SEARCH_STATUS:") {
+                             // New JSON format (preferred): SEARCH_STATUS_JSON:{...}
+                             // Legacy colon format (fallback): SEARCH_STATUS:{state}:{sym_count}:{db_size_mb}:{built_at_unix}
+                             if is_search_server && line.starts_with("SEARCH_STATUS_JSON:") {
+                                 let json_str = line.trim_start_matches("SEARCH_STATUS_JSON:");
+                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                     let state = v["state"].as_str().unwrap_or("").to_string();
+                                     let progress = v["progress"].as_u64().unwrap_or(0) as u32;
+                                     let message = v["message"].as_str().unwrap_or("").to_string();
+                                     let sym_count = v["sym_count"].as_u64().unwrap_or(0);
+                                     let db_size_mb = v["db_size_mb"].as_f64().unwrap_or(0.0);
+                                     let built_at_unix = v["built_at_unix"].as_u64().unwrap_or(0);
+
+                                     *help_status_writer.lock().await = state.clone();
+                                     *help_progress_writer.lock().await = progress;
+
+                                     let display_msg = match state.as_str() {
+                                         "ready" if sym_count > 0 => {
+                                             let date_str = format_unix_msk(built_at_unix);
+                                             match (db_size_mb > 0.1, !date_str.is_empty()) {
+                                                 (true, true)  => format!("{} символов • {:.1} МБ • {}", sym_count, db_size_mb, date_str),
+                                                 (true, false) => format!("{} символов • {:.1} МБ", sym_count, db_size_mb),
+                                                 (false, true) => format!("{} символов • {}", sym_count, date_str),
+                                                 _             => format!("{} символов", sym_count),
+                                             }
+                                         }
+                                         "ready" => message.clone(),
+                                         _ => message.clone(),
+                                     };
+                                     *help_message_writer.lock().await = display_msg;
+                                 }
+                             } else if is_search_server && line.starts_with("SEARCH_STATUS:") {
+                                 // Legacy format fallback
                                  let parts: Vec<&str> = line.trim_start_matches("SEARCH_STATUS:").splitn(5, ':').collect();
                                  if !parts.is_empty() {
                                      let state = parts[0];
@@ -1408,27 +1458,7 @@ impl McpSession {
                                              let sym_count = parts.get(1).unwrap_or(&"").trim();
                                              let db_size   = parts.get(2).unwrap_or(&"").trim();
                                              let built_at_unix: u64 = parts.get(3).unwrap_or(&"0").trim().parse().unwrap_or(0);
-
-                                             // Format timestamp as ДД.ММ.ГГГГ ЧЧ:ММ (UTC+3 Moscow)
-                                             let date_str = if built_at_unix > 0 {
-                                                 let msk = built_at_unix as i64 + 3 * 3600;
-                                                 let days = msk / 86400;
-                                                 let h = (msk % 86400) / 3600;
-                                                 let m = (msk % 3600) / 60;
-                                                 let z = days + 719468;
-                                                 let era = if z >= 0 { z } else { z - 146096 } / 146097;
-                                                 let doe = z - era * 146097;
-                                                 let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-                                                 let y = yoe + era * 400;
-                                                 let doy = doe - (365*yoe + yoe/4 - yoe/100);
-                                                 let mp = (5*doy + 2) / 153;
-                                                 let d = doy - (153*mp + 2)/5 + 1;
-                                                 let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-                                                 let y = if mo <= 2 { y + 1 } else { y };
-                                                 format!("{:02}.{:02}.{} {:02}:{:02}", d, mo, y, h, m)
-                                             } else {
-                                                 String::new()
-                                             };
+                                             let date_str = format_unix_msk(built_at_unix);
 
                                              *help_message_writer.lock().await = match (sym_count, db_size, date_str.as_str()) {
                                                  ("", _, _) | ("0", _, _) => "Готово".to_string(),

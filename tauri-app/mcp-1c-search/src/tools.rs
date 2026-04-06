@@ -67,8 +67,37 @@ fn resolve_scope(scope: &str) -> Option<PathBuf> {
 pub fn list_tools() -> Vec<Value> {
     vec![
         json!({
+            "name": "semantic_find",
+            "description": "🔍 ПЕРВЫЙ ИНСТРУМЕНТ при поиске функции по описанию задачи. Семантический поиск по именам функций, комментариям, параметрам. ОБЯЗАТЕЛЕН как первый шаг если не знаешь точное имя функции. Запрос на русском языке: что делает функция, какой объект обрабатывает. Возвращает ТОП-5 функций с score — если score ≥ 0.5 это сильный результат.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Описание задачи на русском языке или часть имени функции."
+                    },
+                    "context_objects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Объекты 1С для усиления релевантности. Форматы: 'Catalog.СтавкиНДС', 'Document.РеализацияТоваров'. Функции из этих объектов получают дополнительный вес."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Максимум результатов (по умолчанию 5, максимум 20).",
+                        "default": 5
+                    },
+                    "include_code": {
+                        "type": "boolean",
+                        "description": "Включить код лучшего результата в ответ (по умолчанию true).",
+                        "default": true
+                    }
+                }
+            }
+        }),
+        json!({
             "name": "search_code",
-            "description": "Быстрый поиск по исходному коду конфигурации 1С (BSL и XML файлы). Возвращает совпадения с файлом и номером строки.",
+            "description": "Поиск по тексту кода 1С (BSL/XML). ⚠️ СТОП: если ищешь функцию по описанию задачи и не знаешь её имя — сначала вызови semantic_find (он специально создан для этого и работает за 1 вызов). search_code используй только когда semantic_find не помог или ты знаешь конкретный текстовый паттерн для поиска.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -78,8 +107,33 @@ pub fn list_tools() -> Vec<Value> {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Максимум результатов (по умолчанию 20, максимум 100)",
+                        "description": "Максимум результатов (backward-compatible alias для head_limit; по умолчанию 20, максимум 100)",
                         "default": 20
+                    },
+                    "head_limit": {
+                        "type": "integer",
+                        "description": "Максимум результатов в текущем окне (по умолчанию 20, максимум 100). Приоритет над limit.",
+                        "default": 20
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Смещение для пагинации (по умолчанию 0). Используйте next_offset из предыдущего ответа.",
+                        "default": 0
+                    },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "Режим выдачи: content — строки с кодом (умолчание), files_with_matches — агрегат по файлам, count — только счётчик.",
+                        "default": "content"
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Бюджет времени в мс (по умолчанию 8000). Уменьшите для быстрого count/preview."
+                    },
+                    "include_summary": {
+                        "type": "boolean",
+                        "description": "Включить человекочитаемый summary-текст в ответ (по умолчанию true).",
+                        "default": true
                     },
                     "regex": {
                         "type": "boolean",
@@ -299,6 +353,45 @@ pub fn list_tools() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "search_files",
+            "description": "Поиск файлов и модулей в конфигурации 1С по имени, расширению, типу объекта или glob-шаблону. Используйте вместо search_code когда нужен список файлов, а не текст в них.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Часть имени файла или объекта (регистронезависимый поиск). Например: 'НДС', 'УчетТоваров'."
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Glob-шаблон поверх relative path (например: '*.bsl', 'CommonModules/**/Module.bsl'). Применяется дополнительно к query."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Ограничить поиск папкой. Форматы: 'CommonModules', 'Catalogs', 'CommonModule.МодульИмя'."
+                    },
+                    "object_type": {
+                        "type": "string",
+                        "description": "Фильтр по типу объекта 1С: CommonModule, Catalog, Document, Report, DataProcessor и т.д."
+                    },
+                    "extension": {
+                        "type": "string",
+                        "description": "Фильтр по расширению файла: bsl, xml."
+                    },
+                    "head_limit": {
+                        "type": "integer",
+                        "description": "Максимум файлов в ответе (по умолчанию 50, максимум 500).",
+                        "default": 50
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Смещение для пагинации (по умолчанию 0).",
+                        "default": 0
+                    }
+                }
+            }
+        }),
+        json!({
             "name": "stats",
             "description": "Статистика символьного индекса конфигурации 1С: количество символов, файлов, объектов, рёбер графа вызовов.",
             "inputSchema": {
@@ -331,6 +424,7 @@ pub async fn call_tool(
     let start = std::time::Instant::now();
     let result = match name {
         "search_code" => handle_search_code(args, config_path, db_path).await,
+        "search_files" => handle_search_files(args, config_path, db_path).await,
         "get_file_context" => handle_get_file_context(args, config_path).await,
         "find_symbol" => handle_find_symbol(args, db_path).await,
         "get_symbol_context" => handle_get_symbol_context(args, config_path, db_path).await,
@@ -341,6 +435,7 @@ pub async fn call_tool(
         "get_function_context" => handle_get_function_context(args, db_path).await,
         "get_module_functions" => handle_get_module_functions(args, db_path).await,
         "smart_find" => handle_smart_find(args, config_path, db_path).await,
+        "semantic_find" => handle_semantic_find(args, config_path, db_path).await,
         "find_function_in_object" => handle_find_function_in_object(args, config_path, db_path).await,
         "stats" => handle_stats(db_path).await,
         "sync_index" => handle_sync_index(config_path, db_path).await,
@@ -365,8 +460,55 @@ async fn handle_search_code(
         return Err("Параметр 'query' не может быть пустым".to_string());
     }
 
-    let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
+    // Auto-semantic: if query looks like natural language (function search by description),
+    // prepend semantic_find results before the text search results.
+    // Heuristic: query has spaces, no code-pattern chars, not too short.
+    let is_natural_query = {
+        let has_spaces = query.contains(' ');
+        let no_code_chars = !query.contains('.') && !query.contains('(') && !query.contains('"')
+            && !query.contains('=') && !query.contains(';');
+        let word_count = query.split_whitespace().count();
+        has_spaces && no_code_chars && word_count >= 3
+    };
+    let semantic_prefix = if is_natural_query {
+        db_path.as_ref()
+            .and_then(|db| rusqlite::Connection::open(db).ok())
+            .map(|conn| {
+                let results = crate::semantic::semantic_search(&conn, query, &[], 3);
+                if results.is_empty() {
+                    String::new()
+                } else {
+                    let mut prefix = String::from(
+                        "💡 SEMANTIC HINT (автоматически): найдены функции по описанию — используй их прежде чем продолжать поиск:\n"
+                    );
+                    for (i, r) in results.iter().enumerate() {
+                        prefix.push_str(&format!(
+                            "{}. **{}** ({}) — `{}` строки {}-{} | score={:.3} calls={}\n",
+                            i + 1, r.name, r.kind, r.file,
+                            r.start_line, r.end_line, r.final_score, r.call_count
+                        ));
+                    }
+                    prefix.push_str("\n---\n");
+                    prefix
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // head_limit takes priority over limit (backward compat alias)
+    let head_limit = args["head_limit"].as_u64()
+        .or_else(|| args["limit"].as_u64())
+        .unwrap_or(20)
+        .clamp(1, 100) as usize;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let use_regex = args["regex"].as_bool().unwrap_or(false);
+    let include_summary = args["include_summary"].as_bool().unwrap_or(true);
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(8_000);
+
+    // output_mode: "content" | "files_with_matches" | "count"
+    let output_mode = args["output_mode"].as_str().unwrap_or("content");
 
     // Resolve scope → relative sub-path within config root
     let sub_path: Option<PathBuf> = args["scope"].as_str().and_then(|s| {
@@ -388,8 +530,6 @@ async fn handle_search_code(
     if let Some(ref sp) = sub_path {
         let full_scope_path = root.join(sp);
         if !full_scope_path.exists() {
-            // Check if the parent (type folder) is non-empty — if parent is also empty,
-            // it means this object type wasn't exported in this configuration dump.
             let scope_str = args["scope"].as_str().unwrap_or("");
             let parent_empty = sp.parent()
                 .map(|p| {
@@ -418,106 +558,358 @@ async fn handle_search_code(
         }
     }
 
-    let root_clone = root.clone();
-    let db_clone = db_path.clone();
-    let query_owned = query.to_string();
-    let query_lower = query.to_lowercase();
-    // Index-guided conditions:
-    // - full-config search only (no scope)
-    // - not a regex
-    // - no spaces in query (symbol names never contain spaces — hint would return 0 results)
-    let use_index_hint = sub_path.is_none() && !use_regex && !query.contains(' ');
-    let sub_path_clone = sub_path.clone();
-
-    let start_time = std::time::Instant::now();
-
-    let (results, timed_out) = tokio::task::spawn_blocking(move || -> (Vec<search::SearchResult>, bool) {
-        // Phase 1: SQLite-guided search
-        // Query the symbols table for files that DECLARE symbols matching the query.
-        // These files are the most likely to also contain usages — grep only them first.
-        // If limit is reached → return without touching the rest of the 25K-file config.
-        //
-        // Smart hint for qualified names: "Справочники.СтавкиНДС" → hint on "ставкиндс"
-        // Symbol names never include the "Справочники." prefix, so stripping it gives hits.
-        if use_index_hint {
-            if let Some(db) = db_clone.as_deref() {
-                let hint_query = if query_lower.contains('.') {
-                    // Use only the last segment after the final dot
-                    query_lower.rsplit('.').next().unwrap_or(&query_lower).to_string()
-                } else {
-                    query_lower.clone()
-                };
-                let hot_files = index::find_files_by_symbol_query(db, &hint_query, 100);
-                if !hot_files.is_empty() {
-                    let hot = search::search_code_in_file_set(
-                        &root_clone, &hot_files, &query_owned, false, limit,
-                    );
-                    // Return index-guided results regardless of count.
-                    // A full-config fallback scan on cold HDD takes minutes — unacceptable.
-                    // If the symbol exists in the index, hint files are the most relevant.
-                    // When hot is empty (symbol truly not in hint files), fall through below.
-                    if !hot.is_empty() {
-                        eprintln!(
-                            "[1c-search] index-guided: {} results from {} hint files",
-                            hot.len(), hot_files.len()
-                        );
-                        return (hot, false);
-                    }
-                }
-            }
-        }
-        // Phase 2: no index hint (regex, scoped, spaces in query, or no db)
-        // BSL-first two-pass streaming scan — capped at 8s to avoid multi-minute waits on HDD.
-        search::search_code(&root_clone, sub_path_clone.as_deref(), &query_owned, use_regex, limit, Some(8_000))
-    })
-    .await
-    .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
-
-    let elapsed = start_time.elapsed().as_millis();
-
     let scope_label = args["scope"].as_str()
         .filter(|s| !s.trim().is_empty())
         .map(|s| format!(" в «{}»", s))
         .unwrap_or_default();
 
-    if results.is_empty() {
+    let root_clone = root.clone();
+    let db_clone = db_path.clone();
+    let query_owned = query.to_string();
+    let query_lower = query.to_lowercase();
+    let use_index_hint = sub_path.is_none() && !use_regex && !query.contains(' ');
+    let sub_path_clone = sub_path.clone();
+
+    let start_time = std::time::Instant::now();
+
+    match output_mode {
+        "count" => {
+            // Cheap count: collect all matches up to a large cap, return only numbers
+            let fetch_limit = 5000usize;
+            let (results, timed_out) = tokio::task::spawn_blocking(move || {
+                execute_text_search(
+                    &root_clone, sub_path_clone.as_deref(),
+                    &db_clone, &query_owned, &query_lower,
+                    use_regex, use_index_hint, fetch_limit, timeout_ms,
+                )
+            })
+            .await
+            .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
+
+            let elapsed = start_time.elapsed().as_millis();
+            let is_exact = !timed_out && results.len() < fetch_limit;
+
+            // Group by file
+            let mut file_set = std::collections::HashSet::new();
+            for r in &results {
+                file_set.insert(r.file.clone());
+            }
+
+            let search_result = json!({
+                "schema_version": 2,
+                "tool": "search_code",
+                "query": query,
+                "scope": args["scope"].as_str(),
+                "output_mode": "count",
+                "timed_out": timed_out,
+                "elapsed_ms": elapsed,
+                "matched_files": file_set.len(),
+                "matched_lines": results.len(),
+                "is_exact": is_exact
+            });
+
+            let summary = if include_summary {
+                let exact_str = if is_exact { "" } else { "≥" };
+                format!(
+                    "По запросу \"{}\"{}: {}{} вхождений в {} файлах ({}мс){}",
+                    query, scope_label,
+                    exact_str, results.len(), file_set.len(), elapsed,
+                    if timed_out { " ⚠️ неполный результат (таймаут)" } else { "" }
+                )
+            } else {
+                String::new()
+            };
+
+            let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
+            if include_summary {
+                content_arr.push(json!({ "type": "text", "text": summary }));
+            }
+            Ok(json!({ "content": content_arr, "search_result": search_result }))
+        }
+
+        "files_with_matches" => {
+            let fetch_limit = (offset + head_limit * 10).max(200);
+            let (results, timed_out) = tokio::task::spawn_blocking(move || {
+                execute_text_search(
+                    &root_clone, sub_path_clone.as_deref(),
+                    &db_clone, &query_owned, &query_lower,
+                    use_regex, use_index_hint, fetch_limit, timeout_ms,
+                )
+            })
+            .await
+            .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
+
+            let elapsed = start_time.elapsed().as_millis();
+
+            // Aggregate by file, preserving first-seen order
+            let mut file_order: Vec<String> = Vec::new();
+            let mut file_map: std::collections::HashMap<String, (usize, Vec<(u32, String)>)> =
+                std::collections::HashMap::new();
+            for r in &results {
+                if !file_map.contains_key(&r.file) {
+                    file_order.push(r.file.clone());
+                }
+                let entry = file_map.entry(r.file.clone()).or_insert((0, vec![]));
+                entry.0 += 1;
+                if entry.1.len() < 3 {
+                    entry.1.push((r.line, r.snippet.trim().to_string()));
+                }
+            }
+
+            let all_files: Vec<_> = file_order.into_iter()
+                .filter_map(|f| file_map.remove(&f).map(|v| (f, v)))
+                .collect();
+            let total_files = all_files.len();
+            let page = &all_files[offset.min(total_files)..];
+            let returned_files: Vec<_> = page.iter().take(head_limit).cloned().collect();
+            let next_offset = if offset + head_limit < total_files {
+                Some(offset + head_limit)
+            } else {
+                None
+            };
+            let truncated = next_offset.is_some() || timed_out;
+
+            let items: Vec<Value> = returned_files.iter().map(|(file, (count, examples))| {
+                json!({
+                    "file": file,
+                    "match_count": count,
+                    "examples": examples.iter().map(|(ln, snip)| json!({ "line": ln, "snippet": snip })).collect::<Vec<_>>()
+                })
+            }).collect();
+
+            let search_result = json!({
+                "schema_version": 2,
+                "tool": "search_code",
+                "query": query,
+                "scope": args["scope"].as_str(),
+                "output_mode": "files_with_matches",
+                "offset": offset,
+                "head_limit": head_limit,
+                "returned": items.len(),
+                "next_offset": next_offset,
+                "truncated": truncated,
+                "timed_out": timed_out,
+                "elapsed_ms": elapsed,
+                "items": items
+            });
+
+            let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
+            if include_summary {
+                let summary_text = build_files_with_matches_summary(
+                    &query,
+                    &scope_label,
+                    total_files,
+                    offset,
+                    elapsed,
+                    timed_out,
+                    &returned_files,
+                );
+                content_arr.push(json!({ "type": "text", "text": summary_text }));
+            }
+            Ok(json!({ "content": content_arr, "search_result": search_result }))
+        }
+
+        // Default: "content"
+        _ => {
+            // Fetch offset + head_limit results; for index-guided we fetch from the start
+            let fetch_limit = offset + head_limit;
+            let (results, timed_out) = tokio::task::spawn_blocking(move || {
+                execute_text_search(
+                    &root_clone, sub_path_clone.as_deref(),
+                    &db_clone, &query_owned, &query_lower,
+                    use_regex, use_index_hint, fetch_limit, timeout_ms,
+                )
+            })
+            .await
+            .map_err(|e| format!("Ошибка выполнения поиска: {}", e))?;
+
+            let elapsed = start_time.elapsed().as_millis();
+            let total_fetched = results.len();
+            let page: Vec<_> = results.into_iter().skip(offset).collect();
+            let returned = page.len();
+            let truncated = returned >= head_limit || timed_out;
+            let next_offset = if offset + returned < total_fetched || (truncated && !timed_out) {
+                Some(offset + returned)
+            } else {
+                None
+            };
+
+            if page.is_empty() {
+                let timeout_note = if timed_out {
+                    " Поиск прерван по таймауту — попробуйте уточнить запрос через параметр `scope`."
+                } else {
+                    ""
+                };
+                let text = format!(
+                    "По запросу \"{}\"{}  ничего не найдено. ({}мс){}",
+                    query, scope_label, elapsed, timeout_note
+                );
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "search_result": {
+                        "schema_version": 2, "tool": "search_code",
+                        "query": query, "output_mode": "content",
+                        "offset": offset, "head_limit": head_limit,
+                        "returned": 0, "truncated": false,
+                        "timed_out": timed_out, "elapsed_ms": elapsed, "items": []
+                    }
+                }));
+            }
+
+            // Build structured items + legacy summary in parallel
+            let mut items: Vec<Value> = Vec::with_capacity(page.len());
+            let mut summary_text = if include_summary {
+                format!(
+                    "Найдено {} результат(ов) по запросу \"{}\"{} ({}мс):\n\n",
+                    returned, query, scope_label, elapsed
+                )
+            } else {
+                String::new()
+            };
+
+            for r in &page {
+                let ext = r.file.rsplit('.').next().unwrap_or("bsl");
+                let containing_sym = db_path.as_ref()
+                    .and_then(|db| index::find_symbol_at_line(db, &r.file, r.line));
+                let containing_name = containing_sym.as_ref().map(|s| s.name.as_str());
+
+                items.push(json!({
+                    "file": r.file,
+                    "line": r.line,
+                    "snippet": r.snippet.trim(),
+                    "containing_symbol": containing_name
+                }));
+
+                if include_summary {
+                    let containing_label = containing_name
+                        .map(|n| format!(" _(в {}_)", n))
+                        .unwrap_or_default();
+                    summary_text.push_str(&format!(
+                        "**{}:{}**{}\n```{}\n{}\n```\n\n",
+                        r.file, r.line, containing_label, ext, r.snippet.trim()
+                    ));
+                }
+            }
+
+            if include_summary && timed_out {
+                summary_text.push_str(&format!(
+                    "\n⚠️ *Поиск ограничен по времени — показаны первые {} результатов. Для полного поиска используйте параметр `scope`.*",
+                    returned
+                ));
+            }
+
+            let search_result = json!({
+                "schema_version": 2,
+                "tool": "search_code",
+                "query": query,
+                "scope": args["scope"].as_str(),
+                "output_mode": "content",
+                "offset": offset,
+                "head_limit": head_limit,
+                "returned": returned,
+                "next_offset": next_offset,
+                "truncated": truncated,
+                "timed_out": timed_out,
+                "elapsed_ms": elapsed,
+                "items": items
+            });
+
+            let mut content_arr = vec![];
+            if !semantic_prefix.is_empty() {
+                content_arr.push(json!({ "type": "text", "text": semantic_prefix }));
+            }
+            if include_summary {
+                content_arr.push(json!({ "type": "text", "text": summary_text }));
+            }
+            Ok(json!({ "content": content_arr, "search_result": search_result }))
+        }
+    }
+}
+
+fn build_files_with_matches_summary(
+    query: &str,
+    scope_label: &str,
+    total_files: usize,
+    offset: usize,
+    elapsed: u128,
+    timed_out: bool,
+    returned_files: &[(String, (usize, Vec<(u32, String)>))],
+) -> String {
+    if total_files == 0 {
         let timeout_note = if timed_out {
-            " Поиск прерван по таймауту (8с) — попробуйте уточнить запрос через параметр `scope`."
+            " Поиск прерван по таймауту — попробуйте сузить `scope` или сначала использовать `output_mode=\"count\"`."
         } else {
             ""
         };
-        return Ok(json!({
-            "content": [{ "type": "text", "text": format!(
-                "По запросу \"{}\"{}  ничего не найдено. ({}мс){}",
-                query, scope_label, elapsed, timeout_note
-            )}]
-        }));
+        return format!(
+            "По запросу \"{}\"{} ничего не найдено. ({}мс){}",
+            query, scope_label, elapsed, timeout_note
+        );
     }
 
-    let mut text = format!(
-        "Найдено {} результат(ов) по запросу \"{}\"{} ({}мс):\n\n",
-        results.len(), query, scope_label, elapsed
+    let mut summary_text = format!(
+        "По запросу \"{}\"{}: {} файлов (показаны {}-{}, {}мс){}\n\n",
+        query,
+        scope_label,
+        total_files,
+        offset + 1,
+        offset + returned_files.len(),
+        elapsed,
+        if timed_out { " ⚠️ неполный результат (таймаут)" } else { "" }
     );
-    for r in &results {
-        let ext = r.file.rsplit('.').next().unwrap_or("bsl");
-        // Enrich with containing function from symbol index
-        let containing = db_path.as_ref()
-            .and_then(|db| index::find_symbol_at_line(db, &r.file, r.line))
-            .map(|sym| format!(" _(в {}_)", sym.name))
-            .unwrap_or_default();
-        text.push_str(&format!(
-            "**{}:{}**{}\n```{}\n{}\n```\n\n",
-            r.file, r.line, containing, ext, r.snippet.trim()
-        ));
-    }
-    if timed_out {
-        text.push_str(&format!(
-            "\n⚠️ *Поиск ограничен по времени (8с) — показаны первые {} результатов. Для полного поиска используйте параметр `scope`.*",
-            results.len()
-        ));
+
+    for (file, (count, examples)) in returned_files {
+        summary_text.push_str(&format!("**{}** ({} совп.)\n", file, count));
+        for (line, snippet) in examples.iter().take(2) {
+            let snippet = snippet.replace('`', "\\`");
+            summary_text.push_str(&format!("  строка {}: `{}`\n", line, snippet));
+        }
+        summary_text.push('\n');
     }
 
-    Ok(json!({ "content": [{ "type": "text", "text": text }] }))
+    summary_text
+}
+
+/// Shared execution core: index-guided or streaming scan.
+/// Returns (results, timed_out). Caller handles output_mode / pagination.
+fn execute_text_search(
+    root: &PathBuf,
+    sub_path: Option<&std::path::Path>,
+    db_path: &Option<PathBuf>,
+    query: &str,
+    query_lower: &str,
+    use_regex: bool,
+    use_index_hint: bool,
+    limit: usize,
+    timeout_ms: u64,
+) -> (Vec<search::SearchResult>, bool) {
+    if use_index_hint {
+        if let Some(db) = db_path.as_deref() {
+            let hint_query = if query_lower.contains('.') {
+                query_lower.rsplit('.').next().unwrap_or(query_lower).to_string()
+            } else {
+                query_lower.to_string()
+            };
+            let hot_files = index::find_files_by_symbol_query(db, &hint_query, 100);
+            if !hot_files.is_empty() {
+                let hot = search::search_code_in_file_set(root, &hot_files, query, false, limit);
+                if !hot.is_empty() {
+                    eprintln!(
+                        "[1c-search] index-guided: {} results from {} hint files",
+                        hot.len(), hot_files.len()
+                    );
+                    return (hot, false);
+                }
+            }
+        }
+    }
+    search::search_code(root, sub_path, query, use_regex, limit, Some(timeout_ms))
 }
 
 async fn handle_get_file_context(
@@ -748,8 +1140,29 @@ async fn handle_get_object_structure(
                 text.push('\n');
             }
             if !d.forms.is_empty() {
+                // Build folder prefix to check for form modules in filesystem
+                let folder_prefix = object_type_to_folder(d.obj_type.as_str())
+                    .map(|f| format!("{}/{}", f, d.name));
                 text.push_str(&format!("### Формы ({})\n", d.forms.len()));
-                for form in &d.forms { text.push_str(&format!("- {}\n", form)); }
+                for form in &d.forms {
+                    // Check if form module file exists on disk
+                    let form_has_module = folder_prefix.as_deref()
+                        .and_then(|prefix| config_path.as_ref().map(|root| {
+                            root.join(prefix).join("Forms").join(form)
+                                .join("Ext").join("Form").join("Module.bsl").exists()
+                        }))
+                        .unwrap_or(false);
+                    if form_has_module {
+                        let mod_path = format!(
+                            "{}/Forms/{}/Ext/Form/Module.bsl",
+                            folder_prefix.as_deref().unwrap_or(""),
+                            form
+                        );
+                        text.push_str(&format!("- **{}** — есть модуль: `get_module_functions` с `module_path=\"{}\"`\n", form, mod_path));
+                    } else {
+                        text.push_str(&format!("- {}\n", form));
+                    }
+                }
                 text.push('\n');
             }
             if !d.commands.is_empty() {
@@ -758,19 +1171,38 @@ async fn handle_get_object_structure(
                 text.push('\n');
             }
             if !d.modules.is_empty() {
+                // d.modules contains bare names like "ObjectModule", "ManagerModule" from XML metadata.
+                // Build full path: Documents/БольничныйЛист/Ext/ObjectModule.bsl
+                let folder_prefix = object_type_to_folder(d.obj_type.as_str())
+                    .map(|f| format!("{}/{}", f, d.name));
                 text.push_str(&format!("### Модули ({})\n", d.modules.len()));
-                for m in &d.modules { text.push_str(&format!("- {}\n", m)); }
+                for m in &d.modules {
+                    let full_path = folder_prefix.as_deref()
+                        .map(|prefix| format!("{}/Ext/{}.bsl", prefix, m))
+                        .unwrap_or_else(|| m.clone());
+                    text.push_str(&format!("- `{}` → `get_module_functions` с `module_path=\"{}\"`\n", m, full_path));
+                }
                 text.push('\n');
             }
+            // When forms/modules are missing from the index (XML metadata may not list them),
+            // supplement from the filesystem so AI gets correct module paths.
+            let fs_fallback = if d.forms.is_empty() && d.modules.is_empty() {
+                scan_object_folder_fallback(&d.obj_type, &d.name, config_path)
+            } else {
+                None
+            };
+            if let Some(ref fallback_text) = fs_fallback {
+                text.push_str(fallback_text);
+            }
+
             if d.attributes.is_empty()
                 && d.tabular_sections.is_empty()
                 && d.forms.is_empty()
                 && d.commands.is_empty()
                 && d.modules.is_empty()
             {
-                if let Some(fallback) = scan_object_folder_fallback(&d.obj_type, &d.name, config_path) {
-                    text.push_str("*Структурные данные получены из файловой системы.*\n\n");
-                    text.push_str(&fallback);
+                if fs_fallback.is_some() {
+                    // Already printed above
                 } else {
                     // Check if any objects of this type have source files in the dump
                     let type_folder_has_files = config_path.as_ref()
@@ -942,7 +1374,9 @@ fn scan_object_folder_fallback(
             .map(|e| e.path())?
     };
 
-    let mut forms: Vec<String> = Vec::new();
+    // forms: Vec<(name, has_module)>
+    let mut forms: Vec<(String, bool)> = Vec::new();
+    // modules: Vec<full relative path like "Ext/ObjectModule.bsl">
     let mut modules: Vec<String> = Vec::new();
     let mut templates: Vec<String> = Vec::new();
     let mut commands: Vec<String> = Vec::new();
@@ -954,10 +1388,33 @@ fn scan_object_folder_fallback(
             let path = entry.path();
             if path.is_dir() {
                 match name.as_str() {
-                    "Forms"     => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { forms.push(n); } } } }
-                    "Templates" => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { templates.push(n); } } } }
-                    "Commands"  => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { commands.push(n); } } } }
-                    "Ext"       => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { modules.push(n); } } } }
+                    "Forms" => {
+                        if let Ok(es) = std::fs::read_dir(&path) {
+                            for e in es.flatten() {
+                                // Only directories are forms; .xml and other files are metadata
+                                if !e.path().is_dir() { continue; }
+                                let form_name = e.file_name().to_string_lossy().to_string();
+                                if form_name.starts_with('.') { continue; }
+                                // Check if form has a module: Forms/<FormName>/Ext/Form/Module.bsl
+                                let form_module = e.path()
+                                    .join("Ext").join("Form").join("Module.bsl");
+                                forms.push((form_name, form_module.exists()));
+                            }
+                        }
+                    }
+                    "Templates" => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { if !e.path().is_dir() { continue; } let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { templates.push(n); } } } }
+                    "Commands"  => { if let Ok(es) = std::fs::read_dir(&path) { for e in es.flatten() { if !e.path().is_dir() { continue; } let n = e.file_name().to_string_lossy().to_string(); if !n.starts_with('.') { commands.push(n); } } } }
+                    "Ext" => {
+                        if let Ok(es) = std::fs::read_dir(&path) {
+                            for e in es.flatten() {
+                                let n = e.file_name().to_string_lossy().to_string();
+                                if !n.starts_with('.') && n.to_lowercase().ends_with(".bsl") {
+                                    // Store with "Ext/" prefix so get_module_functions LIKE matches correctly
+                                    modules.push(format!("Ext/{}", n));
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             } else if name == "Module.bsl" {
@@ -975,12 +1432,23 @@ fn scan_object_folder_fallback(
     }
     if !modules.is_empty() {
         out.push_str(&format!("### Модули ({})\n", modules.len()));
-        for m in &modules { out.push_str(&format!("- {m}\n")); }
+        for m in &modules {
+            // Full path for get_module_functions: Documents/БольничныйЛист/Ext/ManagerModule.bsl
+            let full = format!("{}/{}/{}", folder_type, obj_name, m);
+            out.push_str(&format!("- `{}` → `get_module_functions` с `module_path=\"{}\"`\n", m, full));
+        }
         out.push('\n');
     }
     if !forms.is_empty() {
         out.push_str(&format!("### Формы ({})\n", forms.len()));
-        for f in &forms { out.push_str(&format!("- {f}\n")); }
+        for (f, has_mod) in &forms {
+            if *has_mod {
+                let mod_path = format!("{}/{}/Forms/{}/Ext/Form/Module.bsl", folder_type, obj_name, f);
+                out.push_str(&format!("- **{}** — есть модуль: `get_module_functions` с `module_path=\"{}\"`\n", f, mod_path));
+            } else {
+                out.push_str(&format!("- {}\n", f));
+            }
+        }
         out.push('\n');
     }
     if !commands.is_empty() {
@@ -1475,6 +1943,126 @@ async fn handle_smart_find(
     Ok(json!({ "content": [{ "type": "text", "text": text }] }))
 }
 
+// ─── semantic_find ────────────────────────────────────────────────────────────
+
+async fn handle_semantic_find(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let query = args["query"].as_str().ok_or("Параметр 'query' обязателен")?;
+    if query.trim().is_empty() {
+        return Err("Параметр 'query' не может быть пустым".to_string());
+    }
+
+    let db = db_path.as_ref().ok_or(
+        "Индекс символов не готов. Убедитесь, что указан путь к конфигурации и индексация завершена."
+    )?;
+
+    let limit = args["limit"].as_u64().unwrap_or(5).min(20) as usize;
+    let include_code = args["include_code"].as_bool().unwrap_or(true);
+    let context_objects: Vec<String> = args["context_objects"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let db_clone = db.clone();
+    let query_owned = query.to_string();
+    let ctx_clone = context_objects.clone();
+
+    let results = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(&db_clone)
+            .map_err(|e| format!("Ошибка БД: {}", e))?;
+        Ok::<_, String>(crate::semantic::semantic_search(&conn, &query_owned, &ctx_clone, limit))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))??;
+
+    if results.is_empty() {
+        // Check if FTS index actually has data (vs index not ready yet)
+        let fts_count = {
+            let db_clone2 = db.clone();
+            tokio::task::spawn_blocking(move || {
+                rusqlite::Connection::open(&db_clone2).ok()
+                    .and_then(|c| c.query_row("SELECT COUNT(*) FROM symbol_terms", [], |r| r.get::<_, i64>(0)).ok())
+                    .unwrap_or(0)
+            }).await.unwrap_or(0)
+        };
+
+        let msg = if fts_count == 0 {
+            format!(
+                "⚠️ Семантический индекс ещё не готов (FTS пуст). Индекс строится в фоне после запуска сервера — подожди 1-2 минуты и повтори запрос.\n\nПока индекс строится, используй `find_symbol` с гипотезами имён: например, `ЗначениеСтавкиНДС`, `ПолучитьСтавкуНДС`, `СтавкаНДСПоПеречислению`.",
+            )
+        } else {
+            format!(
+                "Семантический поиск по запросу \"{}\" не дал результатов (FTS строк: {}).\n\nПопробуйте `find_symbol` с конкретным именем или `search_code` с ключевыми словами.",
+                query, fts_count
+            )
+        };
+        return Ok(json!({ "content": [{ "type": "text", "text": msg }] }));
+    }
+
+    // Build summary text
+    let mut text = format!(
+        "Семантический поиск по запросу \"{}\": найдено {} результат(ов)\n\n",
+        query, results.len()
+    );
+    for (i, r) in results.iter().enumerate() {
+        let export_mark = if r.is_export { " Экспорт" } else { "" };
+        text.push_str(&format!(
+            "{}. **{}** ({}{}) — `{}`  строки {}-{}\n   score={:.3}  calls={}\n",
+            i + 1, r.name, r.kind, export_mark,
+            r.file, r.start_line, r.end_line,
+            r.final_score, r.call_count
+        ));
+    }
+
+    // Include code for top result
+    if include_code {
+        if let (Some(root), Some(best)) = (config_path, results.first()) {
+            let file_path = root.join(best.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = (best.start_line as usize).saturating_sub(1);
+                let end = (best.end_line as usize).min(lines.len());
+                if start < lines.len() {
+                    let body = lines[start..end].join("\n");
+                    let export_mark = if best.is_export { " Экспорт" } else { "" };
+                    text.push_str(&format!(
+                        "\n\n---\n**Код: {}{}** (`{}` строки {}-{}):\n\n```bsl\n{}\n```",
+                        best.name, export_mark, best.file,
+                        best.start_line, best.end_line, body
+                    ));
+                }
+            }
+        }
+    }
+
+    // Build structured search_result for programmatic use
+    let items: Vec<Value> = results.iter().enumerate().map(|(i, r)| json!({
+        "rank": i + 1,
+        "name": r.name,
+        "kind": r.kind,
+        "file": r.file,
+        "start_line": r.start_line,
+        "end_line": r.end_line,
+        "is_export": r.is_export,
+        "bm25_score": r.bm25_score,
+        "call_count": r.call_count,
+        "final_score": r.final_score,
+    })).collect();
+
+    Ok(json!({
+        "content": [{ "type": "text", "text": text }],
+        "search_result": {
+            "tool": "semantic_find",
+            "query": query,
+            "context_objects": context_objects,
+            "items": items
+        }
+    }))
+}
+
 // ─── find_function_in_object ─────────────────────────────────────────────────
 
 async fn handle_find_function_in_object(
@@ -1723,4 +2311,318 @@ async fn handle_benchmark(
         "symbol_count": symbol_count,
         "results": results
     }))
+}
+
+async fn handle_search_files(
+    args: &Value,
+    config_path: &Option<PathBuf>,
+    db_path: &Option<PathBuf>,
+) -> Result<Value, String> {
+    let root = config_path
+        .as_ref()
+        .ok_or("Конфигурация не настроена. Укажите путь в настройках MCP сервера.")?;
+
+    let query = args["query"].as_str().unwrap_or("").trim().to_lowercase();
+    let glob_pattern = args["glob"].as_str().unwrap_or("").trim().to_string();
+    let extension_filter = args["extension"].as_str().map(|s| s.trim().to_lowercase());
+    let object_type_filter = args["object_type"].as_str().map(|s| s.trim().to_string());
+    let head_limit = args["head_limit"].as_u64().unwrap_or(50).clamp(1, 500) as usize;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+
+    // Resolve scope to a sub-dir filter
+    let scope_prefix: Option<String> = args["scope"].as_str().and_then(|s| {
+        let s = s.trim();
+        if s.is_empty() { return None; }
+        resolve_scope(s).map(|p| p.to_string_lossy().replace('\\', "/"))
+    });
+
+    // Try DB-backed search first (fast path)
+    if let Some(db) = db_path.as_deref() {
+        if let Ok(items) = index::search_files_in_catalog(
+            db, &query, scope_prefix.as_deref(),
+            object_type_filter.as_deref(), extension_filter.as_deref(),
+            &glob_pattern, offset + head_limit,
+        ) {
+            let total = items.len();
+            let page: Vec<_> = items.into_iter().skip(offset).take(head_limit).collect();
+            let returned = page.len();
+            let truncated = offset + returned < total;
+            let next_offset = if truncated { Some(offset + returned) } else { None };
+
+            let file_items: Vec<Value> = page.iter().map(|fi| json!({
+                "file": fi.filepath,
+                "file_name": fi.file_name,
+                "extension": fi.extension,
+                "object_type": fi.object_type,
+                "object_name": fi.object_name,
+                "module_kind": fi.module_kind
+            })).collect();
+
+            let mut summary = format!(
+                "Найдено {} файлов{}{}{}{}{}\n\n",
+                total,
+                if !query.is_empty() { format!(" по «{}»", query) } else { String::new() },
+                object_type_filter.as_deref().map(|t| format!(", тип: {}", t)).unwrap_or_default(),
+                extension_filter.as_deref().map(|e| format!(", расширение: .{}", e)).unwrap_or_default(),
+                scope_prefix.as_deref().map(|s| format!(", в: {}", s)).unwrap_or_default(),
+                if truncated { format!(" (показаны {}-{})", offset + 1, offset + returned) } else { String::new() }
+            );
+            for fi in &page {
+                let obj_label = match (&fi.object_type, &fi.object_name) {
+                    (Some(_t), Some(n)) => format!(" [{}]", n),
+                    _ => String::new(),
+                };
+                summary.push_str(&format!("- `{}`{}\n", fi.filepath, obj_label));
+            }
+
+            return Ok(json!({
+                "content": [{ "type": "text", "text": summary }],
+                "search_result": {
+                    "schema_version": 1,
+                    "tool": "search_files",
+                    "output_mode": "files",
+                    "offset": offset,
+                    "head_limit": head_limit,
+                    "returned": returned,
+                    "total": total,
+                    "next_offset": next_offset,
+                    "truncated": truncated,
+                    "items": file_items
+                }
+            }));
+        }
+    }
+
+    // Fallback: filesystem walk (no file catalog yet)
+    let root_clone = root.clone();
+    let query_clone = query.clone();
+    let glob_clone = glob_pattern.clone();
+    let ext_filter_clone = extension_filter.clone();
+    let obj_type_clone = object_type_filter.clone();
+    let scope_prefix_clone = scope_prefix.clone();
+
+    let items = tokio::task::spawn_blocking(move || -> Vec<Value> {
+        let search_root = if let Some(ref sp) = scope_prefix_clone {
+            let p = root_clone.join(sp.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if p.is_dir() { p } else { root_clone.clone() }
+        } else {
+            root_clone.clone()
+        };
+
+        let glob_re: Option<regex::Regex> = if !glob_clone.is_empty() {
+            // Convert glob to regex: * → [^/]*, ** → .*, ? → [^/]
+            let escaped = regex::escape(&glob_clone);
+            let re_str = escaped
+                .replace(r"\*\*", "__GLOBSTAR__")
+                .replace(r"\*", "[^/]*")
+                .replace("__GLOBSTAR__", ".*")
+                .replace(r"\?", "[^/]");
+            regex::Regex::new(&format!("(?i)^{}$", re_str)).ok()
+        } else {
+            None
+        };
+
+        let mut results = Vec::new();
+        for entry in ignore::WalkBuilder::new(&search_root)
+            .standard_filters(true)
+            .follow_links(false)
+            .build()
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_file() { continue; }
+
+            let rel = path.strip_prefix(&root_clone)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+
+            // Extension filter
+            if let Some(ref ef) = ext_filter_clone {
+                if &ext != ef { continue; }
+            }
+
+            // Glob filter
+            if let Some(ref gp) = glob_re {
+                if !gp.is_match(&rel) { continue; }
+            }
+
+            // Query filter (case-insensitive substring on path or name)
+            if !query_clone.is_empty() && !rel.to_lowercase().contains(&query_clone) { continue; }
+
+            // Infer object type / name from path
+            let (obj_type, obj_name, module_kind) = infer_object_from_path(&rel);
+
+            // Object type filter
+            if let Some(ref ot) = obj_type_clone {
+                if obj_type.as_deref() != Some(ot.as_str()) { continue; }
+            }
+
+            results.push(json!({
+                "file": rel,
+                "file_name": file_name,
+                "extension": ext,
+                "object_type": obj_type,
+                "object_name": obj_name,
+                "module_kind": module_kind
+            }));
+
+            if results.len() >= offset + head_limit {
+                break;
+            }
+        }
+        results
+    })
+    .await
+    .map_err(|e| format!("Ошибка поиска файлов: {}", e))?;
+
+    let total = items.len();
+    let page: Vec<_> = items.into_iter().skip(offset).take(head_limit).collect();
+    let returned = page.len();
+    let truncated = offset + returned < total;
+    let next_offset = if truncated { Some(offset + returned) } else { None };
+
+    let mut summary = format!(
+        "Найдено {} файлов{}{}\n\n",
+        total,
+        if !query.is_empty() { format!(" по «{}»", query) } else { String::new() },
+        if truncated { format!(" (показаны {}-{})", offset + 1, offset + returned) } else { String::new() }
+    );
+    for item in &page {
+        let obj_name = item["object_name"].as_str().unwrap_or("");
+        let obj_label = if !obj_name.is_empty() { format!(" [{}]", obj_name) } else { String::new() };
+        summary.push_str(&format!("- `{}`{}\n", item["file"].as_str().unwrap_or(""), obj_label));
+    }
+
+    Ok(json!({
+        "content": [{ "type": "text", "text": summary }],
+        "search_result": {
+            "schema_version": 1,
+            "tool": "search_files",
+            "output_mode": "files",
+            "offset": offset,
+            "head_limit": head_limit,
+            "returned": returned,
+            "total": total,
+            "next_offset": next_offset,
+            "truncated": truncated,
+            "items": page
+        }
+    }))
+}
+
+/// Infer (object_type, object_name, module_kind) from a 1С config dump relative path.
+/// E.g. "CommonModules/УчетНДС/Module.bsl" → (Some("CommonModule"), Some("УчетНДС"), Some("Module"))
+fn infer_object_from_path(rel: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let parts: Vec<&str> = rel.splitn(3, '/').collect();
+    if parts.len() < 2 { return (None, None, None); }
+
+    let folder = parts[0];
+    let obj_name = parts[1];
+    let file_part = parts.get(2).copied().unwrap_or("");
+
+    let obj_type = match folder {
+        "CommonModules"              => Some("CommonModule"),
+        "Catalogs"                   => Some("Catalog"),
+        "Documents"                  => Some("Document"),
+        "InformationRegisters"       => Some("InformationRegister"),
+        "AccumulationRegisters"      => Some("AccumulationRegister"),
+        "AccountingRegisters"        => Some("AccountingRegister"),
+        "CalculationRegisters"       => Some("CalculationRegister"),
+        "ExchangePlans"              => Some("ExchangePlan"),
+        "BusinessProcesses"          => Some("BusinessProcess"),
+        "Tasks"                      => Some("Task"),
+        "ChartsOfCharacteristicTypes"=> Some("ChartOfCharacteristicTypes"),
+        "ChartsOfAccounts"           => Some("ChartOfAccounts"),
+        "ChartsOfCalculationTypes"   => Some("ChartOfCalculationTypes"),
+        "DataProcessors"             => Some("DataProcessor"),
+        "Reports"                    => Some("Report"),
+        "Enums"                      => Some("Enum"),
+        "Constants"                  => Some("Constant"),
+        "DocumentJournals"           => Some("DocumentJournal"),
+        "FilterCriteria"             => Some("FilterCriterion"),
+        "ScheduledJobs"              => Some("ScheduledJob"),
+        "WebServices"                => Some("WebService"),
+        "HTTPServices"               => Some("HTTPService"),
+        "CommonForms"                => Some("CommonForm"),
+        "CommonTemplates"            => Some("CommonTemplate"),
+        "CommonAttributes"           => Some("CommonAttribute"),
+        "CommonCommands"             => Some("CommonCommand"),
+        "Roles"                      => Some("Role"),
+        "Subsystems"                 => Some("Subsystem"),
+        _ => None,
+    };
+
+    let module_kind = if file_part.eq_ignore_ascii_case("module.bsl") {
+        Some("Module")
+    } else if file_part.eq_ignore_ascii_case("managermodule.bsl") {
+        Some("ManagerModule")
+    } else if file_part.eq_ignore_ascii_case("objectmodule.bsl") {
+        Some("ObjectModule")
+    } else if file_part.to_lowercase().starts_with("forms/") {
+        Some("FormModule")
+    } else if file_part.to_lowercase().ends_with(".xml") {
+        Some("XML")
+    } else {
+        None
+    };
+
+    (
+        obj_type.map(|s| s.to_string()),
+        if obj_name.is_empty() { None } else { Some(obj_name.to_string()) },
+        module_kind.map(|s| s.to_string()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_files_with_matches_summary;
+
+    #[test]
+    fn files_with_matches_summary_lists_files_and_examples() {
+        let returned_files = vec![
+            (
+                "CommonModules/УчетНДС/Module.bsl".to_string(),
+                (
+                    2,
+                    vec![
+                        (15, "Функция ЗначениеСтавкиНДС(ЭлементСправочника) Экспорт".to_string()),
+                        (18, "Возврат Перечисления.СтавкиНДС.БезНДС;".to_string()),
+                    ],
+                ),
+            ),
+        ];
+
+        let summary = build_files_with_matches_summary(
+            "СтавкиНДС",
+            " в scope `CommonModule.УчетНДС`",
+            1,
+            0,
+            357,
+            false,
+            &returned_files,
+        );
+
+        assert!(summary.contains("По запросу \"СтавкиНДС\" в scope `CommonModule.УчетНДС`: 1 файлов"));
+        assert!(summary.contains("**CommonModules/УчетНДС/Module.bsl** (2 совп.)"));
+        assert!(summary.contains("строка 15"));
+        assert!(summary.contains("ЗначениеСтавкиНДС"));
+    }
+
+    #[test]
+    fn files_with_matches_summary_handles_empty_results() {
+        let summary = build_files_with_matches_summary(
+            "СтавкиНДС",
+            "",
+            0,
+            0,
+            120,
+            true,
+            &[],
+        );
+
+        assert!(summary.contains("ничего не найдено"));
+        assert!(summary.contains("таймауту"));
+    }
 }

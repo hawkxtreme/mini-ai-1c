@@ -1046,6 +1046,70 @@ impl BSLClient {
     }
 }
 
+/// Resolve a BSL file path (relative or absolute) to an absolute path string.
+fn resolve_bsl_file_path(file: &str, config_root: Option<&str>) -> String {
+    let p = std::path::Path::new(file);
+    if p.is_absolute() {
+        return file.to_string();
+    }
+    if let Some(root) = config_root {
+        let joined = std::path::Path::new(root).join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
+        return joined.to_string_lossy().to_string();
+    }
+    file.to_string()
+}
+
+/// Convert an absolute file path to a file:// URI (Windows-safe).
+fn path_to_file_uri(abs_path: &str) -> String {
+    let normalized = abs_path.replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{}", normalized)
+    } else {
+        format!("file:///{}", normalized)
+    }
+}
+
+/// Convert a file:// URI back to an absolute path string.
+fn uri_to_abs_path(uri: &str) -> String {
+    let s = uri.trim_start_matches("file:///").trim_start_matches("file://");
+    // On Windows, restore drive letter path
+    if cfg!(windows) && s.len() > 1 && s.chars().nth(1) == Some(':') {
+        s.replace('/', "\\")
+    } else if cfg!(windows) {
+        format!("\\\\{}", s.replace('/', "\\"))
+    } else {
+        format!("/{}", s)
+    }
+}
+
+/// Convert a file:// URI to a display path (relative to config_root when possible).
+fn uri_to_display_path(uri: &str, config_root: Option<&str>) -> String {
+    let abs = uri_to_abs_path(uri);
+    if let Some(root) = config_root {
+        let root_norm = root.replace('\\', "/");
+        let abs_norm = abs.replace('\\', "/");
+        if let Some(rel) = abs_norm.strip_prefix(&root_norm) {
+            return rel.trim_start_matches('/').to_string();
+        }
+    }
+    abs
+}
+
+/// Ensure BSL client is connected, starting server if needed.
+async fn ensure_bsl_connected(client: &mut BSLClient) -> Result<(), String> {
+    if !client.is_connected() {
+        if let Err(e) = client.connect().await {
+            if client.server_process.is_none() {
+                client.start_server()?;
+            }
+            client.connect().await.map_err(|e2| {
+                format!("BSL LS не запущен или недоступен: {}\nДоп. ошибка: {}", e, e2)
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub struct BSLMcpHandler {
     client: Arc<Mutex<BSLClient>>,
 }
@@ -1073,7 +1137,64 @@ impl InternalMcpHandler for BSLMcpHandler {
                     },
                     "required": ["code"]
                 }),
-            }
+            },
+            McpTool {
+                name: "goto_definition".to_string(),
+                description: "Семантический переход к определению символа BSL (процедуры, функции, переменной) по позиции в файле. Быстрее и точнее чем text search для навигации по коду.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Абсолютный путь к BSL файлу или путь относительно корня конфигурации."
+                        },
+                        "line": {
+                            "type": "integer",
+                            "description": "Номер строки (0-based, LSP convention)."
+                        },
+                        "character": {
+                            "type": "integer",
+                            "description": "Позиция символа в строке (0-based)."
+                        },
+                        "config_root": {
+                            "type": "string",
+                            "description": "Корневой путь конфигурации для резолва относительных путей."
+                        }
+                    },
+                    "required": ["file", "line", "character"]
+                }),
+            },
+            McpTool {
+                name: "resolve_definition_context".to_string(),
+                description: "Переходит к определению символа BSL и возвращает контекст кода вокруг определения. Объединяет goto_definition + get_file_context в один вызов.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Абсолютный путь к BSL файлу или путь относительно корня конфигурации."
+                        },
+                        "line": {
+                            "type": "integer",
+                            "description": "Номер строки (0-based, LSP convention)."
+                        },
+                        "character": {
+                            "type": "integer",
+                            "description": "Позиция символа в строке (0-based)."
+                        },
+                        "radius": {
+                            "type": "integer",
+                            "description": "Количество строк контекста вокруг определения (по умолчанию 30).",
+                            "default": 30
+                        },
+                        "config_root": {
+                            "type": "string",
+                            "description": "Корневой путь конфигурации для резолва относительных путей."
+                        }
+                    },
+                    "required": ["file", "line", "character"]
+                }),
+            },
         ]
     }
 
@@ -1116,6 +1237,110 @@ impl InternalMcpHandler for BSLMcpHandler {
                     "count": diagnostics.len()
                 }))
             }
+
+            "goto_definition" => {
+                let file = arguments["file"].as_str()
+                    .ok_or("Параметр 'file' обязателен")?;
+                let line = arguments["line"].as_u64()
+                    .ok_or("Параметр 'line' обязателен")? as u32;
+                let character = arguments["character"].as_u64()
+                    .ok_or("Параметр 'character' обязателен")? as u32;
+                let config_root = arguments["config_root"].as_str();
+
+                // Resolve to absolute path and convert to file:// URI
+                let abs_path = resolve_bsl_file_path(file, config_root);
+                let uri = path_to_file_uri(&abs_path);
+
+                let mut client = self.client.lock().await;
+                ensure_bsl_connected(&mut client).await?;
+
+                match client.goto_definition(&uri, line, character).await? {
+                    Some(location) => {
+                        let target_file = uri_to_display_path(&location.uri, config_root);
+                        Ok(json!({
+                            "found": true,
+                            "target_file": target_file,
+                            "target_uri": location.uri,
+                            "target_range": {
+                                "start": { "line": location.range.start.line, "character": location.range.start.character },
+                                "end":   { "line": location.range.end.line,   "character": location.range.end.character }
+                            }
+                        }))
+                    }
+                    None => Ok(json!({
+                        "found": false,
+                        "message": "Определение не найдено. BSL LS не смог разрешить символ по указанной позиции."
+                    })),
+                }
+            }
+
+            "resolve_definition_context" => {
+                let file = arguments["file"].as_str()
+                    .ok_or("Параметр 'file' обязателен")?;
+                let line = arguments["line"].as_u64()
+                    .ok_or("Параметр 'line' обязателен")? as u32;
+                let character = arguments["character"].as_u64()
+                    .ok_or("Параметр 'character' обязателен")? as u32;
+                let radius = arguments["radius"].as_u64().unwrap_or(30) as usize;
+                let config_root = arguments["config_root"].as_str();
+
+                let abs_path = resolve_bsl_file_path(file, config_root);
+                let uri = path_to_file_uri(&abs_path);
+
+                let mut client = self.client.lock().await;
+                ensure_bsl_connected(&mut client).await?;
+
+                let location_opt = client.goto_definition(&uri, line, character).await?;
+                let location = match location_opt {
+                    Some(l) => l,
+                    None => return Ok(json!({
+                        "found": false,
+                        "message": "Определение не найдено."
+                    })),
+                };
+
+                let target_display = uri_to_display_path(&location.uri, config_root);
+                let target_abs = uri_to_abs_path(&location.uri);
+                let def_line = location.range.start.line as usize + 1; // convert to 1-based for context
+
+                // Read context around definition
+                let context = if std::path::Path::new(&target_abs).is_file() {
+                    use std::io::{BufRead, BufReader};
+                    let f = std::fs::File::open(&target_abs).ok();
+                    f.map(|file| {
+                        let lines: Vec<String> = BufReader::new(file)
+                            .lines()
+                            .map(|l| l.unwrap_or_default())
+                            .collect();
+                        let total = lines.len();
+                        let idx = (def_line.saturating_sub(1)).min(total.saturating_sub(1));
+                        let start = idx.saturating_sub(radius);
+                        let end = (idx + radius + 1).min(total);
+                        let mut out = format!("// {}:{}\n", target_display, def_line);
+                        for (i, ln) in lines[start..end].iter().enumerate() {
+                            let num = start + i + 1;
+                            let marker = if num == def_line { "→" } else { " " };
+                            out.push_str(&format!("{} {:4} | {}\n", marker, num, ln));
+                        }
+                        out
+                    }).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                Ok(json!({
+                    "found": true,
+                    "target_file": target_display,
+                    "target_uri": location.uri,
+                    "target_line": def_line,
+                    "target_range": {
+                        "start": { "line": location.range.start.line, "character": location.range.start.character },
+                        "end":   { "line": location.range.end.line,   "character": location.range.end.character }
+                    },
+                    "context": context
+                }))
+            }
+
             _ => Err(format!("Неизвестный инструмент BSL: {}", name)),
         }
     }

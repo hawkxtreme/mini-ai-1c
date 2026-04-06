@@ -238,7 +238,253 @@ fn init_db(db_path: &Path) -> Result<Connection, rusqlite::Error> {
          CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_name_lower);
          CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name_lower);",
     )?;
+    // Phase 2: file catalog columns (additive migration — safe to call on existing DBs)
+    migrate_file_catalog_schema(&conn);
+    // Phase 3: semantic search tables (FTS5 symbol_terms, symbol_weights, domain_aliases)
+    crate::semantic::ensure_semantic_schema(&conn);
     Ok(conn)
+}
+
+/// Add file catalog columns to indexed_files if they don't exist yet.
+/// Additive only — never removes data from existing rows.
+fn migrate_file_catalog_schema(conn: &Connection) {
+    let columns = [
+        ("path_lower",      "TEXT"),
+        ("file_name",       "TEXT"),
+        ("file_name_lower", "TEXT"),
+        ("extension",       "TEXT"),
+        ("object_type",     "TEXT"),
+        ("object_name",     "TEXT"),
+        ("module_kind",     "TEXT"),
+        ("source_kind",     "TEXT"),
+    ];
+    for (col, ty) in &columns {
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE indexed_files ADD COLUMN {} {} DEFAULT NULL;",
+            col, ty
+        ));
+    }
+    // Indexes for fast file search
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_indexed_files_path_lower  ON indexed_files(path_lower);
+         CREATE INDEX IF NOT EXISTS idx_indexed_files_name_lower  ON indexed_files(file_name_lower);
+         CREATE INDEX IF NOT EXISTS idx_indexed_files_object      ON indexed_files(object_type, object_name);
+         CREATE INDEX IF NOT EXISTS idx_indexed_files_extension   ON indexed_files(extension);"
+    );
+}
+
+/// File catalog item returned by search_files_in_catalog.
+pub struct FileCatalogItem {
+    pub filepath:    String,
+    pub file_name:   String,
+    pub extension:   String,
+    pub object_type: Option<String>,
+    pub object_name: Option<String>,
+    pub module_kind: Option<String>,
+}
+
+/// Fast file search backed by the indexed_files file catalog.
+/// Returns Err if catalog columns are absent (fallback to FS walk in caller).
+pub fn search_files_in_catalog(
+    db_path: &Path,
+    query: &str,           // substring of path/name, lowercased
+    scope_prefix: Option<&str>,
+    object_type: Option<&str>,
+    extension: Option<&str>,
+    glob_pattern: &str,
+    limit: usize,
+) -> Result<Vec<FileCatalogItem>, String> {
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+
+    // Check that file catalog columns exist
+    let has_catalog: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('indexed_files') WHERE name='file_name'",
+        [], |r| r.get::<_, i64>(0)
+    ).unwrap_or(0) > 0;
+    if !has_catalog {
+        return Err("file catalog not migrated yet".to_string());
+    }
+
+    // Check that any rows have file_name filled (catalog may exist but not backfilled yet)
+    let filled: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM indexed_files WHERE file_name IS NOT NULL",
+        [], |r| r.get(0)
+    ).unwrap_or(0);
+    if filled == 0 {
+        return Err("file catalog empty".to_string());
+    }
+
+    // Build WHERE clauses dynamically
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params_values: Vec<String> = Vec::new();
+
+    if !query.is_empty() {
+        conditions.push("(path_lower LIKE ? OR file_name_lower LIKE ?)".to_string());
+        let like = format!("%{}%", query);
+        params_values.push(like.clone());
+        params_values.push(like);
+    }
+    if let Some(sp) = scope_prefix {
+        conditions.push("path_lower LIKE ?".to_string());
+        params_values.push(format!("{}%", sp.to_lowercase()));
+    }
+    if let Some(ot) = object_type {
+        conditions.push("object_type = ?".to_string());
+        params_values.push(ot.to_string());
+    }
+    if let Some(ext) = extension {
+        conditions.push("extension = ?".to_string());
+        params_values.push(ext.to_lowercase());
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT filepath, file_name, extension, object_type, object_name, module_kind
+         FROM indexed_files
+         {}
+         ORDER BY path_lower
+         LIMIT {}",
+        where_clause, limit
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(FileCatalogItem {
+            filepath:    row.get::<_, String>(0)?,
+            file_name:   row.get::<_, String>(1).unwrap_or_default(),
+            extension:   row.get::<_, String>(2).unwrap_or_default(),
+            object_type: row.get::<_, Option<String>>(3)?,
+            object_name: row.get::<_, Option<String>>(4)?,
+            module_kind: row.get::<_, Option<String>>(5)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+    for row in rows.flatten() {
+        // Glob post-filter (cheap regex, applied in-process after SQL)
+        if !glob_pattern.is_empty() {
+            let re_str = regex::escape(glob_pattern)
+                .replace(r"\*\*", "__GLOBSTAR__")
+                .replace(r"\*", "[^/]*")
+                .replace("__GLOBSTAR__", ".*")
+                .replace(r"\?", "[^/]");
+            if let Ok(re) = regex::Regex::new(&format!("(?i)^{}$", re_str)) {
+                if !re.is_match(&row.filepath) { continue; }
+            }
+        }
+        items.push(row);
+    }
+    Ok(items)
+}
+
+/// Fill file catalog columns for a single file path (called during build/sync).
+#[allow(dead_code)]
+pub fn upsert_file_catalog(
+    conn: &Connection,
+    rel_path: &str,
+    mtime: u64,
+) {
+    let path_lower = rel_path.to_lowercase();
+    let file_name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    let file_name_lower = file_name.to_lowercase();
+    let extension = file_name.rsplit('.').next()
+        .filter(|e| *e != file_name)
+        .unwrap_or("")
+        .to_lowercase();
+
+    let (obj_type, obj_name, module_kind) = infer_object_from_path_index(rel_path);
+    let source_kind = if extension == "bsl" { "bsl" } else if extension == "xml" { "xml" } else { "other" };
+
+    let _ = conn.execute(
+        "INSERT INTO indexed_files(filepath, modified_at, path_lower, file_name, file_name_lower, extension, object_type, object_name, module_kind, source_kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(filepath) DO UPDATE SET
+             modified_at      = excluded.modified_at,
+             path_lower       = excluded.path_lower,
+             file_name        = excluded.file_name,
+             file_name_lower  = excluded.file_name_lower,
+             extension        = excluded.extension,
+             object_type      = excluded.object_type,
+             object_name      = excluded.object_name,
+             module_kind      = excluded.module_kind,
+             source_kind      = excluded.source_kind",
+        params![
+            rel_path, mtime as i64, path_lower, file_name, file_name_lower,
+            extension,
+            obj_type.as_deref(), obj_name.as_deref(), module_kind.as_deref(), source_kind
+        ],
+    );
+}
+
+fn infer_object_from_path_index(rel: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let parts: Vec<&str> = rel.splitn(3, '/').collect();
+    if parts.len() < 2 { return (None, None, None); }
+    let folder = parts[0];
+    let obj_name = parts[1];
+    let file_part = parts.get(2).copied().unwrap_or("");
+
+    let obj_type = match folder {
+        "CommonModules"               => Some("CommonModule"),
+        "Catalogs"                    => Some("Catalog"),
+        "Documents"                   => Some("Document"),
+        "InformationRegisters"        => Some("InformationRegister"),
+        "AccumulationRegisters"       => Some("AccumulationRegister"),
+        "AccountingRegisters"         => Some("AccountingRegister"),
+        "CalculationRegisters"        => Some("CalculationRegister"),
+        "ExchangePlans"               => Some("ExchangePlan"),
+        "BusinessProcesses"           => Some("BusinessProcess"),
+        "Tasks"                       => Some("Task"),
+        "ChartsOfCharacteristicTypes" => Some("ChartOfCharacteristicTypes"),
+        "ChartsOfAccounts"            => Some("ChartOfAccounts"),
+        "ChartsOfCalculationTypes"    => Some("ChartOfCalculationTypes"),
+        "DataProcessors"              => Some("DataProcessor"),
+        "Reports"                     => Some("Report"),
+        "Enums"                       => Some("Enum"),
+        "Constants"                   => Some("Constant"),
+        "DocumentJournals"            => Some("DocumentJournal"),
+        "FilterCriteria"              => Some("FilterCriterion"),
+        "ScheduledJobs"               => Some("ScheduledJob"),
+        "WebServices"                 => Some("WebService"),
+        "HTTPServices"                => Some("HTTPService"),
+        "CommonForms"                 => Some("CommonForm"),
+        "CommonTemplates"             => Some("CommonTemplate"),
+        "CommonAttributes"            => Some("CommonAttribute"),
+        "CommonCommands"              => Some("CommonCommand"),
+        "Roles"                       => Some("Role"),
+        "Subsystems"                  => Some("Subsystem"),
+        _ => None,
+    };
+
+    let lf = file_part.to_lowercase();
+    let module_kind = if lf == "module.bsl" {
+        Some("Module")
+    } else if lf == "managermodule.bsl" {
+        Some("ManagerModule")
+    } else if lf == "objectmodule.bsl" {
+        Some("ObjectModule")
+    } else if lf.starts_with("forms/") {
+        Some("FormModule")
+    } else if lf.ends_with(".xml") {
+        Some("XML")
+    } else {
+        None
+    };
+
+    (
+        obj_type.map(|s| s.to_string()),
+        if obj_name.is_empty() { None } else { Some(obj_name.to_string()) },
+        module_kind.map(|s| s.to_string()),
+    )
 }
 
 /// If the calls table is empty but symbols exist, this DB was indexed before call extraction
@@ -257,6 +503,51 @@ pub fn migrate_if_needed(db_path: &Path) {
     if sym_count > 0 && calls_count == 0 {
         eprintln!("[1c-search] Migrating: resetting indexed_files to rebuild call graph...");
         let _ = conn.execute("DELETE FROM indexed_files", []);
+    }
+}
+
+/// If symbol_terms FTS table is empty or uses old contentless schema, rebuild it.
+/// Handles upgrade from versions without semantic search or with wrong schema.
+pub fn migrate_semantic_fts_if_needed(db_path: &Path) {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let sym_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+        .unwrap_or(0);
+    if sym_count == 0 {
+        return;
+    }
+
+    // Detect old contentless FTS5 schema: column values come back as NULL
+    let needs_rebuild = {
+        let sample = conn.query_row(
+            "SELECT symbol_id FROM symbol_terms LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        );
+        match sample {
+            Ok(Some(_)) => false,           // content stored, OK
+            Ok(None) => true,               // NULL → contentless schema → rebuild
+            Err(_) => {
+                // Table empty or doesn't exist
+                let fts_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM symbol_terms", [], |r| r.get(0))
+                    .unwrap_or(0);
+                fts_count == 0              // rebuild only if empty
+            }
+        }
+    };
+
+    if needs_rebuild {
+        eprintln!("[1c-search] Migrating: dropping old FTS schema and rebuilding ({} symbols)...", sym_count);
+        // Drop and recreate with correct schema (no content='')
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS symbol_terms;");
+        crate::semantic::ensure_semantic_schema(&conn);
+        build_semantic_fts(&conn);
+        crate::semantic::rebuild_symbol_weights(&conn);
+        eprintln!("[1c-search] Semantic FTS migration complete");
     }
 }
 
@@ -502,7 +793,9 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
              VALUES (?1, ?2, ?3, ?4, ?5)"
         ).map_err(|e| e.to_string())?;
         let mut ins_file = tx.prepare(
-            "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)"
+            "INSERT OR REPLACE INTO indexed_files
+             (filepath, modified_at, path_lower, file_name, file_name_lower, extension, object_type, object_name, module_kind, source_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
         ).map_err(|e| e.to_string())?;
 
         for (i, pf) in parsed.iter().enumerate() {
@@ -528,7 +821,17 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
                     ]);
                 }
             }
-            let _ = ins_file.execute(params![pf.rel_path, pf.mtime as i64]);
+            let (obj_type, obj_name, module_kind) = infer_object_from_path_index(&pf.rel_path);
+            let path_lower = pf.rel_path.to_lowercase();
+            let file_name = pf.rel_path.rsplit('/').next().unwrap_or(&pf.rel_path).to_string();
+            let file_name_lower = file_name.to_lowercase();
+            let extension = file_name.rsplit('.').next().filter(|e| *e != file_name.as_str()).unwrap_or("").to_lowercase();
+            let source_kind = if extension == "bsl" { "bsl" } else if extension == "xml" { "xml" } else { "other" };
+            let _ = ins_file.execute(params![
+                pf.rel_path, pf.mtime as i64,
+                path_lower, file_name, file_name_lower, extension,
+                obj_type.as_deref(), obj_name.as_deref(), module_kind.as_deref(), source_kind
+            ]);
         }
         // statements dropped here — tx borrow ends
     }
@@ -544,6 +847,10 @@ pub fn sync_index(root: &Path, db_path: &Path) -> Result<SyncStats, String> {
          PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;"
     );
+
+    // Sync FTS5 semantic index for changed/new/deleted files
+    sync_semantic_fts(&conn, &deleted, &parsed);
+    crate::semantic::rebuild_symbol_weights(&conn);
 
     // Update built_at timestamp
     let ts = std::time::SystemTime::now()
@@ -667,7 +974,9 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
              VALUES (?1, ?2, ?3, ?4, ?5)"
         ).map_err(|e| e.to_string())?;
         let mut ins_file = tx.prepare(
-            "INSERT OR REPLACE INTO indexed_files (filepath, modified_at) VALUES (?1, ?2)"
+            "INSERT OR REPLACE INTO indexed_files
+             (filepath, modified_at, path_lower, file_name, file_name_lower, extension, object_type, object_name, module_kind, source_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
         ).map_err(|e| e.to_string())?;
 
         for (i, pf) in parsed_files.iter().enumerate() {
@@ -688,7 +997,17 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
                 }
                 total_symbols += 1;
             }
-            let _ = ins_file.execute(params![pf.rel_path, pf.mtime as i64]);
+            let (obj_type, obj_name, module_kind) = infer_object_from_path_index(&pf.rel_path);
+            let path_lower = pf.rel_path.to_lowercase();
+            let file_name = pf.rel_path.rsplit('/').next().unwrap_or(&pf.rel_path).to_string();
+            let file_name_lower = file_name.to_lowercase();
+            let extension = file_name.rsplit('.').next().filter(|e| *e != file_name.as_str()).unwrap_or("").to_lowercase();
+            let source_kind = if extension == "bsl" { "bsl" } else if extension == "xml" { "xml" } else { "other" };
+            let _ = ins_file.execute(params![
+                pf.rel_path, pf.mtime as i64,
+                path_lower, file_name, file_name_lower, extension,
+                obj_type.as_deref(), obj_name.as_deref(), module_kind.as_deref(), source_kind
+            ]);
         }
         // statements dropped here
     }
@@ -705,6 +1024,11 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
          PRAGMA synchronous=NORMAL;"
     );
 
+    // Build FTS5 semantic index (symbol_terms)
+    eprintln!("SEARCH_STATUS:indexing:99:Семантическая индексация...");
+    build_semantic_fts(&conn);
+    crate::semantic::rebuild_symbol_weights(&conn);
+
     // Save build timestamp
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -719,6 +1043,79 @@ pub fn build_index(root: &Path, db_path: &Path) -> Result<usize, String> {
     save_stats_to_meta(&conn);
 
     Ok(total_symbols)
+}
+
+/// (Re)build symbol_terms FTS5 table from current symbols.
+/// Runs in a single transaction for speed. Used after full build_index.
+fn build_semantic_fts(conn: &Connection) {
+    let _ = conn.execute_batch("DELETE FROM symbol_terms;");
+    let pairs: Vec<(i64, String)> = {
+        match conn.prepare("SELECT id, name FROM symbols") {
+            Ok(mut stmt) => stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default(),
+            Err(_) => return,
+        }
+    };
+    if pairs.is_empty() {
+        return;
+    }
+    if let Ok(tx) = conn.unchecked_transaction() {
+        if let Ok(mut ins) = tx.prepare(
+            "INSERT INTO symbol_terms (symbol_id, name_tokens, comment_head, param_tokens)
+             VALUES (?1, ?2, '', '')"
+        ) {
+            for (id, name) in &pairs {
+                let tokens = crate::semantic::tokenize_identifier(name).join(" ");
+                let _ = ins.execute(params![id.to_string(), tokens]);
+            }
+        }
+        let _ = tx.commit();
+    }
+    eprintln!("[1c-search] semantic FTS built: {} symbols", pairs.len());
+}
+
+/// Incrementally sync symbol_terms FTS after sync_index.
+/// Removes FTS entries for deleted-file symbols, upserts entries for newly parsed files.
+fn sync_semantic_fts(conn: &Connection, deleted: &[String], parsed: &[ParsedFile]) {
+    // Cleanup orphans (symbols from deleted files were already removed from symbols table)
+    let _ = conn.execute_batch(
+        "DELETE FROM symbol_terms
+         WHERE CAST(symbol_id AS INTEGER) NOT IN (SELECT id FROM symbols);"
+    );
+
+    // Upsert FTS for each newly parsed file
+    let file_pairs: Vec<(i64, String)> = parsed.iter().flat_map(|pf| {
+        conn.prepare("SELECT id, name FROM symbols WHERE file = ?1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([&pf.rel_path], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .ok()
+                .map(|rows| rows.flatten().collect::<Vec<_>>())
+            })
+            .unwrap_or_default()
+    }).collect();
+
+    if file_pairs.is_empty() && deleted.is_empty() {
+        return;
+    }
+
+    if let Ok(tx) = conn.unchecked_transaction() {
+        if let Ok(mut ins) = tx.prepare(
+            "INSERT OR REPLACE INTO symbol_terms (symbol_id, name_tokens, comment_head, param_tokens)
+             VALUES (?1, ?2, '', '')"
+        ) {
+            for (id, name) in &file_pairs {
+                let tokens = crate::semantic::tokenize_identifier(name).join(" ");
+                let _ = ins.execute(params![id.to_string(), tokens]);
+            }
+        }
+        let _ = tx.commit();
+    }
+    eprintln!("[1c-search] semantic FTS synced: {} symbols updated", file_pairs.len());
 }
 
 /// Query the index for symbols matching the query.

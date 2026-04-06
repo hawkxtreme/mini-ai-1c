@@ -8,12 +8,34 @@ mod tools;
 mod parser;
 mod index;
 mod metadata;
+mod semantic;
 
 /// Returns SQLite DB file size in MB (0.0 if not found).
 pub fn db_size_mb(path: &std::path::Path) -> f64 {
     std::fs::metadata(path)
         .map(|m| m.len() as f64 / 1024.0 / 1024.0)
         .unwrap_or(0.0)
+}
+
+fn emit_search_status_json(
+    state: &str,
+    progress: u32,
+    message: &str,
+    sym_count: usize,
+    db_size_mb: f64,
+    built_at_unix: u64,
+) {
+    eprintln!(
+        "SEARCH_STATUS_JSON:{}",
+        json!({
+            "state": state,
+            "progress": progress,
+            "message": message,
+            "sym_count": sym_count,
+            "db_size_mb": db_size_mb,
+            "built_at_unix": built_at_unix
+        })
+    );
 }
 
 #[tokio::main]
@@ -42,12 +64,22 @@ async fn main() {
             // Emit preliminary ready immediately so the event loop can start.
             // Background task below will emit an updated status with actual counts.
             eprintln!("SEARCH_STATUS:ready:0:0.00");
+            emit_search_status_json("bootstrapping", 0, "Инициализация...", 0, 0.0, 0);
         }
         None => {
             if config_path_str.is_empty() {
                 eprintln!("SEARCH_STATUS:unavailable:Путь к конфигурации не задан");
+                emit_search_status_json("unavailable", 0, "Путь к конфигурации не задан", 0, 0.0, 0);
             } else {
                 eprintln!("SEARCH_STATUS:unavailable:Директория не найдена: {}", config_path_str);
+                emit_search_status_json(
+                    "unavailable",
+                    0,
+                    &format!("Директория не найдена: {}", config_path_str),
+                    0,
+                    0.0,
+                    0,
+                );
             }
         }
     }
@@ -58,20 +90,42 @@ async fn main() {
         let db_for_index = db.clone();
         // Detached background task — JoinHandle intentionally dropped
         let _ = tokio::task::spawn_blocking(move || {
+            emit_search_status_json("schema_init", 1, "Инициализация схемы индекса...", 0, 0.0, 0);
             // Ensure DB schema exists before anything else
             if let Err(e) = index::ensure_schema(&db_for_index) {
                 eprintln!("[1c-search] Schema init failed: {}", e);
+                emit_search_status_json(
+                    "unavailable",
+                    0,
+                    &format!("Ошибка инициализации схемы: {}", e),
+                    index::symbol_count(&db_for_index),
+                    db_size_mb(&db_for_index),
+                    index::get_built_at(&db_for_index).unwrap_or(0),
+                );
+                return;
             }
 
             // Migrate: if calls table is empty but symbols exist, reset indexed_files
             // so the next sync will re-parse all files and populate the call graph.
             index::migrate_if_needed(&db_for_index);
 
+            // Migrate: if symbol_terms FTS is empty but symbols exist → rebuild FTS.
+            // Happens when upgrading from a version without semantic search.
+            index::migrate_semantic_fts_if_needed(&db_for_index);
+
             // Build metadata if missing, or if objects exist but have no attributes
             // (happens when ConfigDumpInfo.xml was absent on first run — per-object XMLs will be parsed now)
             let needs_metadata = !index::metadata_exists(&db_for_index)
                 || (index::metadata_exists(&db_for_index) && !index::metadata_has_items(&db_for_index));
             if needs_metadata {
+                emit_search_status_json(
+                    "metadata_indexing",
+                    3,
+                    "Индексация метаданных...",
+                    index::symbol_count(&db_for_index),
+                    db_size_mb(&db_for_index),
+                    index::get_built_at(&db_for_index).unwrap_or(0),
+                );
                 match metadata::build_metadata(&root, &db_for_index) {
                     Ok(n) => eprintln!("[1c-search] Metadata indexed: {} objects", n),
                     Err(e) => eprintln!("[1c-search] Metadata skipped: {}", e),
@@ -81,6 +135,14 @@ async fn main() {
             if index::index_exists(&db_for_index) {
                 // ─── Incremental sync (mtime-based) ─────────────────────────
                 eprintln!("[1c-search] Index found — running incremental sync...");
+                emit_search_status_json(
+                    "syncing_index",
+                    5,
+                    "Синхронизация индекса...",
+                    index::symbol_count(&db_for_index),
+                    db_size_mb(&db_for_index),
+                    index::get_built_at(&db_for_index).unwrap_or(0),
+                );
                 match index::sync_index(&root, &db_for_index) {
                     Ok(stats) => {
                         let size = db_size_mb(&db_for_index);
@@ -93,12 +155,42 @@ async fn main() {
                             "SEARCH_STATUS:ready:{}:{:.2}:{}",
                             stats.total_symbols, size, built_at
                         );
+                        emit_search_status_json("ready", 100, "Индекс готов", stats.total_symbols, size, built_at);
                     }
-                    Err(e) => eprintln!("[1c-search] Sync error: {}", e),
+                    Err(e) => {
+                        eprintln!("[1c-search] Sync error: {}", e);
+                        let sym_count = index::symbol_count(&db_for_index);
+                        let size = db_size_mb(&db_for_index);
+                        let built_at = index::get_built_at(&db_for_index).unwrap_or(0);
+                        if sym_count > 0 {
+                            emit_search_status_json(
+                                "degraded",
+                                100,
+                                &format!(
+                                    "Синхронизация завершилась с ошибкой, используется существующий индекс: {}",
+                                    e
+                                ),
+                                sym_count,
+                                size,
+                                built_at,
+                            );
+                        } else {
+                            eprintln!("SEARCH_STATUS:unavailable:Ошибка синхронизации: {}", e);
+                            emit_search_status_json(
+                                "unavailable",
+                                0,
+                                &format!("Ошибка синхронизации: {}", e),
+                                0,
+                                size,
+                                built_at,
+                            );
+                        }
+                    }
                 }
             } else {
                 // ─── Full build ─────────────────────────────────────────────
                 eprintln!("[1c-search] No index found — starting full build...");
+                emit_search_status_json("building_index", 0, "Первичная индексация...", 0, 0.0, 0);
                 match index::build_index(&root, &db_for_index) {
                     Ok(sym_count) => {
                         let size = db_size_mb(&db_for_index);
@@ -107,9 +199,11 @@ async fn main() {
                             "SEARCH_STATUS:ready:{}:{:.2}:{}",
                             sym_count, size, built_at
                         );
+                        emit_search_status_json("ready", 100, "Индекс построен", sym_count, size, built_at);
                     }
                     Err(e) => {
                         eprintln!("SEARCH_STATUS:unavailable:Ошибка индексации: {}", e);
+                        emit_search_status_json("unavailable", 0, &format!("Ошибка индексации: {}", e), 0, 0.0, 0);
                     }
                 }
             }
