@@ -46,6 +46,7 @@ export function MainLayout() {
     const [isApplying, setIsApplying] = useState(false);
     const [isValidating, setIsValidating] = useState(false);
     const [diagnostics, setDiagnostics] = useState<any[]>([]);
+    const [selectedDiagnostics, setSelectedDiagnostics] = useState<any[] | null>(null);
     const [showConflictDialog, setShowConflictDialog] = useState(false);
     const [selectionActive, setSelectionActive] = useState(true);
     const [activeDiffContent, setActiveDiffContent] = useState('');
@@ -433,6 +434,7 @@ export function MainLayout() {
                             onCommitCode={handleCommitCode}
                             onCodeLoaded={handleCodeLoaded}
                             diagnostics={diagnostics}
+                            selectedDiagnostics={selectedDiagnostics}
                             onOpenSettings={(tab) => {
                                 setSettingsTab(tab as any);
                                 setShowSettings(true);
@@ -457,6 +459,7 @@ export function MainLayout() {
                             activeDiffContent={activeDiffContent}
                             onActiveDiffChange={setActiveDiffContent}
                             onCommitCode={handleCommitCode}
+                            onDiagnosticSelectionChange={setSelectedDiagnostics}
                         />
                     </div>
                 </div>

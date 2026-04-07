@@ -36,6 +36,7 @@ interface ChatAreaProps {
     onCommitCode?: (code: string) => void;
     onCodeLoaded?: (code: string, isSelection: boolean) => void;
     diagnostics?: any[];
+    selectedDiagnostics?: any[] | null;
     onOpenSettings?: (tab?: string) => void;
     onActiveDiffChange?: (content: string) => void;
     activeDiffContent?: string;
@@ -279,6 +280,7 @@ export function ChatArea({
     onCommitCode,
     onCodeLoaded,
     diagnostics,
+    selectedDiagnostics,
     onOpenSettings,
     onActiveDiffChange,
     activeDiffContent
@@ -417,7 +419,10 @@ export function ChatArea({
             }
         }
 
-        const diagStringsText = formatDiagnosticsLines(options?.diagnosticsOverride ?? diagnostics).join('\n');
+        const effectiveDiagnostics = selectedDiagnostics !== null && selectedDiagnostics !== undefined
+            ? selectedDiagnostics
+            : diagnostics;
+        const diagStringsText = formatDiagnosticsLines(options?.diagnosticsOverride ?? effectiveDiagnostics).join('\n');
         expanded = expanded.replace('{diagnostics}', diagStringsText || 'Ошибок не обнаружено');
         expanded = expanded.replace('{code}', activeCode);
         expanded = expanded.replace('{query}', queryPart);
@@ -430,6 +435,7 @@ export function ChatArea({
     }, [
         contextCode,
         diagnostics,
+        selectedDiagnostics,
         getCode,
         isNaparnikActive,
         modifiedCode,
@@ -812,7 +818,14 @@ export function ChatArea({
             onPrepareDiffBase?.(requestBaseCode);
         }
 
-        const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+        const diagSource = selectedDiagnostics !== null && selectedDiagnostics !== undefined
+            ? selectedDiagnostics
+            : (diagnostics || []);
+        if (selectedDiagnostics !== null && selectedDiagnostics !== undefined && selectedDiagnostics.length === 0 && (diagnostics || []).length > 0) {
+            alert('Выберите хотя бы одну проблему в панели Problems');
+            return;
+        }
+        const diagStrings = diagSource.map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
 
         // Если это расширенная слеш-команда, мы НЕ передаем contextCode повторно, 
         // так как он уже вставлен в expanded-шаблон через {code}
@@ -984,7 +997,10 @@ export function ChatArea({
 
     const handleSaveEdit = (index: number) => {
         if (editText.trim()) {
-            const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+            const editDiagSource = selectedDiagnostics !== null && selectedDiagnostics !== undefined
+                ? selectedDiagnostics
+                : (diagnostics || []);
+            const diagStrings = editDiagSource.map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
             const rerunBaseCode = modifiedCode || contextCode || originalCode || '';
             if (rerunBaseCode.trim()) {
                 onPrepareDiffBase?.(rerunBaseCode);

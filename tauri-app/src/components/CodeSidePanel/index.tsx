@@ -5,7 +5,7 @@ import { CodeSidePanelProps } from './types';
 import { useResizing } from './useResizing';
 import { Header } from './Header';
 import { Footer } from './Footer';
-import { DiagnosticsView } from './DiagnosticsView';
+import { DiagnosticsView, diagnosticKey } from './DiagnosticsView';
 import McpToolsView from './McpToolsView';
 import { applyDiffWithDiagnostics, hasDiffBlocks } from '../../utils/diffViewer';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -25,10 +25,19 @@ export function CodeSidePanel({
     activeDiffContent,
     onActiveDiffChange,
     onDiffRejected,
-    isFullWidth
+    isFullWidth,
+    onDiagnosticSelectionChange,
 }: CodeSidePanelProps) {
     const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'tools'>('diff');
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
+    const [selectedDiagnosticKeys, setSelectedDiagnosticKeys] = useState<Set<string>>(
+        () => new Set(diagnostics.map(diagnosticKey))
+    );
+
+    // When diagnostics list changes, reset selection to all-selected
+    useEffect(() => {
+        setSelectedDiagnosticKeys(new Set(diagnostics.map(diagnosticKey)));
+    }, [diagnostics]);
     const { settings } = useSettings();
     const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
     const isLightTheme = settings?.theme === 'light';
@@ -601,6 +610,12 @@ export function CodeSidePanel({
                 height={diagnosticsHeight}
                 isResizing={isDiagnosticsResizing}
                 isLightTheme={isLightTheme}
+                selectedKeys={selectedDiagnosticKeys}
+                onSelectionChange={(keys) => {
+                    setSelectedDiagnosticKeys(keys);
+                    const selected = diagnostics.filter(d => keys.has(diagnosticKey(d)));
+                    onDiagnosticSelectionChange?.(selected);
+                }}
                 onDiagnosticClick={(targetLine) => {
                     if (editorRef.current) {
                         editorRef.current.revealLineInCenter(targetLine);
