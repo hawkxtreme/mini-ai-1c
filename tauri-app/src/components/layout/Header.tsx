@@ -1,4 +1,4 @@
-import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, History } from 'lucide-react';
+import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, History, Download } from 'lucide-react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -36,6 +36,7 @@ interface HeaderProps {
     viewMode: 'assistant' | 'split' | 'code';
     onViewModeChange: (mode: 'assistant' | 'split' | 'code') => void;
     onNewChat: () => void;
+    onExportChat: () => void;
     onOpenSettings: (tab?: string) => void;
 }
 
@@ -45,6 +46,7 @@ export function Header({
     viewMode,
     onViewModeChange,
     onNewChat,
+    onExportChat,
     onOpenSettings,
 }: HeaderProps) {
     const [isCompact, setIsCompact] = useState(false);
@@ -54,6 +56,7 @@ export function Header({
     const {
         sessions,
         activeSessionId,
+        messages,
         switchChat,
         deleteChat,
     } = useChat();
@@ -318,6 +321,15 @@ export function Header({
                     {isCompact ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
                 </button>
                 <div className="w-px h-4 bg-[#27272a] mx-1" />
+                {messages.some(m => m.role === 'user' || m.role === 'assistant') && (
+                    <button
+                        onClick={onExportChat}
+                        className="p-2 rounded-lg transition-colors text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200"
+                        title="Экспорт диалога в файл"
+                    >
+                        <Download className="w-4 h-4" />
+                    </button>
+                )}
                 <div ref={chatHistoryRef} className="relative">
                     <button
                         data-testid="chat-history-trigger"

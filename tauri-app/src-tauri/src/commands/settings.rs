@@ -270,6 +270,33 @@ pub fn export_settings(app_handle: AppHandle) -> Result<ExportSettingsResult, St
     Ok(ExportSettingsResult::saved(path.display().to_string()))
 }
 
+/// Export chat dialog to a user-selected Markdown file.
+#[tauri::command]
+pub fn export_chat(app_handle: AppHandle, content: String) -> Result<ExportSettingsResult, String> {
+    use chrono::Local;
+    let file_name = format!("chat-{}.md", Local::now().format("%Y-%m-%d-%H%M"));
+
+    let Some(file_path) = app_handle
+        .dialog()
+        .file()
+        .add_filter("Markdown", &["md"])
+        .add_filter("Text", &["txt"])
+        .set_file_name(&file_name)
+        .blocking_save_file()
+    else {
+        return Ok(ExportSettingsResult::cancelled());
+    };
+
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Не удалось определить путь сохранения: {}", e))?;
+
+    fs::write(&path, content)
+        .map_err(|e| format!("Не удалось сохранить диалог: {}", e))?;
+
+    Ok(ExportSettingsResult::saved(path.display().to_string()))
+}
+
 /// Import settings from JSON string, preserving credentials from current settings
 #[tauri::command]
 pub fn import_settings(json_data: String) -> Result<(), String> {
