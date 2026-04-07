@@ -509,8 +509,13 @@ async function elaborateDirectlyToConfigurator(args: {
   const canDeclare = insCtx?.can_declare_method ?? false;
   const prompt = buildElaborateDirectPrompt(capture.promptCode, task, canDeclare);
 
-  // Call AI
-  const rawResult = await invoke<string>('quick_chat_invoke', { prompt });
+  // Call AI (with timeout — если quick_chat_invoke не ответил за 90с, показываем ошибку в оверлее)
+  const rawResult = await Promise.race([
+    invoke<string>('quick_chat_invoke', { prompt }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Таймаут: ИИ не ответил за 90 секунд. Попробуйте ещё раз.')), 90_000)
+    ),
+  ]);
   if (isStaleRequest()) return;
 
   // Determine if AI returned SEARCH/REPLACE diff
