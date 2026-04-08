@@ -12,12 +12,13 @@ fn default_true() -> bool {
 }
 
 fn default_configurator_window_title_pattern() -> String {
-    "Конфигуратор|Configurator".to_string()
+    "Конфигуратор|1C:Enterprise".to_string()
 }
 
 fn is_default_configurator_window_title_pattern(value: &String) -> bool {
     value.trim().is_empty()
         || value == "Конфигуратор"
+        || value == "Конфигуратор|Configurator"
         || value == &default_configurator_window_title_pattern()
 }
 
@@ -35,6 +36,10 @@ fn default_deletion_marker() -> String {
 
 fn default_max_iterations() -> Option<u32> {
     Some(7)
+}
+
+fn default_compress_strategy() -> String {
+    "summarize".to_string()
 }
 
 /// Быстрые команды (Slash Commands)
@@ -285,7 +290,7 @@ pub struct AppSettings {
     pub theme: Option<String>,
 
     /// Стратегия сжатия контекста: "" / "sliding_window" / "summarize"
-    #[serde(default)]
+    #[serde(default = "default_compress_strategy")]
     pub context_compress_strategy: String,
 
     /// Порог сжатия в токенах (chars/4 эвристика, default 8000).
@@ -582,11 +587,14 @@ pub fn load_settings() -> AppSettings {
         }
     }
 
-    // Migration: upgrade old single-language window_title_pattern to bilingual default
-    if settings.configurator.window_title_pattern == "Конфигуратор" {
-        crate::app_log!("[SETTINGS] Migrating window_title_pattern to bilingual default");
-        settings.configurator.window_title_pattern = default_configurator_window_title_pattern();
-        modified = true;
+    // Migration: upgrade old window_title_pattern to include "1C:Enterprise" for English UI
+    {
+        let p = &settings.configurator.window_title_pattern;
+        if p == "Конфигуратор" || p == "Конфигуратор|Configurator" {
+            crate::app_log!("[SETTINGS] Migrating window_title_pattern '{}' to bilingual default", p);
+            settings.configurator.window_title_pattern = default_configurator_window_title_pattern();
+            modified = true;
+        }
     }
 
     // Migration: Force 'Diff' mode over 'Full' if detected (to fix AI interaction issues)

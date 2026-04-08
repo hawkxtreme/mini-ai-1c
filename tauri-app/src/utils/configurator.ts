@@ -143,13 +143,13 @@ export function parseConfiguratorTitleFull(title: string): ConfiguratorTitleCont
 
     const result: ConfiguratorTitleContext = { raw_title: title, confidence: 0 };
 
-    // Найти " - Конфигуратор - " / " — Конфигуратор — " или английский " - Configurator - "
-    const confSepRegex = /\s[—\-]\s*(?:Конфигуратор|Configurator)\s*[—\-]\s+(.+)$/i;
+    // Найти " - Конфигуратор - " / " — Конфигуратор — " или английский " - 1C:Enterprise - "
+    const confSepRegex = /\s[—\-]\s*(?:Конфигуратор|Configurator|1C:Enterprise)\s*[—\-]\s+(.+)$/i;
     const confMatch = title.match(confSepRegex);
 
     if (!confMatch) {
-        // Простой вариант: "Конфигуратор - ConfigName" или "Configurator - ConfigName"
-        const simple = title.match(/^(?:Конфигуратор|Configurator)\s*[—\-]\s*(.+)$/i);
+        // Простой вариант: "Конфигуратор - ConfigName" или "1C:Enterprise - ConfigName"
+        const simple = title.match(/^(?:Конфигуратор|Configurator|1C:Enterprise)\s*[—\-]\s*(.+)$/i);
         if (simple) {
             result.config_name = simple[1].trim();
             result.confidence = 0.5;

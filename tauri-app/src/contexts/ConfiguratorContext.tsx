@@ -43,7 +43,7 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
     const { settings, updateSettings } = useSettings();
     const [detectedWindows, setDetectedWindows] = useState<WindowInfo[]>([]);
 
-    const pattern = settings?.configurator.window_title_pattern || 'Конфигуратор|Configurator';
+    const pattern = settings?.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise';
     const currentBinding = useMemo<ConfiguratorWindowBinding>(() => ({
         selected_window_hwnd: settings?.configurator.selected_window_hwnd ?? null,
         selected_window_pid: settings?.configurator.selected_window_pid ?? null,

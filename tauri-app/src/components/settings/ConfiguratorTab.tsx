@@ -274,9 +274,9 @@ export function ConfiguratorTab({
                             <label className="mb-1 block text-xs text-zinc-500">Шаблон заголовка</label>
                             <input
                                 type="text"
-                                value={settings.configurator.window_title_pattern}
+                                value={settings.configurator.window_title_pattern ?? 'Конфигуратор|1C:Enterprise'}
                                 onChange={(e) => updateConf({ window_title_pattern: e.target.value })}
-                                placeholder="Конфигуратор"
+                                placeholder="Конфигуратор|1C:Enterprise"
                                 className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
                         </div>
