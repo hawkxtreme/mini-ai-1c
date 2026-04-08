@@ -36,7 +36,7 @@ interface OverlayExplainPayload {
 export function MainLayout() {
     const { settings } = useSettings();
     const { status: bslStatus, analyzeCode } = useBsl();
-    const { clearChat, isLoading } = useChat();
+    const { clearChat, exportChat, isLoading } = useChat();
     const { pasteCode, checkSelection } = useConfigurator();
 
     const [viewMode, setViewMode] = useState<'assistant' | 'split' | 'code'>('assistant');
@@ -418,6 +418,7 @@ export function MainLayout() {
                     viewMode={viewMode}
                     onViewModeChange={setViewMode}
                     onNewChat={handleNewChat}
+                    onExportChat={exportChat}
                     onOpenSettings={(tab) => { if (tab) setSettingsTab(tab as any); setShowSettings(true); }}
                 />
 

@@ -117,6 +117,7 @@ pub fn run() {
             cli_get_status,
             cli_refresh_usage,
             // Settings export/import
+            commands::settings::export_chat,
             commands::settings::export_settings,
             commands::settings::import_settings,
             commands::settings::validate_import_settings_file,

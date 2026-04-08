@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../api';
 import { ConfiguratorTitleContext, formatConfiguratorContextForLLM } from '../utils/configurator';
@@ -158,6 +159,7 @@ interface ChatContextType {
     removeQueuedMessage: (id: string) => void;
     updateQueuedMessage: (id: string, content: string) => void;
     clearQueue: () => void;
+    exportChat: () => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -766,6 +768,30 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         api.clearNaparnikSession().catch(() => {/* non-critical */});
     }, [startDraft]);
 
+    const exportChat = useCallback(async () => {
+        const visibleMessages = messages.filter(
+            m => (m.role === 'user' || m.role === 'assistant') && m.variant == null
+        );
+        if (visibleMessages.length === 0) return;
+
+        const date = new Date().toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+        const lines: string[] = [`# Диалог от ${date}`, ''];
+
+        for (const msg of visibleMessages) {
+            const label = msg.role === 'user' ? '## Пользователь' : '## Ассистент';
+            lines.push(label);
+            lines.push('');
+            const text = (msg.displayContent ?? msg.content ?? '').trim();
+            lines.push(text);
+            lines.push('');
+            lines.push('---');
+            lines.push('');
+        }
+
+        const content = lines.join('\n');
+        await invoke('export_chat', { content });
+    }, [messages]);
+
     const addSystemMessage = useCallback((content: string, variant?: 'warning' | 'info' | 'compression') => {
         setMessages(prev => [
             ...prev,
@@ -892,6 +918,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             removeQueuedMessage,
             updateQueuedMessage,
             clearQueue,
+            exportChat,
         }}>
             {children}
         </ChatContext.Provider>
