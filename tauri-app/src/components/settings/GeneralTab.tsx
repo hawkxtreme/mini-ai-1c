@@ -110,7 +110,7 @@ export function GeneralTab({
                                         summarize:
                                             'LLM создаёт конспект диалога (не работает с QwenCLI / Напарником)',
                                     };
-                                    const active = (settings.context_compress_strategy || 'disabled') === opt;
+                                    const active = (settings.context_compress_strategy || 'summarize') === opt;
 
                                     return (
                                         <button
@@ -133,31 +133,6 @@ export function GeneralTab({
                             </div>
                         </div>
 
-                        {(settings.context_compress_strategy === 'sliding_window' ||
-                            settings.context_compress_strategy === 'summarize') && (
-                            <div className="flex items-center justify-between gap-4">
-                                <div>
-                                    <div className="text-sm font-medium text-zinc-200">Порог сжатия</div>
-                                    <div className="text-xs text-zinc-500">
-                                        Сжимать когда история превышает N токенов (~символов÷4)
-                                    </div>
-                                </div>
-                                <input
-                                    type="number"
-                                    min={1000}
-                                    max={50000}
-                                    step={1000}
-                                    value={settings.max_context_tokens ?? 8000}
-                                    onChange={(e) =>
-                                        setSettings({
-                                            ...settings,
-                                            max_context_tokens: parseInt(e.target.value, 10) || 8000,
-                                        })
-                                    }
-                                    className="w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-right text-xs text-zinc-200 focus:border-zinc-500 focus:outline-none"
-                                />
-                            </div>
-                        )}
 
                         {settings.context_compress_strategy === 'summarize' && (
                             <p className="text-[11px] text-zinc-600">

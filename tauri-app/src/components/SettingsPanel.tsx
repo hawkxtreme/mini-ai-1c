@@ -115,7 +115,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     const refreshWindows = async () => {
         if (!settings) return;
         const windows = await invoke<WindowInfo[]>('find_configurator_windows_cmd', {
-            pattern: settings.configurator.window_title_pattern
+            pattern: settings.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise'
         });
         setDetectedWindows(windows);
     };

@@ -4,6 +4,7 @@ import * as api from '../api';
 import { ConfiguratorTitleContext, formatConfiguratorContextForLLM } from '../utils/configurator';
 import { messageQueueService, QueuedMessage } from '../services/MessageQueueService';
 import { useSettings } from './SettingsContext';
+import { useProfiles } from './ProfileContext';
 import { useChatSessions, ChatSession } from '../hooks/useChatSessions';
 
 export type { ChatSession };
@@ -163,6 +164,7 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
     const { settings } = useSettings();
+    const { activeProfile } = useProfiles();
     const {
         sessions,
         activeId: activeSessionId,
@@ -557,14 +559,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         let payloadSourceMessages = historyMessages;
         let indicator: CompressionIndicator | null = null;
 
-        const strategy = settings?.context_compress_strategy;
-        // Token threshold: prefer max_context_tokens; fall back to max_context_messages * 200
-        // (rough average tokens per message), then default 8000.
-        const maxTokens: number =
-            settings?.max_context_tokens ??
-            ((settings?.max_context_messages ?? 0) > 0
-                ? (settings!.max_context_messages! * 200)
-                : 8000);
+        const strategy = settings?.context_compress_strategy || 'summarize';
+        // Threshold = 75% of the active model's context window.
+        // Falls back to 32k if context_window_override is not set.
+        const contextWindow: number = activeProfile?.context_window_override ?? 32000;
+        const maxTokens: number = Math.round(contextWindow * 0.75);
 
         if (strategy === 'sliding_window') {
             const { compressed } = slidingWindowCompress(historyMessages, maxTokens);
