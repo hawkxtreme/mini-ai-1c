@@ -441,6 +441,187 @@ interface EditorContext {
   primary_runtime_id?: string | null;
 }
 
+// Feature #6: insertion context from EditorBridge
+interface InsertionContext {
+  context: 'inside_method' | 'between_methods' | 'selection_inside_method' | 'selection_across_methods' | 'empty_module';
+  caret_line: number;
+  method_name: string | null;
+  method_start_line: number | null;
+  method_end_line: number | null;
+  has_selection: boolean;
+  selection_text: string;
+  insert_at_line: number;
+  append_after_line: number;
+  can_declare_method: boolean;
+  module_text: string;
+}
+
+
+function buildElaborateDirectPrompt(
+  code: string,
+  task: string | null,
+  canDeclareMethod: boolean,
+): string {
+  const taskLine = task ? `Задача: ${task}` : 'Улучши или доработай код';
+  if (canDeclareMethod && !code.trim()) {
+    return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Напиши новую процедуру или функцию BSL. Верни только код без markdown-оформления.`;
+  }
+  if (canDeclareMethod) {
+    return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Существующий код:
+${code}
+
+Верни результат в формате SEARCH/REPLACE. Если создаёшь новый метод, можно вернуть его текст без SEARCH/REPLACE.`;
+  }
+  return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Код:
+${code}
+
+Верни результат в формате SEARCH/REPLACE.`;
+}
+
+async function elaborateDirectlyToConfigurator(args: {
+  confHwnd: number;
+  capture: CaptureResult;
+  task: string | null;
+  isStaleRequest: () => boolean;
+  targetX: number | null;
+  targetY: number | null;
+  targetChildHwnd: number | null;
+}): Promise<void> {
+  const { confHwnd, capture, task, isStaleRequest, targetX, targetY, targetChildHwnd } = args;
+
+  // Get BSL insertion context for smart write strategy
+  let insCtx: InsertionContext | null = null;
+  try {
+    const raw = await invoke<unknown>('get_insertion_context_cmd', { hwnd: confHwnd });
+    insCtx = raw as InsertionContext;
+  } catch (e) {
+    console.warn('[elaborateDirect] insertion context unavailable, using capture scope:', e);
+  }
+
+  if (isStaleRequest()) return;
+
+  const canDeclare = insCtx?.can_declare_method ?? false;
+  const prompt = buildElaborateDirectPrompt(capture.promptCode, task, canDeclare);
+
+  // Call AI (with timeout — если quick_chat_invoke не ответил за 90с, показываем ошибку в оверлее)
+  const rawResult = await Promise.race([
+    invoke<string>('quick_chat_invoke', { prompt }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Таймаут: ИИ не ответил за 90 секунд. Попробуйте ещё раз.')), 90_000)
+    ),
+  ]);
+  if (isStaleRequest()) return;
+
+  // Determine if AI returned SEARCH/REPLACE diff
+  const hasDiff = /^<{5,9}\s*SEARCH>?/m.test(rawResult);
+
+  if (hasDiff) {
+    const diffResult = applyDiffWithDiagnostics(capture.promptCode, rawResult);
+
+    if (diffResult.failedCount > 0) {
+      // Diff failed → show in overlay for manual review
+      await invoke('update_overlay_state', {
+        state: {
+          phase: 'result',
+          action: 'elaborate',
+          resultType: 'diff' as ResultType,
+          preview: buildDiffFallbackPreview(rawResult, diffResult.failedCount, diffResult.fuzzyCount),
+          diffContent: rawResult,
+          confHwnd,
+          originalCode: capture.originalCode,
+          useSelectAll: capture.useSelectAll,
+          caretLine: capture.caretLine,
+          methodStartLine: capture.methodStartLine,
+          methodName: capture.methodName,
+          runtimeId: capture.runtimeId,
+          targetX,
+          targetY,
+          targetChildHwnd,
+        } satisfies OverlayStateUpdate,
+      });
+      return;
+    }
+
+    // Diff OK → write to configurator
+    let writeIntent: WriteIntent;
+    if (capture.scope === 'selection') {
+      writeIntent = 'replace_selection';
+    } else if (capture.scope === 'current_method') {
+      writeIntent = 'replace_current_method';
+    } else {
+      writeIntent = 'replace_module';
+    }
+
+    await invoke('paste_code_to_configurator', {
+      hwnd: confHwnd,
+      code: diffResult.code,
+      useSelectAll: capture.useSelectAll,
+      originalContent: capture.originalCode ?? null,
+      action: 'elaborate',
+      writeIntent,
+      caretLine: capture.caretLine ?? null,
+      methodStartLine: capture.methodStartLine ?? null,
+      methodName: capture.methodName ?? null,
+      runtimeId: capture.runtimeId ?? null,
+    });
+    await invoke('hide_overlay', { confHwnd });
+    return;
+  }
+
+  // No SEARCH/REPLACE — AI returned plain code
+  const cleanResult = rawResult.trim();
+
+  if (!cleanResult) {
+    await invoke('update_overlay_state', {
+      state: buildOverlayMessageState({
+        action: 'elaborate',
+        confHwnd,
+        preview: 'ИИ вернул пустой результат.',
+        capture,
+        target: { targetX, targetY, targetChildHwnd },
+      }),
+    });
+    return;
+  }
+
+  if (canDeclare && insCtx) {
+    // Between methods / empty module — insert plain code directly
+    if (insCtx.context === 'empty_module') {
+      await invoke('insert_at_line_cmd', { hwnd: confHwnd, line: 0, text: cleanResult });
+    } else {
+      await invoke('append_to_module_cmd', { hwnd: confHwnd, text: cleanResult });
+    }
+    await invoke('hide_overlay', { confHwnd });
+    return;
+  }
+
+  // Fallback: show for manual review
+  await invoke('update_overlay_state', {
+    state: {
+      phase: 'result',
+      action: 'elaborate',
+      resultType: 'diff' as ResultType,
+      preview: trimPreview(cleanResult),
+      diffContent: cleanResult,
+      confHwnd,
+      originalCode: capture.originalCode,
+      useSelectAll: capture.useSelectAll,
+      caretLine: capture.caretLine,
+      methodStartLine: capture.methodStartLine,
+      methodName: capture.methodName,
+      runtimeId: capture.runtimeId,
+      targetX,
+      targetY,
+      targetChildHwnd,
+    } satisfies OverlayStateUpdate,
+  });
+}
 
 async function captureQuickActionContext(
   confHwnd: number,
@@ -588,13 +769,27 @@ export function useQuickActions() {
         }
 
         if (action === 'elaborate') {
-          await handoffQuickActionSession({
-            action,
-            mode: 'write',
-            confHwnd,
-            capture,
-            task: task?.trim() || null,
-          });
+          if (autoApply) {
+            // Feature #6: with autoApply — call AI directly and write result to configurator
+            // without opening chat. Respects BSL context (inside_method vs between_methods).
+            await elaborateDirectlyToConfigurator({
+              confHwnd,
+              capture,
+              task: task?.trim() || null,
+              isStaleRequest,
+              targetX: targetX ?? null,
+              targetY: targetY ?? null,
+              targetChildHwnd: targetChildHwnd ?? null,
+            });
+          } else {
+            await handoffQuickActionSession({
+              action,
+              mode: 'write',
+              confHwnd,
+              capture,
+              task: task?.trim() || null,
+            });
+          }
           return;
         }
 

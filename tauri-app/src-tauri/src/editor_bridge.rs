@@ -900,6 +900,31 @@ pub fn insert_before_method(
     serde_json::from_value(v).map_err(|e| format!("Deserialize EditorWriteResult: {}", e))
 }
 
+/// BSL insertion context: where the caret is relative to methods, recommended insert line,
+/// whether new Процедура/Функция declarations are allowed at the cursor position.
+/// Returns the raw JSON value for flexible use in callers.
+pub fn get_insertion_context(hwnd: isize) -> Result<serde_json::Value, String> {
+    send_command("get_insertion_context", Some(hwnd_args(hwnd)))
+}
+
+/// Insert text before the given line number (0-based) without replacing anything.
+pub fn insert_at_line(hwnd: isize, line: i64, text: &str) -> Result<EditorWriteResult, String> {
+    let v = send_command(
+        "insert_at_line",
+        Some(serde_json::json!({"hwnd": hwnd as i64, "line": line, "text": text})),
+    )?;
+    serde_json::from_value(v).map_err(|e| format!("Deserialize EditorWriteResult: {}", e))
+}
+
+/// Append text to the end of the module (e.g. a new Процедура/Функция block).
+pub fn append_to_module(hwnd: isize, text: &str) -> Result<EditorWriteResult, String> {
+    let v = send_command(
+        "append_to_module",
+        Some(serde_json::json!({"hwnd": hwnd as i64, "text": text})),
+    )?;
+    serde_json::from_value(v).map_err(|e| format!("Deserialize EditorWriteResult: {}", e))
+}
+
 /// Detailed diagnostic report about window visibility, UIAutomation focus and editor resolution.
 pub fn diagnose_editor(hwnd: isize) -> Result<String, String> {
     let v = send_command("diagnose_editor", Some(hwnd_args(hwnd)))?;

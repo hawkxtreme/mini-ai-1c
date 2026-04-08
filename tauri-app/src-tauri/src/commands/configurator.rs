@@ -1723,6 +1723,55 @@ pub async fn install_editor_bridge_cmd(app: tauri::AppHandle) -> Result<String, 
     crate::editor_bridge_installer::download_editor_bridge(app).await
 }
 
+/// Feature #6: Return BSL insertion context at the current cursor position.
+#[tauri::command]
+pub fn get_insertion_context_cmd(hwnd: isize) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::get_insertion_context(hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Feature #6: Insert text before the given line in the BSL module.
+#[tauri::command]
+pub fn insert_at_line_cmd(
+    hwnd: isize,
+    line: i64,
+    text: String,
+) -> Result<crate::editor_bridge::EditorWriteResult, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::insert_at_line(hwnd, line, &text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, line, text);
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Feature #6: Append text after the last КонецПроцедуры/КонецФункции in the BSL module.
+#[tauri::command]
+pub fn append_to_module_cmd(
+    hwnd: isize,
+    text: String,
+) -> Result<crate::editor_bridge::EditorWriteResult, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::append_to_module(hwnd, &text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, text);
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn send_hotkey_cmd(hwnd: isize, key: u16, modifiers: Vec<u16>) -> Result<(), String> {
     #[cfg(windows)]

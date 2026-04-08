@@ -106,6 +106,9 @@ pub fn run() {
             open_search_index_dir,
             align_with_configurator,
             send_hotkey_cmd,
+            get_insertion_context_cmd,
+            insert_at_line_cmd,
+            append_to_module_cmd,
             // CLI Providers
             cli_auth_start,
             cli_auth_poll,
