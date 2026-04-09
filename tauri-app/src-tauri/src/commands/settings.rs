@@ -181,6 +181,67 @@ fn read_import_settings_file(file_path: &str) -> Result<String, String> {
         .map_err(|e| format!("Не удалось прочитать файл настроек '{}': {}", file_path, e))
 }
 
+fn default_chat_export_file_name() -> String {
+    format!("chat-{}.md", Local::now().format("%Y-%m-%d-%H%M"))
+}
+
+fn sanitize_chat_export_stem(raw_stem: &str) -> String {
+    let mut sanitized = String::with_capacity(raw_stem.len());
+    let mut previous_was_space = false;
+
+    for ch in raw_stem.chars() {
+        let is_invalid = ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*');
+        if is_invalid || ch.is_whitespace() {
+            if !previous_was_space && !sanitized.is_empty() {
+                sanitized.push(' ');
+            }
+            previous_was_space = true;
+            continue;
+        }
+
+        sanitized.push(ch);
+        previous_was_space = false;
+    }
+
+    let trimmed = sanitized.trim_matches(|ch: char| ch == ' ' || ch == '.');
+    let truncated = trimmed.chars().take(80).collect::<String>();
+    truncated.trim_matches(|ch: char| ch == ' ' || ch == '.').to_string()
+}
+
+fn build_chat_export_file_name(suggested_file_name: Option<String>) -> String {
+    let fallback_name = default_chat_export_file_name();
+    let Some(raw_name) = suggested_file_name else {
+        return fallback_name;
+    };
+
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty() {
+        return fallback_name;
+    }
+
+    let (raw_stem, extension) = match trimmed.rsplit_once('.') {
+        Some((stem, ext)) => {
+            let normalized_extension = ext.trim().to_ascii_lowercase();
+            if matches!(normalized_extension.as_str(), "md" | "txt") {
+                if stem.trim().is_empty() {
+                    return fallback_name;
+                }
+                (stem, normalized_extension)
+            } else {
+                (trimmed, "md".to_string())
+            }
+        }
+        _ => (trimmed, "md".to_string()),
+    };
+
+    let sanitized_stem = sanitize_chat_export_stem(raw_stem);
+    if sanitized_stem.is_empty() {
+        return fallback_name;
+    }
+
+    format!("{}.{}", sanitized_stem, extension)
+}
+
 /// Get application settings
 #[tauri::command]
 pub fn get_settings() -> AppSettings {
@@ -272,9 +333,12 @@ pub fn export_settings(app_handle: AppHandle) -> Result<ExportSettingsResult, St
 
 /// Export chat dialog to a user-selected Markdown file.
 #[tauri::command]
-pub fn export_chat(app_handle: AppHandle, content: String) -> Result<ExportSettingsResult, String> {
-    use chrono::Local;
-    let file_name = format!("chat-{}.md", Local::now().format("%Y-%m-%d-%H%M"));
+pub fn export_chat(
+    app_handle: AppHandle,
+    content: String,
+    suggested_file_name: Option<String>,
+) -> Result<ExportSettingsResult, String> {
+    let file_name = build_chat_export_file_name(suggested_file_name);
 
     let Some(file_path) = app_handle
         .dialog()
@@ -343,9 +407,9 @@ pub fn check_java_cmd() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_export_bundle, restore_profile_secrets, restore_sensitive_settings,
-        sanitize_profiles_for_export, sanitize_settings_for_export, SettingsExportBundle,
-        SETTINGS_EXPORT_FORMAT_VERSION,
+        build_chat_export_file_name, build_export_bundle, restore_profile_secrets,
+        restore_sensitive_settings, sanitize_profiles_for_export, sanitize_settings_for_export,
+        SettingsExportBundle, SETTINGS_EXPORT_FORMAT_VERSION,
     };
     use crate::llm_profiles::{LLMProfile, LLMProvider, ProfileStore};
     use crate::settings::{
@@ -623,5 +687,28 @@ mod tests {
         assert!(!json.contains("selected_window_title"));
         assert!(!json.contains("selected_config_name"));
         assert!(!json.contains("window_title_pattern"));
+    }
+
+    #[test]
+    fn chat_export_file_name_uses_suggested_name_and_sanitizes_it() {
+        let file_name =
+            build_chat_export_file_name(Some("  тест: связи / demo? 2026-04-09 12-30.md  ".to_string()));
+
+        assert_eq!(file_name, "тест связи demo 2026-04-09 12-30.md");
+    }
+
+    #[test]
+    fn chat_export_file_name_adds_md_extension_when_missing() {
+        let file_name = build_chat_export_file_name(Some("Отчет по чату".to_string()));
+
+        assert_eq!(file_name, "Отчет по чату.md");
+    }
+
+    #[test]
+    fn chat_export_file_name_falls_back_to_default_for_empty_input() {
+        let file_name = build_chat_export_file_name(Some("   .md   ".to_string()));
+
+        assert!(file_name.starts_with("chat-"));
+        assert!(file_name.ends_with(".md"));
     }
 }

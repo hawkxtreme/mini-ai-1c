@@ -56,7 +56,7 @@ export function Header({
     const {
         sessions,
         activeSessionId,
-        messages,
+        exportSession,
         switchChat,
         deleteChat,
     } = useChat();
@@ -321,7 +321,7 @@ export function Header({
                     {isCompact ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
                 </button>
                 <div className="w-px h-4 bg-[#27272a] mx-1" />
-                {messages.some(m => m.role === 'user' || m.role === 'assistant') && (
+                {false && (
                     <button
                         onClick={onExportChat}
                         className="p-2 rounded-lg transition-colors text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200"
@@ -352,6 +352,7 @@ export function Header({
                         onSwitch={switchChat}
                         onNew={onNewChat}
                         onDelete={deleteChat}
+                        onExportSession={exportSession}
                     />
                 </div>
                 <button

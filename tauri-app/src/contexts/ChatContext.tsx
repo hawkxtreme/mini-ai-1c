@@ -65,6 +65,63 @@ function stripCompressionMessages(msgs: ChatMessage[]): ChatMessage[] {
     return msgs.filter(msg => !isCompressionMessage(msg));
 }
 
+function getExportableMessages(msgs: ChatMessage[]): ChatMessage[] {
+    return msgs.filter(
+        (msg) => (msg.role === 'user' || msg.role === 'assistant') && msg.variant == null
+    );
+}
+
+function buildChatExportBaseName(title: string | null | undefined): string {
+    const normalized = (title ?? '')
+        .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[. ]+$/g, '');
+
+    if (!normalized) {
+        return 'chat';
+    }
+
+    return normalized.slice(0, 80).trim() || 'chat';
+}
+
+function buildSuggestedChatFileName(title: string | null | undefined, exportedAt: number): string {
+    const baseName = buildChatExportBaseName(title);
+    const stamp = new Date(exportedAt)
+        .toLocaleString('sv-SE', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        })
+        .replace(',', '')
+        .replace(/:/g, '-');
+
+    return `${baseName} - ${stamp}.md`;
+}
+
+function buildChatExportMarkdown(msgs: ChatMessage[], exportedAt: number): string | null {
+    const visibleMessages = getExportableMessages(msgs);
+    if (visibleMessages.length === 0) return null;
+
+    const date = new Date(exportedAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+    const lines: string[] = [`# Диалог от ${date}`, ''];
+
+    for (const msg of visibleMessages) {
+        const label = msg.role === 'user' ? '## Пользователь' : '## Ассистент';
+        lines.push(label);
+        lines.push('');
+        const text = (msg.displayContent ?? msg.content ?? '').trim();
+        lines.push(text);
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+    }
+
+    return lines.join('\n');
+}
+
 /** Estimates token count for a list of messages (chars / 4, matching Rust backend heuristic). */
 function estimateMsgTokens(msgs: ChatMessage[]): number {
     return msgs.reduce((sum, m) => sum + Math.ceil((m.content?.length ?? 0) / 4), 0);
@@ -160,6 +217,7 @@ interface ChatContextType {
     updateQueuedMessage: (id: string, content: string) => void;
     clearQueue: () => void;
     exportChat: () => Promise<void>;
+    exportSession: (session: ChatSession) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -789,8 +847,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
 
         const content = lines.join('\n');
-        await invoke('export_chat', { content });
-    }, [messages]);
+        const suggestedFileName = buildSuggestedChatFileName(activeSession?.title, Date.now());
+        await invoke('export_chat', { content, suggestedFileName });
+    }, [activeSession?.title, messages]);
+
+    const exportSession = useCallback(async (session: ChatSession) => {
+        const content = buildChatExportMarkdown(session.messages, session.updatedAt);
+        if (!content) return;
+        const suggestedFileName = buildSuggestedChatFileName(session.title, session.updatedAt);
+        await invoke('export_chat', { content, suggestedFileName });
+    }, []);
 
     const addSystemMessage = useCallback((content: string, variant?: 'warning' | 'info' | 'compression') => {
         setMessages(prev => [
@@ -919,6 +985,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             updateQueuedMessage,
             clearQueue,
             exportChat,
+            exportSession,
         }}>
             {children}
         </ChatContext.Provider>
