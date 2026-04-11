@@ -93,6 +93,8 @@ export function BslEditor({ code, height = '200px', readOnly = true, loading, cl
                     detectIndentation: false,
                     padding: { top: 8, bottom: 8 },
                     renderLineHighlight: 'none',
+                    occurrencesHighlight: 'off',
+                    selectionHighlight: false,
                     folding: true,
                     scrollbar: {
                         vertical: 'auto',

@@ -363,6 +363,8 @@ export function CodeSidePanel({
                             automaticLayout: true,
                             wordWrap: 'on',
                             readOnly: false,
+                            occurrencesHighlight: 'off',
+                            selectionHighlight: false,
                         }}
                     />
                 ) : viewMode === 'diff' ? (
@@ -579,6 +581,8 @@ export function CodeSidePanel({
                             originalEditable: false,
                             automaticLayout: true,
                             ignoreTrimWhitespace: false,
+                            occurrencesHighlight: 'off',
+                            selectionHighlight: false,
                         }}
                     />
                 ) : (

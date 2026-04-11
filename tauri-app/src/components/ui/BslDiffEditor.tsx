@@ -103,6 +103,8 @@ export function BslDiffEditor({
                     automaticLayout: false,
                     padding: { top: 8, bottom: 8 },
                     renderLineHighlight: 'none',
+                    occurrencesHighlight: 'off',
+                    selectionHighlight: false,
                     folding: true,
                     renderSideBySide: true,
                     enableSplitViewResizing: true,
