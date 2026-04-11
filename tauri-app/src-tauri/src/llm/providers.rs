@@ -1,3 +1,4 @@
+use futures::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -180,13 +181,15 @@ pub async fn fetch_models_from_api(
         return Err(format!("API request failed: {}", resp.status()));
     }
 
-    // OpenAI/OpenRouter usually returns { "data": [ { "id": "..." } ] }
+    // OpenAI/OpenRouter: { "data": [ { "id": "..." } ] }
+    // LM Studio adds: max_context_length
     #[derive(Deserialize)]
     struct OpenAiModel {
         id: String,
-        // Some proxies (like OpenRouter) or local servers might include these
         context_window: Option<u32>,
         max_tokens: Option<u32>,
+        // LM Studio specific field
+        max_context_length: Option<u32>,
     }
     #[derive(Deserialize)]
     struct OpenAiResponse {
@@ -198,11 +201,15 @@ pub async fn fetch_models_from_api(
 
     let completion: OpenAiResponse = serde_json::from_str(&body).map_err(|e| e.to_string())?;
 
-    let models = completion
+    let mut models: Vec<Model> = completion
         .data
         .into_iter()
         .map(|m| {
-            let cw = m.context_window.or(m.max_tokens).unwrap_or(4096);
+            // Prefer explicit context fields over the fallback default 4096
+            let cw = m.max_context_length
+                .or(m.context_window)
+                .or(m.max_tokens)
+                .unwrap_or(4096);
             Model {
                 id: m.id.clone(),
                 name: m.id.clone(),
@@ -214,7 +221,112 @@ pub async fn fetch_models_from_api(
         })
         .collect();
 
+    // For Ollama: use native /api/show to get the actual llm.context_length per model.
+    // The /v1/models endpoint does not expose this, so all models default to 4096 without this step.
+    if provider_id == "Ollama" {
+        let ollama_base = derive_ollama_native_base(trimmed_base);
+        enrich_ollama_context_windows(&client, &ollama_base, &mut models).await;
+    }
+
     Ok(models)
+}
+
+/// Derives the native Ollama base URL (port 11434 root) from any OpenAI-compat base URL.
+/// e.g. "http://localhost:11434/v1" → "http://localhost:11434"
+fn derive_ollama_native_base(openai_base: &str) -> String {
+    // Strip trailing /v1 (and /v1/) to get the Ollama root
+    openai_base
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string()
+}
+
+/// Calls POST /api/show for each model in parallel and updates context_window
+/// from model_info["llm.context_length"].
+async fn enrich_ollama_context_windows(client: &Client, ollama_base: &str, models: &mut Vec<Model>) {
+    let show_url = format!("{}/api/show", ollama_base);
+
+    #[derive(Deserialize)]
+    struct ShowResponse {
+        model_info: Option<serde_json::Map<String, serde_json::Value>>,
+    }
+
+    // Fetch all in parallel
+    let futures: Vec<_> = models
+        .iter()
+        .map(|m| {
+            let url = show_url.clone();
+            let name = m.id.clone();
+            let client = client.clone();
+            async move {
+                let result = client
+                    .post(&url)
+                    .json(&serde_json::json!({ "name": name }))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<ShowResponse>().await {
+                            Ok(show) => {
+                                // Ollama uses architecture-specific keys: e.g.
+                                // "qwen2.context_length", "llama.context_length",
+                                // "gemma.context_length" — find any key ending with
+                                // ".context_length".
+                                let ctx = show
+                                    .model_info
+                                    .as_ref()
+                                    .and_then(|mi| {
+                                        mi.iter()
+                                            .find(|(k, _)| k.ends_with(".context_length"))
+                                            .and_then(|(_, v)| v.as_u64())
+                                    })
+                                    .map(|v| v as u32);
+                                (name, ctx)
+                            }
+                            Err(e) => {
+                                crate::app_log!(
+                                    "[Ollama] /api/show parse error for {}: {}",
+                                    name,
+                                    e
+                                );
+                                (name, None)
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        crate::app_log!(
+                            "[Ollama] /api/show returned {} for {}",
+                            resp.status(),
+                            name
+                        );
+                        (name, None)
+                    }
+                    Err(e) => {
+                        crate::app_log!("[Ollama] /api/show request failed for {}: {}", name, e);
+                        (name, None)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+
+    for (model_id, ctx_opt) in results {
+        if let Some(ctx) = ctx_opt {
+            if let Some(m) = models.iter_mut().find(|m| m.id == model_id) {
+                crate::app_log!(
+                    "[Ollama] context_window for {}: {} → {}",
+                    model_id,
+                    m.context_window,
+                    ctx
+                );
+                m.context_window = ctx;
+            }
+        }
+    }
 }
 
 pub async fn fetch_registry() -> Result<RegistryData, String> {
@@ -340,4 +452,104 @@ fn enrich_model(model: &mut Model, reg_model: &Model) {
     model.cost_in = reg_model.cost_in;
     model.cost_out = reg_model.cost_out;
     model.description = reg_model.description.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_ollama_native_base_strips_v1() {
+        assert_eq!(
+            derive_ollama_native_base("http://localhost:11434/v1"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            derive_ollama_native_base("http://localhost:11434/v1/"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            derive_ollama_native_base("http://192.168.1.10:11434"),
+            "http://192.168.1.10:11434"
+        );
+        // Custom port, no /v1 suffix
+        assert_eq!(
+            derive_ollama_native_base("http://localhost:8080/v1"),
+            "http://localhost:8080"
+        );
+    }
+
+    /// Интеграционный тест: Ollama возвращает реальный context_window > 4096.
+    ///
+    /// Запустить:
+    ///   OLLAMA_HOST=http://localhost:11434 cargo test -p mini-ai-1c -- ollama_context --nocapture --ignored
+    #[tokio::test]
+    #[ignore = "requires Ollama with at least one model; run with --ignored"]
+    async fn ollama_context_window_is_fetched_from_show() {
+        let host = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let base_url = format!("{}/v1", host.trim_end_matches('/'));
+
+        let result = fetch_models_from_api("Ollama", &base_url, "").await;
+        let models = result.expect("fetch_models_from_api should succeed for Ollama");
+
+        assert!(!models.is_empty(), "Ollama should return at least one model");
+
+        eprintln!("[INFO] Ollama models:");
+        for m in &models {
+            eprintln!("  {} → context_window = {}", m.id, m.context_window);
+        }
+
+        // Every model must have context_window > 4096 — the API-default fallback.
+        // If any model still has 4096 it means /api/show is not being called or returned nothing.
+        let all_above_default = models.iter().all(|m| m.context_window > 4096);
+        assert!(
+            all_above_default,
+            "All Ollama models should have context_window > 4096 (fetched from /api/show). \
+             Got: {:?}",
+            models.iter().map(|m| (&m.id, m.context_window)).collect::<Vec<_>>()
+        );
+    }
+
+    /// Интеграционный тест: LM Studio возвращает context_window через max_context_length.
+    ///
+    /// Запустить:
+    ///   LMSTUDIO_HOST=http://localhost:1234 cargo test -p mini-ai-1c -- lmstudio_context --nocapture --ignored
+    #[tokio::test]
+    #[ignore = "requires LM Studio with Local Server started; run with --ignored"]
+    async fn lmstudio_context_window_is_fetched_from_models() {
+        let host = std::env::var("LMSTUDIO_HOST")
+            .unwrap_or_else(|_| "http://localhost:1234".to_string());
+        let base_url = format!("{}/v1", host.trim_end_matches('/'));
+
+        let result = fetch_models_from_api("LMStudio", &base_url, "").await;
+
+        // If server is not running — gracefully skip
+        let models = match result {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[SKIP] LM Studio server not reachable at {}: {}", host, e);
+                return;
+            }
+        };
+
+        if models.is_empty() {
+            eprintln!("[SKIP] LM Studio returned empty model list — no model loaded");
+            return;
+        }
+
+        eprintln!("[INFO] LM Studio models:");
+        for m in &models {
+            eprintln!("  {} → context_window = {}", m.id, m.context_window);
+        }
+
+        // Every loaded model should have context_window > 4096
+        let all_above_default = models.iter().all(|m| m.context_window > 4096);
+        assert!(
+            all_above_default,
+            "All LM Studio models should have context_window > 4096 (from max_context_length). \
+             Got: {:?}",
+            models.iter().map(|m| (&m.id, m.context_window)).collect::<Vec<_>>()
+        );
+    }
 }
