@@ -850,7 +850,15 @@ export function ChatArea({
             && diagSource.length === 0
             && (diagnostics || []).length > 0
         ) {
-            alert('Выберите хотя бы одну проблему в панели Problems');
+            injectMessage({
+                role: 'assistant',
+                content: 'Выберите хотя бы одну проблему в панели **Problems**.',
+                parts: [{ type: 'text', content: 'Выберите хотя бы одну проблему в панели **Problems**.' }],
+                timestamp: Date.now(),
+            });
+            setTimeout(() => {
+                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }, 50);
             return;
         }
         const diagStrings = diagSource.map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
