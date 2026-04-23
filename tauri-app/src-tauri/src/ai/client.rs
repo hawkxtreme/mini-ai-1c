@@ -904,7 +904,7 @@ pub async fn stream_chat_completion(
             let event_str = String::from_utf8_lossy(&event_bytes);
 
             for line in event_str.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
+                if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
                     if data == "[DONE]" {
                         if !content_search_temp.is_empty() {
                             if is_thinking {

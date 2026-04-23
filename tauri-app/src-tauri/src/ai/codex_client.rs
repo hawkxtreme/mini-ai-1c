@@ -429,7 +429,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
             for line in event_str.lines() {
                 if let Some(t) = line.strip_prefix("event: ") {
                     event_type = t.trim().to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
+                } else if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
                     event_data = d.trim().to_string();
                 }
             }
@@ -658,7 +658,7 @@ pub async fn stream_codex_completion(
             for line in event_str.lines() {
                 if let Some(t) = line.strip_prefix("event: ") {
                     event_type = t.trim().to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
+                } else if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
                     event_data = d.trim().to_string();
                 }
             }

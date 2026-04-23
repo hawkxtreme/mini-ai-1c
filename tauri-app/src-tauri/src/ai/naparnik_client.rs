@@ -399,7 +399,7 @@ async fn process_sse_stream(
             let event_str = String::from_utf8_lossy(&event_bytes);
 
             for line in event_str.lines() {
-                let data = if let Some(d) = line.strip_prefix("data: ") {
+                let data = if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
                     d
                 } else {
                     continue;
