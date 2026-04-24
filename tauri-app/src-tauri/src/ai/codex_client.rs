@@ -21,14 +21,28 @@ use crate::llm_profiles::{
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_RESPONSES_ENDPOINT: &str = "/responses";
 const CODEX_USER_AGENT: &str = "codex-cli/0.1.0 (Windows NT 10.0; x86_64) vscode/1.111.0";
-const DEFAULT_CODEX_INSTRUCTIONS: &str =
-    "You are Codex, a coding assistant running inside Mini AI 1C.";
+const DEFAULT_CODEX_INSTRUCTIONS: &str = "You are Codex, a coding assistant running inside Mini AI 1C.\n\
+IMPORTANT: Always output raw characters — never use HTML entities. \
+Write `<`, `>`, `&`, `\"`, `'` literally. \
+Do NOT write `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;` or any other HTML escape sequences. \
+This applies to all code, diffs, BSL/1C code, and explanations.";
 /// Codex requires tool names ≤ 64 characters
 const MAX_TOOL_NAME_LEN: usize = 64;
 const CODEX_HTTP_TIMEOUT_SECS: u64 = 120;
 
 fn resolve_codex_stream_timeout_secs(configured_timeout_secs: Option<u32>) -> u32 {
     configured_timeout_secs.unwrap_or(DEFAULT_CODEX_STREAM_TIMEOUT_SECS)
+}
+
+/// Decode HTML entities that Codex sometimes emits (e.g. `&amp;` → `&`).
+fn unescape_html(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/")
 }
 
 // ─── Request types ──────────────────────────────────────────────────────────
@@ -300,7 +314,7 @@ fn build_codex_request(
         stream,
         reasoning: CodexReasoning {
             effort: resolve_codex_reasoning_effort(profile),
-            summary: "auto".to_string(),
+            summary: "concise".to_string(),
         },
         include: vec!["reasoning.encrypted_content".to_string()],
         store: false,
@@ -550,7 +564,7 @@ pub async fn stream_codex_completion(
         stream: true,
         reasoning: CodexReasoning {
             effort: reasoning_effort.clone(),
-            summary: "auto".to_string(),
+            summary: "concise".to_string(),
         },
         include: vec!["reasoning.encrypted_content".to_string()],
         store: false,
@@ -687,8 +701,9 @@ pub async fn stream_codex_completion(
                 "response.output_text.delta" => {
                     if let Some(delta) = &evt.delta {
                         if !delta.is_empty() {
-                            full_content.push_str(delta);
-                            let _ = app_handle.emit("chat-chunk", delta.clone());
+                            let clean = unescape_html(delta);
+                            full_content.push_str(&clean);
+                            let _ = app_handle.emit("chat-chunk", clean);
                         }
                     }
                 }

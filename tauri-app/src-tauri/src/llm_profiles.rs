@@ -39,7 +39,7 @@ impl std::fmt::Display for LLMProvider {
     }
 }
 
-pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "xhigh";
+pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "medium";
 pub const DEFAULT_CODEX_STREAM_TIMEOUT_SECS: u32 = 120;
 
 pub fn normalize_codex_reasoning_effort(value: Option<&str>) -> Option<String> {
