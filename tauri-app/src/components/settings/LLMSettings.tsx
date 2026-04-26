@@ -29,7 +29,7 @@ const PROVIDERS = [
     { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1', type: 'standard' },
     { value: 'LMStudio', label: 'LM Studio (Local)', defaultModel: '', defaultUrl: 'http://localhost:1234/v1', type: 'standard' },
     { value: 'QwenCli', label: 'Qwen Code (CLI)', defaultModel: 'coder-model', defaultUrl: 'https://portal.qwen.ai/v1', type: 'cli' },
-    { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'gpt-5.4', defaultUrl: 'https://chatgpt.com/backend-api/codex', type: 'cli' },
+    { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'gpt-5.5', defaultUrl: 'https://chatgpt.com/backend-api/codex', type: 'cli' },
     { value: 'MiniMax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', defaultUrl: 'https://api.minimax.io/v1', type: 'standard' },
     { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '', type: 'standard' },
     { value: 'OneCNaparnik', label: '1С:Напарник', defaultModel: 'naparnik', defaultUrl: 'https://code.1c.ai', type: 'naparnik' },
@@ -260,7 +260,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             base_url: provider.defaultUrl,
             max_tokens: 4096,
             temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli') ? 0.1 : 0.7,
-            reasoning_effort: providerValue === 'CodexCli' ? 'xhigh' : undefined,
+            reasoning_effort: providerValue === 'CodexCli' ? 'medium' : undefined,
         };
         try {
             await invoke('save_profile', { profile: newProfile, apiKey: null });
@@ -472,7 +472,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             base_url: def?.defaultUrl || '',
                                             model: def?.defaultModel || '',
                                             reasoning_effort: v === 'CodexCli'
-                                                ? (prev.reasoning_effort || 'xhigh')
+                                                ? (prev.reasoning_effort || 'medium')
                                                 : undefined
                                         };
                                     });
