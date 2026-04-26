@@ -45,6 +45,35 @@ fn unescape_html(s: &str) -> String {
         .replace("&#x2F;", "/")
 }
 
+fn unescape_html_in_json_strings(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            *s = unescape_html(s);
+        }
+        Value::Array(items) => {
+            for item in items {
+                unescape_html_in_json_strings(item);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                unescape_html_in_json_strings(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_codex_tool_arguments(arguments: &str) -> String {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(mut value) => {
+            unescape_html_in_json_strings(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+        }
+        Err(_) => unescape_html(arguments),
+    }
+}
+
 // ─── Request types ──────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -471,7 +500,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
                 "response.output_text.delta" => {
                     if let Some(delta) = &evt.delta {
                         if !delta.is_empty() {
-                            full_content.push_str(delta);
+                            full_content.push_str(&unescape_html(delta));
                         }
                     }
                 }
@@ -768,7 +797,8 @@ pub async fn stream_codex_completion(
                         if item_type == "function_call" {
                             let call_id = item["call_id"].as_str().unwrap_or("").to_string();
                             let name = item["name"].as_str().unwrap_or("").to_string();
-                            let arguments = item["arguments"].as_str().unwrap_or("{}").to_string();
+                            let arguments =
+                                normalize_codex_tool_arguments(item["arguments"].as_str().unwrap_or("{}"));
 
                             if !call_id.is_empty() && !name.is_empty() {
                                 accumulated_tool_calls.push(ToolCall {
@@ -794,7 +824,7 @@ pub async fn stream_codex_completion(
                                 let arguments = if args.is_empty() {
                                     "{}".to_string()
                                 } else {
-                                    args
+                                    normalize_codex_tool_arguments(&args)
                                 };
                                 accumulated_tool_calls.push(ToolCall {
                                     id: call_id.clone(),
@@ -820,7 +850,7 @@ pub async fn stream_codex_completion(
                         let arguments = if args.is_empty() {
                             "{}".to_string()
                         } else {
-                            args
+                            normalize_codex_tool_arguments(&args)
                         };
                         accumulated_tool_calls.push(ToolCall {
                             id: call_id,
@@ -879,7 +909,8 @@ pub async fn stream_codex_completion(
 mod tests {
     use super::{
         build_codex_request, messages_to_codex_payload, resolve_codex_model,
-        resolve_codex_stream_timeout_secs, CodexInputItem, DEFAULT_CODEX_INSTRUCTIONS,
+        normalize_codex_tool_arguments, resolve_codex_stream_timeout_secs, CodexInputItem,
+        DEFAULT_CODEX_INSTRUCTIONS,
     };
     use crate::ai::models::ApiMessage;
     use crate::llm_profiles::{
@@ -986,5 +1017,26 @@ mod tests {
         assert!(request.stream);
         assert!(request.tools.is_none());
         assert_eq!(request.input.len(), 1);
+    }
+
+    #[test]
+    fn normalize_codex_tool_arguments_decodes_html_entities_inside_json_strings() {
+        let raw = r#"{"code":"Пока СтрДлина(Номер) &lt; 9 Цикл","nested":{"text":"A &amp; B"}}"#;
+
+        let normalized = normalize_codex_tool_arguments(raw);
+        let parsed: Value = serde_json::from_str(&normalized).unwrap();
+
+        assert_eq!(parsed["code"], "Пока СтрДлина(Номер) < 9 Цикл");
+        assert_eq!(parsed["nested"]["text"], "A & B");
+    }
+
+    #[test]
+    fn normalize_codex_tool_arguments_keeps_json_valid_when_decoding_quotes() {
+        let raw = r#"{"code":"Сообщить(&quot;ok&quot;);"}"#;
+
+        let normalized = normalize_codex_tool_arguments(raw);
+        let parsed: Value = serde_json::from_str(&normalized).unwrap();
+
+        assert_eq!(parsed["code"], "Сообщить(\"ok\");");
     }
 }
