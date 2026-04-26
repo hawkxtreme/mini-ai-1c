@@ -1,11 +1,23 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { PanelRight, ChevronDown, ChevronRight, BrainCircuit, Maximize2, Minimize2, X as CloseIcon, GitCompare } from 'lucide-react';
+import { PanelRight, ChevronRight, BrainCircuit, Maximize2, X as CloseIcon, GitCompare, Copy, Check } from 'lucide-react';
 import { BslEditor } from './ui/BslEditor';
 import { BslDiffEditor } from './ui/BslDiffEditor';
 import { normalizeBslIndent } from '../utils/diffViewer';
-import { useState, useMemo, memo } from 'react';
+import { useState, useMemo, memo, useCallback } from 'react';
+
+function useCopy(text: string) {
+    const [copied, setCopied] = useState(false);
+    const copy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch { /* ignore */ }
+    }, [text]);
+    return { copied, copy };
+}
 
 interface MarkdownRendererProps {
     content: string;
@@ -186,6 +198,8 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
         const [isFullscreen, setIsFullscreen] = useState(false);
         const [showDiff, setShowDiff] = useState(false); // Default to Code View to avoid "Red Wall" confusion
         const hasDiff = originalCode && originalCode.trim().length > 0;
+        // eslint-disable-next-line react-hooks/rules-of-hooks
+        const { copied: bslCopied, copy: copyBsl } = useCopy(codeString);
 
         return (
             <>
@@ -214,6 +228,14 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                                     <span>{showDiff ? 'Diff' : 'Code'}</span>
                                 </button>
                             )}
+                            <button
+                                onClick={copyBsl}
+                                className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
+                                title={bslCopied ? 'Скопировано!' : 'Копировать код'}
+                            >
+                                {bslCopied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                <span>{bslCopied ? 'OK' : 'Copy'}</span>
+                            </button>
                             <button
                                 onClick={() => setIsFullscreen(true)}
                                 className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
@@ -300,12 +322,23 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
         );
     }
 
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const { copied: codeCopied, copy: copyCode } = useCopy(codeString);
+
     return (
         <div className="relative my-2 group w-full">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-800 rounded-t-lg border-x border-t border-[#27272a]">
                 <div className="flex items-center gap-2">
                     <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{language || 'code'}</span>
                 </div>
+                <button
+                    onClick={copyCode}
+                    className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-zinc-400 hover:text-zinc-200 transition-all hover:bg-zinc-700/50 rounded-md"
+                    title={codeCopied ? 'Скопировано!' : 'Копировать код'}
+                >
+                    {codeCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{codeCopied ? 'Скопировано' : 'Копировать'}</span>
+                </button>
             </div>
             <pre className="bg-[#18181b] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300">
                 <code className={`text-[13px] font-mono leading-relaxed ${className || ''}`} {...props}>
