@@ -729,8 +729,24 @@ pub async fn stream_codex_completion(
                                 call_id
                             );
                             pending_calls
-                                .entry(call_id)
-                                .or_insert((name, String::new()));
+                                .entry(call_id.clone())
+                                .or_insert((name.clone(), String::new()));
+
+                            // Announce the tool call as soon as Codex adds the function_call item.
+                            // Some responses skip incremental argument deltas, so waiting for the
+                            // first delta loses MCP call history in the UI.
+                            if !announced_calls.contains(call_id.as_str()) {
+                                let call_idx = announced_calls.len();
+                                announced_calls.insert(call_id.clone());
+                                let _ = app_handle.emit(
+                                    "tool-call-started",
+                                    serde_json::json!({
+                                        "index": call_idx,
+                                        "id": call_id,
+                                        "name": name
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
@@ -738,24 +754,8 @@ pub async fn stream_codex_completion(
                 "response.function_call_arguments.delta" => {
                     if let Some(call_id) = &evt.call_id {
                         if let Some(delta) = &evt.delta {
-                            let is_new = !announced_calls.contains(call_id.as_str());
-                            if let Some((name, args)) = pending_calls.get_mut(call_id) {
+                            if let Some((_, args)) = pending_calls.get_mut(call_id) {
                                 args.push_str(delta);
-                                // Announce tool call start on first arg delta
-                                if is_new {
-                                    let call_idx = accumulated_tool_calls.len();
-                                    let emit_name = name.clone();
-                                    let emit_id = call_id.clone();
-                                    announced_calls.insert(emit_id.clone());
-                                    let _ = app_handle.emit(
-                                        "tool-call-started",
-                                        serde_json::json!({
-                                            "index": call_idx,
-                                            "id": emit_id,
-                                            "name": emit_name
-                                        }),
-                                    );
-                                }
                             }
                         }
                     }

@@ -136,6 +136,22 @@ async fn fetch_minimax_models(base_url: &str, api_key: &str) -> Result<Vec<Model
 pub fn static_codex_models() -> Vec<Model> {
     vec![
         Model {
+            id: "gpt-5.5".into(),
+            name: "GPT-5.5".into(),
+            context_window: 272_000,
+            description: Some("Most capable frontier agentic coding model.".into()),
+            cost_in: None,
+            cost_out: None,
+        },
+        Model {
+            id: "gpt-5.5-mini".into(),
+            name: "GPT-5.5 Mini".into(),
+            context_window: 272_000,
+            description: Some("Smaller, faster GPT-5.5 variant for everyday coding tasks.".into()),
+            cost_in: None,
+            cost_out: None,
+        },
+        Model {
             id: "gpt-5.4".into(),
             name: "GPT-5.4".into(),
             context_window: 272_000,
