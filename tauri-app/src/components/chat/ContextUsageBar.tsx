@@ -13,6 +13,8 @@ interface ContextUsageBarProps {
     onNewChat?: () => void;
     /** Сбрасывать индикатор при смене профиля */
     profileId?: string;
+    /** Сбрасывать индикатор при смене чата */
+    chatId?: string | null;
 }
 
 function formatTokens(n: number): string {
@@ -25,13 +27,13 @@ function formatWindow(n: number): string {
     return String(n);
 }
 
-export function ContextUsageBar({ onNewChat, profileId }: ContextUsageBarProps) {
+export function ContextUsageBar({ onNewChat, profileId, chatId }: ContextUsageBarProps) {
     const [usage, setUsage] = useState<ContextUsagePayload | null>(null);
 
-    // Сброс при смене профиля
+    // Сброс при смене профиля или чата
     useEffect(() => {
         setUsage(null);
-    }, [profileId]);
+    }, [profileId, chatId]);
 
     // Подписка на Tauri event
     useEffect(() => {
