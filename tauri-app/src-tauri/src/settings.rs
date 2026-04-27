@@ -161,6 +161,9 @@ pub struct ConfiguratorSettings {
         skip_serializing_if = "is_default_configurator_window_title_pattern"
     )]
     pub window_title_pattern: String,
+    /// Extra user-defined window title patterns (in addition to the default ones)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_window_title_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_window_hwnd: Option<isize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +187,7 @@ impl Default for ConfiguratorSettings {
     fn default() -> Self {
         Self {
             window_title_pattern: default_configurator_window_title_pattern(),
+            extra_window_title_patterns: Vec::new(),
             selected_window_hwnd: None,
             selected_window_pid: None,
             selected_window_title: None,

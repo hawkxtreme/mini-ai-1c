@@ -112,6 +112,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             const currentSettings = settings || {
                 configurator: {
                     window_title_pattern: "",
+                    extra_window_title_patterns: [],
                     selected_window_hwnd: null,
                     selected_window_pid: null,
                     selected_window_title: null,

@@ -128,6 +128,7 @@ export interface SlashCommand {
 export interface AppSettings {
     configurator: {
         window_title_pattern: string;
+        extra_window_title_patterns: string[];
         selected_window_hwnd: number | null;
         selected_window_pid: number | null;
         selected_window_title: string | null;

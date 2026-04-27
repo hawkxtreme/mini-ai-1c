@@ -43,7 +43,9 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
     const { settings, updateSettings } = useSettings();
     const [detectedWindows, setDetectedWindows] = useState<WindowInfo[]>([]);
 
-    const pattern = settings?.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise';
+    const base = settings?.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise';
+    const extras = settings?.configurator.extra_window_title_patterns ?? [];
+    const pattern = extras.length > 0 ? `${base}|${extras.join('|')}` : base;
     const currentBinding = useMemo<ConfiguratorWindowBinding>(() => ({
         selected_window_hwnd: settings?.configurator.selected_window_hwnd ?? null,
         selected_window_pid: settings?.configurator.selected_window_pid ?? null,
@@ -128,6 +130,10 @@ export function ConfiguratorProvider({ children }: { children: React.ReactNode }
             const resolution = resolveConfiguratorBinding(currentBinding, windows);
             if (!areConfiguratorBindingsEqual(currentBinding, resolution.nextBinding)) {
                 await persistBinding(resolution.nextBinding);
+            }
+            // Auto-select the single available window when nothing is bound
+            if (resolution.status === 'unselected' && windows.length === 1) {
+                await persistBinding(bindConfiguratorWindow(windows[0]));
             }
         } catch (e) {
             console.error("Failed to find windows", e);

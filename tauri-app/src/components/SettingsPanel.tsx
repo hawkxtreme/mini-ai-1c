@@ -114,9 +114,10 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
     const refreshWindows = async () => {
         if (!settings) return;
-        const windows = await invoke<WindowInfo[]>('find_configurator_windows_cmd', {
-            pattern: settings.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise'
-        });
+        const base = settings.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise';
+        const extras = settings.configurator.extra_window_title_patterns ?? [];
+        const pattern = extras.length > 0 ? `${base}|${extras.join('|')}` : base;
+        const windows = await invoke<WindowInfo[]>('find_configurator_windows_cmd', { pattern });
         setDetectedWindows(windows);
     };
 
@@ -128,7 +129,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
             interval = setInterval(refreshWindows, 3000);
         }
         return () => interval && clearInterval(interval);
-    }, [tab, isOpen, settings?.configurator.window_title_pattern]);
+    }, [tab, isOpen, settings?.configurator.window_title_pattern, settings?.configurator.extra_window_title_patterns]);
 
     useEffect(() => {
         let interval: any;
