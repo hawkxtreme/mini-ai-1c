@@ -22,6 +22,7 @@ import type {
   QuickActionWriteIntent,
 } from '../types/quickActionSessions';
 import { applyDiffWithDiagnostics } from '../utils/diffViewer';
+import { decodeHtmlEntities } from '../utils/htmlEntities';
 import {
   resolveCaptureFromEditorContext,
   shouldSyncQuickActionToClickTarget,
@@ -502,13 +503,14 @@ async function elaborateDirectlyToConfigurator(args: {
       setTimeout(() => reject(new Error('Таймаут: ИИ не ответил за 90 секунд. Попробуйте ещё раз.')), 90_000)
     ),
   ]);
+  const safeResult = decodeHtmlEntities(rawResult);
   if (isStaleRequest()) return;
 
   // Determine if AI returned SEARCH/REPLACE diff
-  const hasDiff = /^<{5,9}\s*SEARCH>?/m.test(rawResult);
+  const hasDiff = /^<{5,9}\s*SEARCH>?/m.test(safeResult);
 
   if (hasDiff) {
-    const diffResult = applyDiffWithDiagnostics(capture.promptCode, rawResult);
+    const diffResult = applyDiffWithDiagnostics(capture.promptCode, safeResult);
 
     if (diffResult.failedCount > 0) {
       // Diff failed → show in overlay for manual review
@@ -517,8 +519,8 @@ async function elaborateDirectlyToConfigurator(args: {
           phase: 'result',
           action: 'elaborate',
           resultType: 'diff' as ResultType,
-          preview: buildDiffFallbackPreview(rawResult, diffResult.failedCount, diffResult.fuzzyCount),
-          diffContent: rawResult,
+          preview: buildDiffFallbackPreview(safeResult, diffResult.failedCount, diffResult.fuzzyCount),
+          diffContent: safeResult,
           confHwnd,
           originalCode: capture.originalCode,
           useSelectAll: capture.useSelectAll,
@@ -561,7 +563,7 @@ async function elaborateDirectlyToConfigurator(args: {
   }
 
   // No SEARCH/REPLACE — AI returned plain code
-  const cleanResult = rawResult.trim();
+  const cleanResult = safeResult.trim();
 
   if (!cleanResult) {
     await invoke('update_overlay_state', {
@@ -802,6 +804,7 @@ export function useQuickActions() {
 
         const prompt = buildPrompt(action, capture.promptCode, task);
         const rawResult = await invoke<string>('quick_chat_invoke', { prompt });
+        const safeResult = decodeHtmlEntities(rawResult);
         if (isStaleRequest()) return;
 
         const { changed: contextChanged, freshCapture } = await refreshQuickActionContext(
@@ -819,7 +822,7 @@ export function useQuickActions() {
         const resultType = resultTypeFor(action);
         let resultCode: string | undefined;
         let diffContent: string | undefined;
-        let previewText = rawResult;
+        let previewText = safeResult;
         let writeIntent: WriteIntent | undefined;
         let applySupport: ConfiguratorApplySupport | undefined;
 
@@ -829,16 +832,16 @@ export function useQuickActions() {
               'Описание можно добавлять только к текущей процедуре или функции. Повторите действие внутри нужного метода.',
             );
           }
-          const commentBlock = extractCommentBlock(rawResult);
+          const commentBlock = extractCommentBlock(safeResult);
           resultCode = commentBlock;
           writeIntent = 'insert_before_current_method';
           previewText = commentBlock;
         } else if (action === 'review') {
-          resultCode = rawResult;
-          previewText = rawResult;
+          resultCode = safeResult;
+          previewText = safeResult;
         } else {
-          diffContent = rawResult;
-          const diffResult = applyDiffWithDiagnostics(effectiveCapture.promptCode, rawResult);
+          diffContent = safeResult;
+          const diffResult = applyDiffWithDiagnostics(effectiveCapture.promptCode, safeResult);
           if (diffResult.failedCount === 0 && diffResult.fuzzyCount === 0) {
             resultCode = diffResult.code;
             writeIntent = effectiveCapture.scope === 'selection'
@@ -846,9 +849,9 @@ export function useQuickActions() {
               : effectiveCapture.scope === 'current_method'
                 ? 'replace_current_method'
                 : 'replace_module';
-            previewText = rawResult;
+            previewText = safeResult;
           } else {
-            previewText = buildDiffFallbackPreview(rawResult, diffResult.failedCount, diffResult.fuzzyCount);
+            previewText = buildDiffFallbackPreview(safeResult, diffResult.failedCount, diffResult.fuzzyCount);
           }
         }
 

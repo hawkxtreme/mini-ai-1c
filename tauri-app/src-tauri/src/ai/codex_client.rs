@@ -75,6 +75,51 @@ fn normalize_codex_tool_arguments(arguments: &str) -> String {
     }
 }
 
+fn split_incomplete_html_entity_tail(s: &str) -> usize {
+    let Some(amp_idx) = s.rfind('&') else {
+        return s.len();
+    };
+
+    if s[amp_idx..].contains(';') {
+        return s.len();
+    }
+
+    let tail = &s[amp_idx..];
+    if tail.len() > 12 {
+        return s.len();
+    }
+
+    let is_entity_prefix = tail
+        .chars()
+        .enumerate()
+        .all(|(idx, ch)| idx == 0 || ch.is_ascii_alphanumeric() || ch == '#');
+
+    if is_entity_prefix {
+        amp_idx
+    } else {
+        s.len()
+    }
+}
+
+fn drain_decoded_html_stream(buffer: &mut String, final_flush: bool) -> String {
+    if buffer.is_empty() {
+        return String::new();
+    }
+
+    let drain_until = if final_flush {
+        buffer.len()
+    } else {
+        split_incomplete_html_entity_tail(buffer)
+    };
+
+    if drain_until == 0 {
+        return String::new();
+    }
+
+    let chunk = buffer.drain(..drain_until).collect::<String>();
+    unescape_html(&chunk)
+}
+
 // ─── Request types ──────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -522,7 +567,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
                 "response.output_text.delta" => {
                     if let Some(delta) = &evt.delta {
                         if !delta.is_empty() {
-                            full_content.push_str(&unescape_html(delta));
+                            full_content.push_str(delta);
                         }
                     }
                 }
@@ -539,7 +584,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
         }
     }
 
-    Ok(full_content)
+    Ok(unescape_html(&full_content))
 }
 
 // ─── Main streaming function ──────────────────────────────────────────────
@@ -681,6 +726,7 @@ pub async fn stream_codex_completion(
     let mut stream = response.bytes_stream();
     let mut byte_buffer = Vec::new();
     let mut full_content = String::new();
+    let mut text_entity_buffer = String::new();
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
 
     // Tracking state for streaming tool calls
@@ -755,9 +801,12 @@ pub async fn stream_codex_completion(
                 "response.output_text.delta" => {
                     if let Some(delta) = &evt.delta {
                         if !delta.is_empty() {
-                            let clean = unescape_html(delta);
-                            full_content.push_str(&clean);
-                            let _ = app_handle.emit("chat-chunk", clean);
+                            text_entity_buffer.push_str(delta);
+                            let clean = drain_decoded_html_stream(&mut text_entity_buffer, false);
+                            if !clean.is_empty() {
+                                full_content.push_str(&clean);
+                                let _ = app_handle.emit("chat-chunk", clean);
+                            }
                         }
                     }
                 }
@@ -871,6 +920,12 @@ pub async fn stream_codex_completion(
                 }
 
                 "response.completed" => {
+                    let clean = drain_decoded_html_stream(&mut text_entity_buffer, true);
+                    if !clean.is_empty() {
+                        full_content.push_str(&clean);
+                        let _ = app_handle.emit("chat-chunk", clean);
+                    }
+
                     // Flush any remaining pending calls (shouldn't normally happen)
                     for (call_id, (name, args)) in pending_calls.drain() {
                         let arguments = if args.is_empty() {
@@ -908,6 +963,12 @@ pub async fn stream_codex_completion(
         }
     }
 
+    let clean = drain_decoded_html_stream(&mut text_entity_buffer, true);
+    if !clean.is_empty() {
+        full_content.push_str(&clean);
+        let _ = app_handle.emit("chat-chunk", clean);
+    }
+
     crate::app_log!(
         "[Codex] Stream complete: content_chars={} tool_calls={}",
         full_content.len(),
@@ -934,7 +995,7 @@ pub async fn stream_codex_completion(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_codex_request, build_headers, messages_to_codex_payload,
+        build_codex_request, build_headers, drain_decoded_html_stream, messages_to_codex_payload,
         normalize_codex_tool_arguments, resolve_codex_model, resolve_codex_stream_timeout_secs,
         CodexInputItem, DEFAULT_CODEX_INSTRUCTIONS,
     };
@@ -1130,6 +1191,22 @@ mod tests {
         let parsed: Value = serde_json::from_str(&normalized).unwrap();
 
         assert_eq!(parsed["code"], "Сообщить(\"ok\");");
+    }
+
+    #[test]
+    fn drain_decoded_html_stream_decodes_entities_split_across_chunks() {
+        let mut buffer = String::new();
+        let mut decoded = String::new();
+
+        buffer.push_str("Если A &l");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, false));
+        buffer.push_str("t;= B И C &g");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, false));
+        buffer.push_str("t; D");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, true));
+
+        assert_eq!(decoded, "Если A <= B И C > D");
+        assert!(buffer.is_empty());
     }
 
     #[test]
