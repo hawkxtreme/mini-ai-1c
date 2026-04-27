@@ -105,6 +105,8 @@ export function BslDiffEditor({
                     renderLineHighlight: 'none',
                     occurrencesHighlight: 'off',
                     selectionHighlight: false,
+                    matchBrackets: 'never',
+                    unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false },
                     folding: true,
                     renderSideBySide: true,
                     enableSplitViewResizing: true,

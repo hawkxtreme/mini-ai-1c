@@ -237,3 +237,18 @@ html.light [class*="bg-blue"] .text-white,
 html.light [class*="bg-red"] .text-white {
     color: #ffffff !important;
 }
+
+/* Disable Monaco word/occurrence highlight decorations in all editors */
+.monaco-editor .wordHighlight,
+.monaco-editor .wordHighlightStrong,
+.monaco-editor .wordHighlightText,
+.monaco-editor .selectionHighlight {
+    background-color: transparent !important;
+    border: none !important;
+    outline: none !important;
+}
+/* Also override focused state */
+.monaco-editor .focused .selectionHighlight {
+    background-color: transparent !important;
+    border: none !important;
+}
