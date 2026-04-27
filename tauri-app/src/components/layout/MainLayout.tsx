@@ -38,7 +38,7 @@ export function MainLayout() {
     const { settings } = useSettings();
     const { status: bslStatus, analyzeCode } = useBsl();
     const { clearChat, exportChat, isLoading } = useChat();
-    const { pasteCode, checkSelection } = useConfigurator();
+    const { pasteCode, checkSelection, getCode } = useConfigurator();
 
     const [viewMode, setViewMode] = useState<'assistant' | 'split' | 'code'>('assistant');
     const [showSettings, setShowSettings] = useState(false);
@@ -258,6 +258,22 @@ export function MainLayout() {
                 : (!lastConfiguratorCode || lastConfiguratorCode.trim().length === 0);
             const originalContent = writeSession?.originalCode || lastConfiguratorCode || undefined;
 
+            // Проверка конфликта на фронтенде до вставки — читаем текущее содержимое
+            // через тот же путь (Ctrl+C), что использовался при захвате
+            if (originalContent) {
+                try {
+                    const currentContent = await getCode(useSelectAll);
+                    if (currentContent.trim() !== originalContent.trim()) {
+                        const isActive = await checkSelection();
+                        setSelectionActive(isActive);
+                        setShowConflictDialog(true);
+                        return;
+                    }
+                } catch {
+                    // не удалось прочитать — продолжаем без проверки
+                }
+            }
+
             await pasteCode(
                 modifiedCode,
                 useSelectAll,
@@ -278,18 +294,12 @@ export function MainLayout() {
             setActiveQuickActionSession(null);
         } catch (e: any) {
             const errorMsg = typeof e === 'string' ? e : e?.message || String(e);
-            if (errorMsg.includes('CONFLICT')) {
-                const isActive = await checkSelection();
-                setSelectionActive(isActive);
-                setShowConflictDialog(true);
-            } else {
-                console.error('Apply failed', e);
-                alert('Ошибка применения: ' + errorMsg);
-            }
+            console.error('Apply failed', e);
+            alert('Ошибка применения: ' + errorMsg);
         } finally {
             setIsApplying(false);
         }
-    }, [activeQuickActionSession, applySucceeded, checkSelection, lastConfiguratorCode, modifiedCode, pasteCode]);
+    }, [activeQuickActionSession, applySucceeded, checkSelection, getCode, lastConfiguratorCode, modifiedCode, pasteCode]);
 
     const handleConflictApplyToAll = useCallback(async () => {
         setShowConflictDialog(false);
