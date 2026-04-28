@@ -88,10 +88,7 @@ fn build_intercept_plan(ctrl_held: bool, bridge_enabled: bool, rdp_mode: bool) -
     }
 }
 
-fn next_rbuttonup_suppression_state(
-    suppression_active: bool,
-    plan: Option<InterceptPlan>,
-) -> bool {
+fn next_rbuttonup_suppression_state(suppression_active: bool, plan: Option<InterceptPlan>) -> bool {
     match plan {
         Some(plan) if plan.suppress_mouse_down => plan.suppress_mouse_up,
         _ => {
@@ -383,10 +380,7 @@ mod tests {
     fn stale_rbuttonup_suppression_is_cleared_by_regular_next_click() {
         let regular_click_plan = Some(build_intercept_plan(false, true, false));
 
-        assert!(!next_rbuttonup_suppression_state(
-            true,
-            regular_click_plan
-        ));
+        assert!(!next_rbuttonup_suppression_state(true, regular_click_plan));
     }
 
     #[test]

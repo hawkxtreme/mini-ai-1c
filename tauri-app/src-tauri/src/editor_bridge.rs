@@ -501,7 +501,11 @@ fn resolve_bridge_launch_mode(env_value: Option<&str>) -> BridgeLaunchMode {
 
 #[cfg(windows)]
 fn configured_bridge_launch_mode() -> BridgeLaunchMode {
-    resolve_bridge_launch_mode(std::env::var("MINI_AI_EDITOR_BRIDGE_LAUNCH").ok().as_deref())
+    resolve_bridge_launch_mode(
+        std::env::var("MINI_AI_EDITOR_BRIDGE_LAUNCH")
+            .ok()
+            .as_deref(),
+    )
 }
 
 fn spawn_bridge_from_config(config: &BridgeLaunchConfig) -> Result<BridgeProc, String> {
@@ -950,9 +954,9 @@ pub fn diagnose_editor(hwnd: isize) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::is_launchable_bridge_exe;
     #[cfg(windows)]
     use super::{resolve_bridge_launch_mode, BridgeLaunchMode};
-    use super::is_launchable_bridge_exe;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1019,7 +1023,13 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn bridge_launch_mode_accepts_hidden_child_override() {
-        assert_eq!(resolve_bridge_launch_mode(Some("child")), BridgeLaunchMode::Child);
-        assert_eq!(resolve_bridge_launch_mode(Some("stdio")), BridgeLaunchMode::Child);
+        assert_eq!(
+            resolve_bridge_launch_mode(Some("child")),
+            BridgeLaunchMode::Child
+        );
+        assert_eq!(
+            resolve_bridge_launch_mode(Some("stdio")),
+            BridgeLaunchMode::Child
+        );
     }
 }

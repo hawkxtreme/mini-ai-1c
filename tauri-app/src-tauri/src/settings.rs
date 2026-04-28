@@ -732,6 +732,7 @@ mod tests {
         let mut settings = AppSettings {
             configurator: ConfiguratorSettings {
                 window_title_pattern: "Конфигуратор".to_string(),
+                extra_window_title_patterns: Vec::new(),
                 selected_window_hwnd: Some(777),
                 selected_window_pid: Some(888),
                 selected_window_title: Some("Конфигуратор - DemoBase".to_string()),

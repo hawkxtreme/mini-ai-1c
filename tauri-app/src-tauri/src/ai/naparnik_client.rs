@@ -11,10 +11,16 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Emitter;
 
-use super::models::ApiMessage;
+use super::models::{ApiMessage, ToolInfo};
+use super::prompts::get_system_prompt;
+use super::tools::get_available_tools;
 use crate::llm_profiles::get_active_profile;
+use crate::settings::{load_settings, McpServerConfig, McpTransport};
 
 const BASE_URL: &str = "https://code.1c.ai";
+const BUILTIN_NAPARNIK_SERVER_ID: &str = "builtin-1c-naparnik";
+const NAPARNIK_MCP_BRIDGE_TOOL: &str = "Read";
+const MAX_NAPARNIK_TOOL_RESULT_CHARS: usize = 8000;
 
 // ─── Session State ────────────────────────────────────────────────────────────
 
@@ -145,6 +151,219 @@ fn build_headers(token: &str) -> reqwest::header::HeaderMap {
     h
 }
 
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+fn filter_naparnik_tools(tools_info: &[ToolInfo]) -> Vec<ToolInfo> {
+    tools_info
+        .iter()
+        .filter(|info| info.server_id != BUILTIN_NAPARNIK_SERVER_ID)
+        .cloned()
+        .collect()
+}
+
+fn build_naparnik_tools(tools_info: &[ToolInfo]) -> Vec<Value> {
+    if tools_info.is_empty() {
+        return Vec::new();
+    }
+
+    let tool_names: Vec<Value> = tools_info
+        .iter()
+        .map(|info| Value::String(info.tool.function.name.clone()))
+        .collect();
+
+    vec![serde_json::json!({
+        "name": NAPARNIK_MCP_BRIDGE_TOOL,
+        "description": "Mini AI 1C MCP bridge. Execute one of the local MCP tools listed in the system instructions. Pass the exact MCP tool name in `tool_name` and the original tool arguments in `arguments`.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Exact local MCP tool name to execute.",
+                    "enum": tool_names
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "JSON arguments for the selected MCP tool.",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["tool_name"]
+        },
+    })]
+}
+
+fn build_local_tool_routes(tools_info: &[ToolInfo]) -> HashMap<String, String> {
+    tools_info
+        .iter()
+        .map(|info| (info.tool.function.name.clone(), info.server_id.clone()))
+        .collect()
+}
+
+fn build_naparnik_instruction(
+    system_prompt: &str,
+    user_instruction: &str,
+    tools_info: &[ToolInfo],
+) -> String {
+    let bridge_instruction = if tools_info.is_empty() {
+        String::new()
+    } else {
+        let tool_names = tools_info
+            .iter()
+            .map(|info| format!("`{}`", info.tool.function.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"
+
+[NAPARNIK MCP BRIDGE]
+Naparnik exposes local Mini AI 1C MCP tools through a single client-side tool named `{bridge_tool}`.
+Do NOT call MCP tool names directly as native Naparnik tools: direct names like `search_1c_help` will be reported by Naparnik as unknown even when the local MCP server is available.
+To use any MCP tool, call `{bridge_tool}` with this JSON shape:
+{{"tool_name":"exact_mcp_tool_name","arguments":{{...original MCP arguments...}}}}
+Available exact MCP tool names: {tool_names}
+If a `{bridge_tool}` result contains "Mini AI 1C MCP tool `<name>` result", treat that MCP tool call as successful. Never conclude that a local MCP server is unavailable only because its exact MCP tool name is not a native Naparnik tool.
+[/NAPARNIK MCP BRIDGE]"#,
+            bridge_tool = NAPARNIK_MCP_BRIDGE_TOOL,
+            tool_names = tool_names
+        )
+    };
+
+    format!(
+        "[SYSTEM INSTRUCTIONS FROM MINI AI 1C]\n{}{}\n[/SYSTEM INSTRUCTIONS]\n\n[USER REQUEST]\n{}\n[/USER REQUEST]",
+        system_prompt, bridge_instruction, user_instruction
+    )
+}
+
+fn all_mcp_configs() -> Vec<McpServerConfig> {
+    let settings = load_settings();
+    let mut configs = settings.mcp_servers.clone();
+
+    if !configs.iter().any(|c| c.id == "bsl-ls") {
+        configs.push(McpServerConfig {
+            id: "bsl-ls".to_string(),
+            name: "BSL Language Server".to_string(),
+            enabled: settings.bsl_server.enabled,
+            transport: McpTransport::Internal,
+            ..Default::default()
+        });
+    }
+
+    configs
+}
+
+fn truncate_tool_result(result: String) -> String {
+    if result.len() <= MAX_NAPARNIK_TOOL_RESULT_CHARS {
+        return result;
+    }
+
+    let boundary = (0..=MAX_NAPARNIK_TOOL_RESULT_CHARS)
+        .rev()
+        .find(|idx| result.is_char_boundary(*idx))
+        .unwrap_or(MAX_NAPARNIK_TOOL_RESULT_CHARS);
+    format!(
+        "{}\n\n[Result truncated to {} chars]",
+        &result[..boundary],
+        MAX_NAPARNIK_TOOL_RESULT_CHARS
+    )
+}
+
+fn tool_call_name(tool_call: &Value) -> Option<String> {
+    tool_call
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|v| v.as_str())
+        .or_else(|| tool_call.get("name").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn tool_call_id(tool_call: &Value) -> String {
+    tool_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn tool_call_arguments(tool_call: &Value) -> Value {
+    let arguments = tool_call
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .or_else(|| tool_call.get("arguments"));
+    let Some(arguments) = arguments else {
+        return serde_json::json!({});
+    };
+
+    normalize_tool_arguments_value(arguments)
+}
+
+fn normalize_tool_arguments_value(arguments: &Value) -> Value {
+    match arguments {
+        Value::String(raw) => serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({})),
+        Value::Object(_) => arguments.clone(),
+        _ => serde_json::json!({}),
+    }
+}
+
+fn bridge_tool_request(arguments: &Value) -> Option<(String, Value)> {
+    let obj = arguments.as_object()?;
+    let tool_name = obj
+        .get("tool_name")
+        .or_else(|| obj.get("name"))
+        .or_else(|| obj.get("tool"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let tool_arguments = obj
+        .get("arguments")
+        .or_else(|| obj.get("args"))
+        .map(normalize_tool_arguments_value)
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some((tool_name, tool_arguments))
+}
+
+fn tool_call_display_name(tool_call: &Value) -> String {
+    let name = tool_call_name(tool_call).unwrap_or_else(|| "?".to_string());
+    if name == NAPARNIK_MCP_BRIDGE_TOOL {
+        if let Some((local_name, _)) = bridge_tool_request(&tool_call_arguments(tool_call)) {
+            return local_name;
+        }
+    }
+
+    name
+}
+
+async fn execute_local_mcp_tool(
+    tool_name: &str,
+    arguments: Value,
+    local_tool_routes: &HashMap<String, String>,
+) -> Result<String, String> {
+    let server_id = local_tool_routes
+        .get(tool_name)
+        .ok_or_else(|| format!("Tool '{}' is not a local MCP tool", tool_name))?;
+
+    let config = all_mcp_configs()
+        .into_iter()
+        .find(|config| config.id == *server_id && config.enabled)
+        .ok_or_else(|| format!("MCP server '{}' is not enabled", server_id))?;
+
+    let client = crate::mcp_client::McpClient::new(config.clone()).await?;
+    let tools = client.list_tools().await?;
+    let target_tool = tools
+        .into_iter()
+        .find(|tool| sanitize_tool_name(&tool.name) == tool_name)
+        .ok_or_else(|| format!("Tool '{}' not found on server '{}'", tool_name, server_id))?;
+
+    client
+        .call_tool(&target_tool.name, arguments)
+        .await
+        .map(|result| truncate_tool_result(result.to_string()))
+}
+
 async fn create_conversation(
     client: &reqwest::Client,
     token: &str,
@@ -244,6 +463,14 @@ pub async fn stream_naparnik_completion(
 
     let _ = app_handle.emit("chat-status", "Отправляю запрос Напарнику...");
 
+    let all_tools_info = get_available_tools().await;
+    let naparnik_tools_info = filter_naparnik_tools(&all_tools_info);
+    let naparnik_tools = build_naparnik_tools(&naparnik_tools_info);
+    let local_tool_routes = build_local_tool_routes(&naparnik_tools_info);
+    let system_prompt = get_system_prompt(&naparnik_tools_info, &messages);
+    let instruction =
+        build_naparnik_instruction(&system_prompt, &instruction, &naparnik_tools_info);
+
     let full_content = run_message_loop(
         &client,
         &token,
@@ -251,6 +478,8 @@ pub async fn stream_naparnik_completion(
         &session.conversation_id,
         session.last_message_uuid.clone(),
         instruction,
+        naparnik_tools,
+        local_tool_routes,
         &app_handle,
     )
     .await?;
@@ -277,6 +506,8 @@ async fn run_message_loop(
     conversation_id: &str,
     initial_parent_uuid: Option<String>,
     instruction: String,
+    naparnik_tools: Vec<Value>,
+    local_tool_routes: HashMap<String, String>,
     app_handle: &tauri::AppHandle,
 ) -> Result<String, String> {
     let url = format!(
@@ -289,7 +520,7 @@ async fn run_message_loop(
         role: "user".to_string(),
         content: MessageContent {
             content: MessageContentInner { instruction },
-            tools: vec![],
+            tools: naparnik_tools,
         },
         parent_uuid: initial_parent_uuid,
     })
@@ -337,17 +568,77 @@ async fn run_message_loop(
             .and_then(|s| s.last_message_uuid)
             .unwrap_or_default();
 
-        let items: Vec<Value> = tool_calls_to_send
-            .iter()
-            .map(|tc| {
-                let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-                serde_json::json!({
+        let mut items: Vec<Value> = Vec::with_capacity(tool_calls_to_send.len());
+        for tool_call in &tool_calls_to_send {
+            let tc_id = tool_call_id(tool_call);
+            let name = tool_call_name(tool_call).unwrap_or_default();
+            let raw_arguments = tool_call_arguments(tool_call);
+            let bridge_request = if name == NAPARNIK_MCP_BRIDGE_TOOL {
+                bridge_tool_request(&raw_arguments)
+            } else {
+                None
+            };
+            let local_name = bridge_request
+                .as_ref()
+                .map(|(tool_name, _)| tool_name.clone())
+                .unwrap_or_else(|| name.clone());
+            let local_arguments = bridge_request
+                .map(|(_, arguments)| arguments)
+                .unwrap_or(raw_arguments);
+
+            if local_tool_routes.contains_key(&local_name) {
+                let _ = app_handle.emit(
+                    "chat-status",
+                    format!("Р’С‹Р·РѕРІ MCP РґР»СЏ РќР°РїР°СЂРЅРёРєР°: {}...", name),
+                );
+                let result =
+                    match execute_local_mcp_tool(&local_name, local_arguments, &local_tool_routes)
+                        .await
+                    {
+                        Ok(result) => {
+                            let _ = app_handle.emit(
+                                "tool-call-completed",
+                                serde_json::json!({
+                                    "id": tc_id.clone(),
+                                    "status": "done",
+                                    "name": local_name.clone(),
+                                    "result": result.clone()
+                                }),
+                            );
+                            result
+                        }
+                        Err(error) => {
+                            let result =
+                                format!("Error calling local MCP tool '{}': {}", local_name, error);
+                            let _ = app_handle.emit(
+                                "tool-call-completed",
+                                serde_json::json!({
+                                    "id": tc_id.clone(),
+                                    "status": "error",
+                                    "name": local_name.clone(),
+                                    "result": result.clone()
+                                }),
+                            );
+                            result
+                        }
+                    };
+
+                items.push(serde_json::json!({
+                    "status": "ok",
+                    "tool_call_id": tc_id,
+                    "name": name,
+                    "content": format!("Mini AI 1C MCP tool `{}` result:\n{}", local_name, result)
+                }));
+            } else {
+                items.push(serde_json::json!({
                     "status": "accepted",
                     "tool_call_id": tc_id,
-                    "content": null
-                })
-            })
-            .collect();
+                    "name": name,
+                    "content": null,
+                    "details": { "auto_call": true }
+                }));
+            }
+        }
 
         let tool_result_req = ToolResultRequest {
             role: "tool".to_string(),
@@ -399,7 +690,10 @@ async fn process_sse_stream(
             let event_str = String::from_utf8_lossy(&event_bytes);
 
             for line in event_str.lines() {
-                let data = if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                let data = if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     d
                 } else {
                     continue;
@@ -494,7 +788,7 @@ async fn process_sse_stream(
 
                                 // Emit tool-call-started events for UI display (read-only)
                                 for (idx, tc) in tc_arr.iter().enumerate() {
-                                    let name = tc["function"]["name"].as_str().unwrap_or("?");
+                                    let name = tool_call_display_name(tc);
                                     let _ = app_handle.emit(
                                         "tool-call-started",
                                         serde_json::json!({

@@ -326,7 +326,10 @@ pub async fn diagnose_bsl_ls_cmd() -> Vec<BslDiagnosticItem> {
                     let (item_status, message) = if status.is_success() || code == 404 {
                         ("ok", "Сервер запущен и отвечает.".to_string())
                     } else {
-                        ("warn", format!("Сервер ответил с неожиданным статусом: {}.", code))
+                        (
+                            "warn",
+                            format!("Сервер ответил с неожиданным статусом: {}.", code),
+                        )
                     };
                     report.push(BslDiagnosticItem {
                         status: item_status.to_string(),

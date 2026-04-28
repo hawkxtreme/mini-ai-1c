@@ -367,7 +367,13 @@ fn resolve_codex_model(profile: &crate::llm_profiles::LLMProfile) -> String {
     if profile.model.trim().is_empty()
         || matches!(
             profile.model.as_str(),
-            "codex-cli" | "codex-mini-latest" | "o4-mini" | "o3" | "gpt-5-3" | "gpt-5-3-instant" | "gpt-5.4"
+            "codex-cli"
+                | "codex-mini-latest"
+                | "o4-mini"
+                | "o3"
+                | "gpt-5-3"
+                | "gpt-5-3-instant"
+                | "gpt-5.4"
         )
     {
         "gpt-5.5".to_string()
@@ -642,7 +648,13 @@ pub async fn stream_codex_completion(
     let model = if profile.model.trim().is_empty()
         || matches!(
             profile.model.as_str(),
-            "codex-cli" | "codex-mini-latest" | "o4-mini" | "o3" | "gpt-5-3" | "gpt-5-3-instant" | "gpt-5.4"
+            "codex-cli"
+                | "codex-mini-latest"
+                | "o4-mini"
+                | "o3"
+                | "gpt-5-3"
+                | "gpt-5-3-instant"
+                | "gpt-5.4"
         ) {
         "gpt-5.5".to_string()
     } else {

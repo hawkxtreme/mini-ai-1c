@@ -337,12 +337,10 @@ pub fn get_configurator_apply_support_cmd(
                         requested_action,
                         crate::semantic_bridge::ResolverContext {
                             has_selection: crate::scintilla::sci_has_selection(sci),
-                            has_current_method: crate::scintilla::sci_get_active_fragment_info(
-                                sci,
-                            )
-                            .ok()
-                            .flatten()
-                            .is_some(),
+                            has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
+                                .ok()
+                                .flatten()
+                                .is_some(),
                             prefer_full_module: select_all,
                         },
                     );
@@ -384,29 +382,29 @@ pub fn get_configurator_apply_support_cmd(
 
         if can_use_scintilla_fallback {
             if let Some(sci) = crate::scintilla::find_scintilla_control(parent) {
-            let inferred_intent = crate::semantic_bridge::infer_write_intent(
-                requested_intent,
-                requested_action,
-                crate::semantic_bridge::ResolverContext {
-                    has_selection: crate::scintilla::sci_has_selection(sci),
-                    has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
-                        .ok()
-                        .flatten()
-                        .is_some(),
-                    prefer_full_module: select_all,
-                },
-            );
+                let inferred_intent = crate::semantic_bridge::infer_write_intent(
+                    requested_intent,
+                    requested_action,
+                    crate::semantic_bridge::ResolverContext {
+                        has_selection: crate::scintilla::sci_has_selection(sci),
+                        has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        prefer_full_module: select_all,
+                    },
+                );
 
-            return match inferred_intent {
-                Some(intent) => Ok(direct_apply_available(
-                    "scintilla",
-                    Some(semantic_target_name(intent)),
-                )),
-                None => Ok(direct_apply_unavailable(
-                    "Для этого действия запись в редактор не требуется.".to_string(),
-                    None,
-                )),
-            };
+                return match inferred_intent {
+                    Some(intent) => Ok(direct_apply_available(
+                        "scintilla",
+                        Some(semantic_target_name(intent)),
+                    )),
+                    None => Ok(direct_apply_unavailable(
+                        "Для этого действия запись в редактор не требуется.".to_string(),
+                        None,
+                    )),
+                };
             }
         }
 
@@ -1503,12 +1501,12 @@ pub async fn paste_code_to_configurator<R: Runtime>(
             }
         }
 
-        let scintilla = if should_try_scintilla_fallback(force_legacy_apply, quick_action_apply_policy)
-        {
-            crate::scintilla::find_scintilla_control(parent).map(|sci| sci.0 as isize)
-        } else {
-            None
-        };
+        let scintilla =
+            if should_try_scintilla_fallback(force_legacy_apply, quick_action_apply_policy) {
+                crate::scintilla::find_scintilla_control(parent).map(|sci| sci.0 as isize)
+            } else {
+                None
+            };
 
         if bridge_write_failure.is_none()
             && scintilla.is_none()
@@ -1943,8 +1941,7 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        resolve_quick_action_apply_policy, should_try_scintilla_fallback,
-        QuickActionApplyPolicy,
+        resolve_quick_action_apply_policy, should_try_scintilla_fallback, QuickActionApplyPolicy,
     };
     #[cfg(windows)]
     use crate::editor_bridge::{EditorContext, EditorMethodHints};
