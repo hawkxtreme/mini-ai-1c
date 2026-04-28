@@ -938,7 +938,32 @@ pub async fn stream_chat_completion(
             let ttft = start_gen_time.elapsed().as_millis();
             crate::app_log!("[AI][TIMER] TTFT (Time to First Token): {} ms", ttft);
         }
-        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| {
+            // Log full error chain for diagnostics (decode errors often hide in source())
+            use std::error::Error as _;
+            let mut details = format!("{}", e);
+            let mut src: Option<&(dyn std::error::Error + 'static)> = e.source();
+            while let Some(s) = src {
+                details.push_str(" → ");
+                details.push_str(&s.to_string());
+                src = s.source();
+            }
+            crate::app_log!(force: true, "[AI][STREAM-ERR] provider={:?} model={} details={}", profile.provider, profile.model, details);
+
+            // For Ollama Cloud, server-side glitches (chunked transfer reset, decode errors)
+            // happen on some models (e.g. glm-4.7). Surface a friendlier message.
+            if matches!(profile.provider, LLMProvider::OllamaCloud) {
+                format!(
+                    "Облако Ollama прервало поток для модели '{}' (server-side decode error). \
+                    Это временный сбой на стороне ollama.com — попробуйте повторить запрос или \
+                    выберите другую модель (qwen3-coder:480b, gpt-oss:120b, kimi-k2-thinking). \
+                    Подробности: {}",
+                    profile.model, details
+                )
+            } else {
+                format!("Stream error: {}", details)
+            }
+        })?;
         byte_buffer.extend_from_slice(&chunk);
 
         while let Some(pos) = byte_buffer.windows(2).position(|w| w == b"\n\n") {
