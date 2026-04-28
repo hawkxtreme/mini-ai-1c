@@ -12,6 +12,7 @@ import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
 import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
+import { isOllamaCloudProfile } from '../../utils/profileHelpers';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
 import { ContextChips } from './ContextChips';
@@ -489,7 +490,8 @@ export function ChatArea({
     const NAPARNIK_INFO_MSG = [
         '1С:Напарник подключён',
         'Доступно: поиск по ИТС и документации 1С',
-        'Недоступно: диффы и локальный MCP'
+        'Доступно: системные инструкции Mini AI 1C через адаптер',
+        'Ограничение: прямой diff/apply не поддерживается'
     ].join('\n');
     const prevProfileIdRef = useRef<string | null>(null);
     useEffect(() => {
@@ -1650,12 +1652,12 @@ export function ChatArea({
                                             <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Ваши профили</span>
                                         </div>
                                         <div className="max-h-[250px] overflow-y-auto custom-scrollbar">
-                                            {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik').length > 0 && (
+                                            {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).length > 0 && (
                                                 <>
                                                     <div className="px-3 py-1.5 border-b border-[#27272a] mb-1 sticky top-0 bg-[#09090b] z-10">
                                                         <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Стандартные ассистенты</span>
                                                     </div>
-                                                    {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik').map(p => (
+                                                    {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).map(p => (
                                                         <div
                                                             key={p.id}
                                                             className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-blue-500/10' : 'hover:bg-zinc-800/50'}`}
@@ -1743,6 +1745,29 @@ export function ChatArea({
                                                                 <span className="text-[10px] text-zinc-500 truncate">code.1c.ai</span>
                                                             </div>
                                                             {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-orange-500 flex-shrink-0" />}
+                                                        </div>
+                                                    ))}
+                                                </>
+                                            )}
+                                            {profiles.filter(isOllamaCloudProfile).length > 0 && (
+                                                <>
+                                                    <div className="px-3 py-1.5 border-b border-[#27272a] mt-1 mb-1 sticky top-0 bg-[#09090b] z-10">
+                                                        <span className="text-[10px] font-bold text-cyan-500/70 uppercase tracking-wider">Ollama Cloud</span>
+                                                    </div>
+                                                    {profiles.filter(isOllamaCloudProfile).map(p => (
+                                                        <div
+                                                            key={p.id}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-cyan-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            onClick={() => {
+                                                                setActiveProfile(p.id);
+                                                                setShowModelDropdown(false);
+                                                            }}
+                                                        >
+                                                            <div className="flex flex-col gap-0.5 min-w-0">
+                                                                <span className={`text-[12px] font-semibold truncate ${activeProfileId === p.id ? 'text-cyan-400' : 'text-zinc-200'}`}>{p.name}</span>
+                                                                <span className="text-[10px] text-zinc-500 truncate">{p.model || 'ollama.com'}</span>
+                                                            </div>
+                                                            {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-cyan-500 flex-shrink-0" />}
                                                         </div>
                                                     ))}
                                                 </>

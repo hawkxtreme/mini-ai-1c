@@ -36,7 +36,9 @@ pub fn static_minimax_models() -> Vec<Model> {
             id: "MiniMax-M2.7".into(),
             name: "MiniMax M2.7".into(),
             context_window: 204_800,
-            description: Some("MiniMax flagship model. Context: 204k. Recommended output: 64k.".into()),
+            description: Some(
+                "MiniMax flagship model. Context: 204k. Recommended output: 64k.".into(),
+            ),
             cost_in: Some(0.30),
             cost_out: Some(1.10),
         },
@@ -277,6 +279,7 @@ pub async fn fetch_models_from_api(
             | "Perplexity"
             | "ZAI"
             | "OneCNaparnik"
+            | "OllamaCloud"
     );
 
     if requires_api_key && api_key.trim().is_empty() {
@@ -343,11 +346,12 @@ pub async fn fetch_models_from_api(
         })
         .collect();
 
-    // For Ollama: use native /api/show to get the actual llm.context_length per model.
+    // For Ollama / Ollama Cloud: use native /api/show to get the actual llm.context_length per model.
     // The /v1/models endpoint does not expose this, so all models default to 4096 without this step.
-    if provider_id == "Ollama" {
+    // Both localhost (http://localhost:11434) and ollama.com expose /api/show.
+    if provider_id == "Ollama" || provider_id == "OllamaCloud" {
         let ollama_base = derive_ollama_native_base(trimmed_base);
-        enrich_ollama_context_windows(&client, &ollama_base, &mut models).await;
+        enrich_ollama_context_windows(&client, &ollama_base, api_key, &mut models).await;
     }
 
     // For LM Studio: /v1/models returns no context info. Use native /api/v0/models
@@ -385,9 +389,11 @@ fn parse_num_ctx(parameters: &str) -> Option<u32> {
 
 /// Calls POST /api/show for each model in parallel and updates context_window
 /// from model_info["llm.context_length"].
+/// `api_key` is required for ollama.com (cloud); ignored for local Ollama.
 async fn enrich_ollama_context_windows(
     client: &Client,
     ollama_base: &str,
+    api_key: &str,
     models: &mut Vec<Model>,
 ) {
     let show_url = format!("{}/api/show", ollama_base);
@@ -406,13 +412,20 @@ async fn enrich_ollama_context_windows(
             let url = show_url.clone();
             let name = m.id.clone();
             let client = client.clone();
+            let auth_header = if api_key.is_empty() {
+                None
+            } else {
+                Some(format!("Bearer {}", api_key))
+            };
             async move {
-                let result = client
+                let mut req = client
                     .post(&url)
                     .json(&serde_json::json!({ "name": name }))
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await;
+                    .timeout(std::time::Duration::from_secs(10));
+                if let Some(h) = auth_header {
+                    req = req.header(reqwest::header::AUTHORIZATION, h);
+                }
+                let result = req.send().await;
 
                 match result {
                     Ok(resp) if resp.status().is_success() => {

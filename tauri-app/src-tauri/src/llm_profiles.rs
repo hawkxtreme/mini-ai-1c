@@ -19,6 +19,7 @@ pub enum LLMProvider {
     XAI,
     Perplexity,
     Ollama,
+    OllamaCloud,
     LMStudio,
     ZAI,
     MiniMax,
@@ -147,6 +148,7 @@ impl LLMProfile {
                 LLMProvider::ZAI => "https://api.z.ai/api/coding/paas/v4".to_string(),
                 LLMProvider::MiniMax => "https://api.minimax.io/v1".to_string(),
                 LLMProvider::Ollama => "http://localhost:11434/v1".to_string(),
+                LLMProvider::OllamaCloud => "https://ollama.com/v1".to_string(),
                 LLMProvider::LMStudio => "http://localhost:1234/v1".to_string(),
                 LLMProvider::Custom => String::new(),
                 LLMProvider::QwenCli => "https://chat.qwen.ai/api/v1".to_string(),
@@ -180,6 +182,14 @@ pub fn load_profiles() -> ProfileStore {
                             && (profile.temperature - 0.7).abs() < f32::EPSILON
                         {
                             crate::app_log!(force: true, "[LLM Profiles] Migrating QwenCli profile '{}' temperature from 0.7 to 0.1", profile.name);
+                            profile.temperature = 0.1;
+                            changed = true;
+                        }
+
+                        if matches!(profile.provider, LLMProvider::OllamaCloud)
+                            && (profile.temperature - 0.7).abs() < f32::EPSILON
+                        {
+                            crate::app_log!(force: true, "[LLM Profiles] Migrating OllamaCloud profile '{}' temperature from 0.7 to 0.1", profile.name);
                             profile.temperature = 0.1;
                             changed = true;
                         }

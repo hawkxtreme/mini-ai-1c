@@ -9,6 +9,7 @@ import { CodexAuthModal } from './CodexAuthModal';
 import { CliStatus, CliUsageWindow } from '../../types/settings';
 
 import { LLMProfile, ProfileStore } from '../../contexts/ProfileContext';
+import { isOllamaCloudProfile } from '../../utils/profileHelpers';
 
 interface LLMSettingsProps {
     profiles: ProfileStore;
@@ -27,6 +28,7 @@ const PROVIDERS = [
     { value: 'ZAI', label: 'Z.ai (Zhipu)', defaultModel: 'glm-5', defaultUrl: 'https://api.z.ai/api/coding/paas/v4', type: 'standard' },
     { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001', defaultUrl: 'https://openrouter.ai/api/v1', type: 'standard' },
     { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1', type: 'standard' },
+    { value: 'OllamaCloud', label: 'Ollama Cloud', defaultModel: 'qwen3-coder:480b', defaultUrl: 'https://ollama.com/v1', type: 'ollama-cloud' },
     { value: 'LMStudio', label: 'LM Studio (Local)', defaultModel: '', defaultUrl: 'http://localhost:1234/v1', type: 'standard' },
     { value: 'QwenCli', label: 'Qwen Code (CLI)', defaultModel: 'coder-model', defaultUrl: 'https://portal.qwen.ai/v1', type: 'cli' },
     { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'gpt-5.5', defaultUrl: 'https://chatgpt.com/backend-api/codex', type: 'cli' },
@@ -180,6 +182,26 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                     }).finally(() => {
                         setLoadingModels(false);
                     });
+                } else if (p.provider === 'OllamaCloud' && p.api_key_encrypted) {
+                    // Cloud Ollama: use profile-based fetch so backend decrypts the API key.
+                    // /api/show needs auth on ollama.com, so apiKey: '' would fail.
+                    setLoadingModels(true);
+                    invoke<any[]>('fetch_models_for_profile', { profileId: p.id }).then(res => {
+                        const sorted = sortModels(res);
+                        setModelList(sorted);
+                        const currentModel = sorted.find((m: any) => m.id === p.model);
+                        if (currentModel?.context_window) {
+                            setEditForm(prev => prev?.id === p.id ? ({
+                                ...prev,
+                                max_tokens: currentModel.context_window || prev.max_tokens,
+                                context_window_override: currentModel.context_window
+                            }) : prev);
+                        }
+                    }).catch(e => {
+                        console.error('[LLMSettings] Failed to auto-fetch Ollama Cloud models:', e);
+                    }).finally(() => {
+                        setLoadingModels(false);
+                    });
                 }
             }
         }
@@ -259,7 +281,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             api_key_encrypted: '',
             base_url: provider.defaultUrl,
             max_tokens: 4096,
-            temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli') ? 0.1 : 0.7,
+            temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli' || providerValue === 'OllamaCloud') ? 0.1 : 0.7,
             reasoning_effort: providerValue === 'CodexCli' ? 'medium' : undefined,
         };
         try {
@@ -332,7 +354,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
                         <div className="space-y-1.5">
-                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'CodexCli' && p.provider !== 'OneCNaparnik').map(p => (
+                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'CodexCli' && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).map(p => (
                                 <div
                                     key={p.id}
                                     onClick={() => setEditingId(p.id)}
@@ -433,6 +455,40 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         </div>
                     </div>
 
+                    {/* Ollama Cloud Group */}
+                    <div className="space-y-2">
+                        <div className="px-1 flex items-center gap-2 opacity-50">
+                            <span className="text-[10px] uppercase font-black tracking-widest text-zinc-400">Ollama Cloud</span>
+                            <div className="h-[1px] flex-1 bg-zinc-800"></div>
+                        </div>
+                        <div className="space-y-1.5">
+                            {profiles.profiles.filter(isOllamaCloudProfile).map(p => (
+                                <div
+                                    key={p.id}
+                                    onClick={() => setEditingId(p.id)}
+                                    className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
+                                        ? 'border-cyan-400 bg-cyan-400/10'
+                                        : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
+                                        }`}
+                                >
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
+                                        {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-cyan-400 flex-shrink-0" />}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500 truncate">{p.model || 'ollama.com'}</div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="space-y-1.5 pt-1">
+                            <button
+                                onClick={() => handleCreate('OllamaCloud')}
+                                className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
+                            >
+                                <Plus className="w-3 h-3" /> Добавить Ollama Cloud
+                            </button>
+                        </div>
+                    </div>
+
                 </div>
             </div>
 
@@ -485,6 +541,11 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             <>
                                                 <div className="px-2 py-1.5 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">1С:Напарник</div>
                                                 {PROVIDERS.filter(p => p.type === 'naparnik').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
+                                            </>
+                                        ) : editForm.provider === 'OllamaCloud' ? (
+                                            <>
+                                                <div className="px-2 py-1.5 text-[10px] font-bold text-cyan-500/70 uppercase tracking-wider">Ollama Cloud</div>
+                                                {PROVIDERS.filter(p => p.type === 'ollama-cloud').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
                                             </>
                                         ) : PROVIDERS.find(p => p.value === editForm.provider)?.type === 'cli' ? (
                                             <>
@@ -780,6 +841,29 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             {' '}→ API Keys.
                                             Ключ хранится зашифрованным в системном keychain.
                                         </span>
+                                    </p>
+                                </div>
+                            )}
+
+                            {editForm.provider === 'OllamaCloud' && (
+                                <div className="p-3 bg-cyan-50 dark:bg-cyan-500/5 border border-cyan-300 dark:border-cyan-500/30 rounded-lg space-y-2">
+                                    <p className="text-[11px] text-cyan-900 dark:text-cyan-200 font-medium leading-relaxed flex items-start gap-1.5">
+                                        <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                        <span>
+                                            Облачные модели Ollama (kimi, qwen3-coder, gpt-oss, deepseek и др.).
+                                            Получить API ключ:{' '}
+                                            <button
+                                                type="button"
+                                                onClick={() => openUrl('https://ollama.com/settings/keys')}
+                                                className="text-cyan-700 dark:text-cyan-400 hover:text-cyan-900 dark:hover:text-cyan-300 inline-flex items-center gap-0.5 transition-colors underline underline-offset-2"
+                                            >
+                                                ollama.com/settings/keys <ExternalLink className="w-2.5 h-2.5" />
+                                            </button>.
+                                        </span>
+                                    </p>
+                                    <p className="text-[10px] text-cyan-800 dark:text-cyan-300/80 leading-relaxed">
+                                        Часть моделей (kimi-k2.5/2.6, glm-5/5.1, deepseek-v4-flash/pro) требует платной подписки.
+                                        Бесплатно доступны: gpt-oss:20b/120b, qwen3-coder:480b, qwen3-next:80b, kimi-k2-thinking, glm-4.6 и другие.
                                     </p>
                                 </div>
                             )}

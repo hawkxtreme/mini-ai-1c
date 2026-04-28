@@ -247,6 +247,7 @@ fn provider_requires_api_key(provider: &LLMProvider) -> bool {
             | LLMProvider::Perplexity
             | LLMProvider::ZAI
             | LLMProvider::OneCNaparnik
+            | LLMProvider::OllamaCloud
     )
 }
 
@@ -361,7 +362,7 @@ pub async fn stream_chat_completion(
             let trimmed = raw_url.trim_end_matches('/');
             if matches!(
                 profile.provider,
-                LLMProvider::Ollama | LLMProvider::LMStudio
+                LLMProvider::Ollama | LLMProvider::OllamaCloud | LLMProvider::LMStudio
             ) && !trimmed.ends_with("/v1")
             {
                 format!("{}/v1", trimmed)
@@ -759,6 +760,17 @@ pub async fn stream_chat_completion(
                             .to_string(),
                     );
                 }
+                if matches!(profile.provider, LLMProvider::OllamaCloud)
+                    && status.as_u16() == 403
+                    && error_body.contains("requires a subscription")
+                {
+                    return Err(format!(
+                        "Модель '{}' требует платной подписки Ollama Cloud. \
+                        Оформите подписку на https://ollama.com/upgrade или выберите другую модель в профиле. \
+                        Бесплатно доступны: gpt-oss:20b/120b, qwen3-coder:480b, qwen3-next:80b, kimi-k2-thinking, glm-4.6, minimax-m2 и другие.",
+                        profile.model
+                    ));
+                }
                 return Err(format!("API error {}: {}", status, error_body));
             }
             Err(e) if attempt < max_retries => {
@@ -898,6 +910,10 @@ pub async fn stream_chat_completion(
             300u32
         } else if matches!(profile.provider, LLMProvider::MiniMax) {
             120u32
+        } else if matches!(profile.provider, LLMProvider::OllamaCloud) {
+            // Ollama Cloud hosts thinking-models (kimi-k2-thinking, qwen3.5, glm-5 etc.)
+            // that may stay silent for 60+ seconds before emitting first token.
+            120u32
         } else {
             30u32
         };
@@ -930,7 +946,10 @@ pub async fn stream_chat_completion(
             let event_str = String::from_utf8_lossy(&event_bytes);
 
             for line in event_str.lines() {
-                if let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                if let Some(data) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     if data == "[DONE]" {
                         if !content_search_temp.is_empty() {
                             if is_thinking {
@@ -993,7 +1012,9 @@ pub async fn stream_chat_completion(
                         }
                         // Ensure all accumulated arguments are valid JSON (provider safety).
                         for tc in &mut accumulated_tool_calls {
-                            if serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_err() {
+                            if serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .is_err()
+                            {
                                 crate::app_log!(
                                     "[AI][WARN] tool_call {} has invalid JSON arguments, resetting to {{}}",
                                     tc.id
@@ -1444,7 +1465,7 @@ pub async fn fetch_models(
         let trimmed = raw_url.trim_end_matches('/');
         if matches!(
             profile.provider,
-            LLMProvider::Ollama | LLMProvider::LMStudio
+            LLMProvider::Ollama | LLMProvider::OllamaCloud | LLMProvider::LMStudio
         ) && !trimmed.ends_with("/v1")
             && !trimmed.ends_with("/chat/completions")
         {

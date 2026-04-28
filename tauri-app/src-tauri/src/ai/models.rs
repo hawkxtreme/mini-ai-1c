@@ -89,7 +89,9 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
-    /// Qwen3 native thinking field (returned when enable_thinking=true)
+    /// Thinking field. Qwen3 uses `reasoning_content` (enable_thinking=true).
+    /// Some Ollama Cloud models (gpt-oss, minimax) emit `reasoning` — accepted via alias.
+    #[serde(alias = "reasoning")]
     pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
