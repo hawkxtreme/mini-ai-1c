@@ -334,6 +334,45 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
     // Normalize CRLF → LF
     content = content.replace(/\r\n/g, '\n');
 
+    // MiniMax M2 (и некоторые тюны) внутри <diff> используют схему своего tool-call XML:
+    // <diff><parameter name="search">…</parameter><parameter name="replace">…</parameter></diff>
+    // Конвертируем в каноническую <search>/<replace>, чтобы основной парсер подобрал.
+    content = content.replace(
+        /<parameter\s+name=["']search["']\s*>([\s\S]*?)<\/parameter>/g,
+        '<search>$1</search>'
+    );
+    content = content.replace(
+        /<parameter\s+name=["']replace["']\s*>([\s\S]*?)<\/parameter>/g,
+        '<replace>$1</replace>'
+    );
+
+    // Зачистка хвостов чужого XML tool-call протокола (после конвертации параметров выше):
+    // MiniMax M2 иногда добавляет `</parameter></invoke></minimax:tool_call>` и обрывает
+    // блок без `</replace></diff>`.
+    content = content.replace(
+        /<\/(?:minimax:tool_call|antml:invoke|antml:parameter|antml:function_calls|invoke|parameter)>/g,
+        ''
+    );
+
+    // Восстановление незавершённого хвостового <diff>-блока:
+    // если последний <diff>...<replace> не имеет </replace></diff> (модель
+    // оборвалась посередине стрима) — дописываем закрывающие теги, чтобы
+    // основной regex ниже их подобрал.
+    {
+        const lastDiffOpen = content.lastIndexOf('<diff');
+        if (lastDiffOpen !== -1) {
+            const tail = content.slice(lastDiffOpen);
+            const hasReplaceOpen = /<replace(?:\s+[^>]*)?>/.test(tail);
+            const hasReplaceClose = /<\/replace>/.test(tail);
+            const hasDiffClose = /<\/diff>/.test(tail);
+            if (hasReplaceOpen && !hasReplaceClose) {
+                content = content.replace(/\s*$/, '') + '\n</replace>\n</diff>';
+            } else if (!hasDiffClose && hasReplaceClose) {
+                content = content.replace(/\s*$/, '') + '\n</diff>';
+            }
+        }
+    }
+
     const blocks: DiffBlock[] = [];
     let index = 0;
 
@@ -957,6 +996,8 @@ export function cleanDiffArtifacts(content: string): string {
     cleaned = cleaned.replace(/<search(?:\s+[^>]*)?>[\s\S]*?<\/search>\s*<replace(?:\s+[^>]*)?>[\s\S]*?<\/replace>/g, '');
     cleaned = cleaned.replace(/<search(?:\s+[^>]*)?>[\s\S]*?(?:<\/search>|$)/g, '');
     cleaned = cleaned.replace(/<replace(?:\s+[^>]*)?>[\s\S]*?(?:<\/replace>|$)/g, '');
+    // Чистим утёкшие хвосты XML tool-call протоколов (MiniMax/Anthropic), если попали в текст.
+    cleaned = cleaned.replace(/<\/?(?:minimax:tool_call|antml:invoke|antml:parameter|antml:function_calls)>/g, '');
     return cleaned.trim();
 }
 

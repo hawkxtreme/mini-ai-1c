@@ -553,15 +553,19 @@ pub async fn stream_chat_completion(
         );
     }
 
-    // Local providers (Ollama, LMStudio) have no timeout — large contexts with thinking models
-    // can take several minutes. Cloud APIs keep 120s to detect hanging connections.
+    // Для стриминга НЕ ставим request-wide timeout: иначе он рубит долгие thinking-стримы
+    // (MiniMax M2/Qwen3 могут генерировать 3-5 минут). Зависший коннект ловим через
+    // tokio::time::timeout(stream.next()) ниже (per-chunk, по провайдеру).
+    // Ограничиваем только начальный connect и read-idle, чтобы выявлять мёртвые соединения.
     let is_local = matches!(
         profile.provider,
         LLMProvider::Ollama | LLMProvider::LMStudio
     );
     let mut client_builder = reqwest::Client::builder();
     if !is_local {
-        client_builder = client_builder.timeout(std::time::Duration::from_secs(120));
+        client_builder = client_builder
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(180));
     }
     let client = client_builder
         .build()
