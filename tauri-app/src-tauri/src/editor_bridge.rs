@@ -5,10 +5,13 @@
 //!
 //! Architecture:
 //!   EditorBridge.exe (C#, .NET 8, self-contained single-file — no runtime install required)
-//!     ↕ \\.\pipe\mini-ai-editor-bridge  (JSON-RPC lines)
+//!     ↕ \\.\pipe\mini-ai-editor-bridge-<USERNAME>  (JSON-RPC lines)
 //!   editor_bridge.rs  (Rust, this module)
 //!     ↕ function calls
 //!   commands/configurator.rs  (Tauri commands)
+//!
+//! The pipe name is per-user by default to keep developers on a shared/terminal
+//! server isolated from each other. Override with `MINI_AI_EDITOR_BRIDGE_PIPE`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(windows)]
@@ -30,7 +33,7 @@ use windows::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
-const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\mini-ai-editor-bridge";
+const DEFAULT_PIPE_BASE: &str = "mini-ai-editor-bridge";
 const STARTUP_WAIT_MS: u64 = 700;
 const RETRY_COUNT: u32 = 3;
 const RETRY_DELAY_MS: u64 = 250;
@@ -126,28 +129,53 @@ struct BridgeLaunchConfig {
     fixture_path: Option<String>,
 }
 
-fn pipe_name() -> String {
-    let fallback_name = DEFAULT_PIPE_NAME.to_string();
-    let raw_name = std::env::var("MINI_AI_EDITOR_BRIDGE_PIPE")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| fallback_name.clone());
+fn sanitize_pipe_segment(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
-    if raw_name.starts_with(r"\\.\pipe\") {
-        raw_name
-    } else {
-        format!(r"\\.\pipe\{}", raw_name)
+fn compute_pipe_base_name(env_override: Option<&str>, username: Option<&str>) -> String {
+    if let Some(name) = env_override
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.strip_prefix(r"\\.\pipe\").unwrap_or(v).to_string())
+    {
+        return name;
     }
+
+    match username
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(sanitize_pipe_segment)
+        .filter(|v| !v.is_empty())
+    {
+        Some(user) => format!("{}-{}", DEFAULT_PIPE_BASE, user),
+        None => DEFAULT_PIPE_BASE.to_string(),
+    }
+}
+
+fn resolve_pipe_name() -> String {
+    let env_override = std::env::var("MINI_AI_EDITOR_BRIDGE_PIPE").ok();
+    let username = std::env::var("USERNAME").ok();
+    compute_pipe_base_name(env_override.as_deref(), username.as_deref())
+}
+
+fn pipe_name() -> String {
+    format!(r"\\.\pipe\{}", resolve_pipe_name())
 }
 
 fn bridge_launch_config() -> Result<BridgeLaunchConfig, String> {
     Ok(BridgeLaunchConfig {
         exe: find_exe()?,
-        pipe_name: std::env::var("MINI_AI_EDITOR_BRIDGE_PIPE")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        pipe_name: Some(resolve_pipe_name()),
         fake_mode: std::env::var("MINI_AI_EDITOR_BRIDGE_MODE")
             .ok()
             .map(|value| value.eq_ignore_ascii_case("fake"))
@@ -954,7 +982,7 @@ pub fn diagnose_editor(hwnd: isize) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_launchable_bridge_exe;
+    use super::{compute_pipe_base_name, is_launchable_bridge_exe, sanitize_pipe_segment};
     #[cfg(windows)]
     use super::{resolve_bridge_launch_mode, BridgeLaunchMode};
     use std::fs;
@@ -1030,6 +1058,64 @@ mod tests {
         assert_eq!(
             resolve_bridge_launch_mode(Some("stdio")),
             BridgeLaunchMode::Child
+        );
+    }
+
+    #[test]
+    fn sanitize_pipe_segment_keeps_safe_chars_and_replaces_others() {
+        assert_eq!(sanitize_pipe_segment("ivanov"), "ivanov");
+        assert_eq!(sanitize_pipe_segment("user-1_test"), "user-1_test");
+        assert_eq!(sanitize_pipe_segment("user.name"), "user_name");
+        assert_eq!(sanitize_pipe_segment("dom\\user"), "dom_user");
+        assert_eq!(sanitize_pipe_segment("Ivan Иванов"), "Ivan_______");
+    }
+
+    #[test]
+    fn pipe_base_name_uses_username_suffix_by_default() {
+        assert_eq!(
+            compute_pipe_base_name(None, Some("ivanov")),
+            "mini-ai-editor-bridge-ivanov"
+        );
+    }
+
+    #[test]
+    fn pipe_base_name_sanitizes_username_suffix() {
+        assert_eq!(
+            compute_pipe_base_name(None, Some("dom\\user.x")),
+            "mini-ai-editor-bridge-dom_user_x"
+        );
+    }
+
+    #[test]
+    fn pipe_base_name_falls_back_when_username_missing_or_empty() {
+        assert_eq!(compute_pipe_base_name(None, None), "mini-ai-editor-bridge");
+        assert_eq!(
+            compute_pipe_base_name(None, Some("   ")),
+            "mini-ai-editor-bridge"
+        );
+    }
+
+    #[test]
+    fn pipe_base_name_env_override_wins_over_username() {
+        assert_eq!(
+            compute_pipe_base_name(Some("custom-pipe"), Some("ivanov")),
+            "custom-pipe"
+        );
+    }
+
+    #[test]
+    fn pipe_base_name_strips_full_path_prefix_from_env_override() {
+        assert_eq!(
+            compute_pipe_base_name(Some(r"\\.\pipe\custom-pipe"), Some("ivanov")),
+            "custom-pipe"
+        );
+    }
+
+    #[test]
+    fn pipe_base_name_ignores_blank_env_override() {
+        assert_eq!(
+            compute_pipe_base_name(Some("   "), Some("ivanov")),
+            "mini-ai-editor-bridge-ivanov"
         );
     }
 }
