@@ -1075,21 +1075,25 @@ pub fn get_code_from_configurator(
         let select_all = use_select_all.unwrap_or(false);
         let parent = HWND(hwnd as *mut std::ffi::c_void);
 
-        match if select_all {
-            crate::editor_bridge::get_text(hwnd)
-        } else {
-            match crate::editor_bridge::get_selection(hwnd) {
-                Ok((true, selection_text)) => Ok(selection_text),
-                Ok((false, _)) => crate::editor_bridge::get_text(hwnd),
-                Err(error) => Err(error),
+        match configurator::get_selected_code(hwnd, select_all).and_then(|result| {
+            if should_retry_clipboard_capture_as_full_module(select_all, &result) {
+                configurator::get_selected_code(hwnd, true)
+            } else {
+                Ok(result)
             }
-        } {
+        }) {
             Ok(result) => {
-                crate::app_log!("[1C] EditorBridge found - reading code via UIAutomation");
+                crate::app_log!(
+                    "[1C] Reading code via clipboard from the active editor (select_all: {})",
+                    select_all
+                );
+                if !skip_focus_restore.unwrap_or(false) {
+                    restore_focus_to_app(&app_handle);
+                }
                 return Ok(result);
             }
             Err(error) => {
-                crate::app_log!("[1C] EditorBridge unavailable - {}", error);
+                crate::app_log!("[1C] Clipboard capture unavailable - {}", error);
             }
         }
 
@@ -1103,12 +1107,26 @@ pub fn get_code_from_configurator(
             return result;
         }
 
-        crate::app_log!("[1C] Scintilla not found - falling back to clipboard");
-        let result = configurator::get_selected_code(hwnd, select_all);
-        if !skip_focus_restore.unwrap_or(false) {
-            restore_focus_to_app(&app_handle);
+        match if select_all {
+            crate::editor_bridge::get_text(hwnd)
+        } else {
+            match crate::editor_bridge::get_selection(hwnd) {
+                Ok((true, selection_text)) => Ok(selection_text),
+                Ok((false, _)) => crate::editor_bridge::get_text(hwnd),
+                Err(error) => Err(error),
+            }
+        } {
+            Ok(result) => {
+                crate::app_log!(
+                    "[1C] Clipboard/Scintilla unavailable - reading code via EditorBridge"
+                );
+                return Ok(result);
+            }
+            Err(error) => {
+                crate::app_log!("[1C] EditorBridge unavailable - {}", error);
+            }
         }
-        result
+        Err("Не удалось прочитать код из Конфигуратора через clipboard, Scintilla или EditorBridge.".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -1118,6 +1136,10 @@ pub fn get_code_from_configurator(
         let _ = skip_focus_restore;
         Err("Configurator integration is only available on Windows".to_string())
     }
+}
+
+fn should_retry_clipboard_capture_as_full_module(select_all: bool, captured_text: &str) -> bool {
+    !select_all && captured_text.trim().is_empty()
 }
 
 #[tauri::command]
@@ -1941,7 +1963,8 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        resolve_quick_action_apply_policy, should_try_scintilla_fallback, QuickActionApplyPolicy,
+        resolve_quick_action_apply_policy, should_retry_clipboard_capture_as_full_module,
+        should_try_scintilla_fallback, QuickActionApplyPolicy,
     };
     #[cfg(windows)]
     use crate::editor_bridge::{EditorContext, EditorMethodHints};
@@ -1997,6 +2020,20 @@ mod tests {
             true,
             QuickActionApplyPolicy::Default
         ));
+    }
+
+    #[test]
+    fn empty_selection_clipboard_capture_retries_as_full_module() {
+        assert!(should_retry_clipboard_capture_as_full_module(false, ""));
+        assert!(should_retry_clipboard_capture_as_full_module(
+            false,
+            "   \r\n\t"
+        ));
+        assert!(!should_retry_clipboard_capture_as_full_module(
+            false,
+            "Процедура Тест()\n"
+        ));
+        assert!(!should_retry_clipboard_capture_as_full_module(true, ""));
     }
 
     #[test]
