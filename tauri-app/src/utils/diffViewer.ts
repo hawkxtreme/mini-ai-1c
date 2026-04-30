@@ -3,6 +3,7 @@
  * Позволяет реконструировать полный текст модуля из чанка изменений.
  */
 import { diffLines } from 'diff';
+import { decodeHtmlEntities } from './htmlEntities';
 
 // ─── Типы ──────────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ export type DiffApplyStatus =
     | 'applied_fuzzy'      // Нечёткое совпадение, применено с предупреждением
     | 'failed_not_found'   // Блок не найден в исходном коде
     | 'failed_ambiguous'   // Найдено несколько совпадений
+    | 'skipped_validation' // Пропущен из-за пост-валидации (например, BSL ParseError)
     | 'skipped';           // Пропущен (отфильтрован selectedIndices)
 
 export interface DiffBlock {
@@ -41,6 +43,11 @@ export interface DiffApplyResult {
     failedCount: number;
     /** Кол-во блоков, применённых нечётко (с предупреждением) */
     fuzzyCount: number;
+}
+
+interface ParsedDiffContent {
+    blocks: DiffBlock[];
+    hasIncompleteBlocks: boolean;
 }
 
 // ─── Вспомогательные функции ───────────────────────────────────────────────────
@@ -295,9 +302,9 @@ export function normalizeBslIndent(code: string): string {
 // ─── Создание блока ────────────────────────────────────────────────────────────
 
 function createBlock(searchLines: string[], replaceLines: string[], index: number): DiffBlock {
-    let search = searchLines.join('\n');
+    let search = decodeHtmlEntities(searchLines.join('\n'));
     // Нормализуем отступы в replace-блоке: ИИ часто генерирует пробелы вместо табов
-    let replace = normalizeBslIndent(replaceLines.join('\n'));
+    let replace = normalizeBslIndent(decodeHtmlEntities(replaceLines.join('\n')));
 
     let lineStart: number | undefined;
     const lineMatch = search.match(/^:(строка|line):(\d+|EOF)\s*-+\s*\n/i);
@@ -327,12 +334,9 @@ function createBlock(searchLines: string[], replaceLines: string[], index: numbe
 
 // ─── Парсинг ───────────────────────────────────────────────────────────────────
 
-/**
- * Парсит текст сообщения на блоки изменений с поддержкой незавершенных блоков.
- */
-export function parseDiffBlocks(content: string): DiffBlock[] {
-    // Normalize CRLF → LF
-    content = content.replace(/\r\n/g, '\n');
+function normalizeDiffMarkup(content: string): string {
+    // Normalize CRLF and markdown/HTML-escaped XML before parsing diff blocks.
+    content = decodeHtmlEntities(content.replace(/\r\n/g, '\n'));
 
     // MiniMax M2 (и некоторые тюны) внутри <diff> используют схему своего tool-call XML:
     // <diff><parameter name="search">…</parameter><parameter name="replace">…</parameter></diff>
@@ -353,28 +357,15 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
         /<\/(?:minimax:tool_call|antml:invoke|antml:parameter|antml:function_calls|invoke|parameter)>/g,
         ''
     );
+    return content;
+}
 
-    // Восстановление незавершённого хвостового <diff>-блока:
-    // если последний <diff>...<replace> не имеет </replace></diff> (модель
-    // оборвалась посередине стрима) — дописываем закрывающие теги, чтобы
-    // основной regex ниже их подобрал.
-    {
-        const lastDiffOpen = content.lastIndexOf('<diff');
-        if (lastDiffOpen !== -1) {
-            const tail = content.slice(lastDiffOpen);
-            const hasReplaceOpen = /<replace(?:\s+[^>]*)?>/.test(tail);
-            const hasReplaceClose = /<\/replace>/.test(tail);
-            const hasDiffClose = /<\/diff>/.test(tail);
-            if (hasReplaceOpen && !hasReplaceClose) {
-                content = content.replace(/\s*$/, '') + '\n</replace>\n</diff>';
-            } else if (!hasDiffClose && hasReplaceClose) {
-                content = content.replace(/\s*$/, '') + '\n</diff>';
-            }
-        }
-    }
+function parseDiffContent(content: string): ParsedDiffContent {
+    content = normalizeDiffMarkup(content);
 
     const blocks: DiffBlock[] = [];
     let index = 0;
+    let hasIncompleteXmlBlocks = false;
 
     // Парсим XML-формат (<diff><search>...</search><replace>...</replace></diff>)
     const xmlRegex = /<diff(?:\s+[^>]*)?\>\s*<search(?:\s+[^>]*)?\>\n?([\s\S]*?)\n?[ \t]*<\/search>\s*<replace(?:\s+[^>]*)?\>\n?([\s\S]*?)\n?[ \t]*<\/replace>\s*<\/diff>/g;
@@ -390,14 +381,19 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
     while ((bareXmlMatch = bareXmlRegex.exec(bareContent)) !== null) {
         blocks.push(createBlock(bareXmlMatch[1].split('\n'), bareXmlMatch[2].split('\n'), index++));
     }
+    const xmlRemainder = bareContent.replace(bareXmlRegex, '');
+    if (/<diff(?:\s+[^>]*)?>|<search(?:\s+[^>]*)?>|<replace(?:\s+[^>]*)?>/.test(xmlRemainder)) {
+        hasIncompleteXmlBlocks = true;
+    }
 
     // Парсим SEARCH/REPLACE формат (legacy)
     // Поддерживаем 5-9 символов chevron и лишний > в маркерах (Claude Sonnet 4 иногда добавляет)
-    const legacyContent = bareContent.replace(bareXmlRegex, '');
+    const legacyContent = xmlRemainder;
     const lines = legacyContent.split('\n');
     let mode: 'none' | 'search' | 'replace' = 'none';
     let searchLines: string[] = [];
     let replaceLines: string[] = [];
+    let hasIncompleteLegacyBlock = false;
 
     for (const line of lines) {
         const trimmed = line.trim();
@@ -425,11 +421,29 @@ export function parseDiffBlocks(content: string): DiffBlock[] {
         else if (mode === 'replace') replaceLines.push(line);
     }
 
-    if (mode === 'replace' && (searchLines.length > 0 || replaceLines.length > 0)) {
-        blocks.push(createBlock(searchLines, replaceLines, index++));
+    if (mode !== 'none' && (searchLines.length > 0 || replaceLines.length > 0)) {
+        hasIncompleteLegacyBlock = true;
     }
 
-    return blocks;
+    return { blocks, hasIncompleteBlocks: hasIncompleteXmlBlocks || hasIncompleteLegacyBlock };
+}
+
+/**
+ * Парсит текст сообщения на блоки изменений.
+ */
+export function parseDiffBlocks(content: string): DiffBlock[] {
+    return parseDiffContent(content).blocks;
+}
+
+/** Проверяет, содержит ли ответ модели незавершённые diff-блоки. */
+export function hasIncompleteDiffBlocks(content: string): boolean {
+    return parseDiffContent(content).hasIncompleteBlocks;
+}
+
+/** Проверяет, блокирует ли незавершённый diff применение целиком. */
+export function hasBlockingIncompleteDiffBlocks(content: string): boolean {
+    const parsed = parseDiffContent(content);
+    return parsed.hasIncompleteBlocks && parsed.blocks.length === 0;
 }
 
 // ─── Применение одного блока ───────────────────────────────────────────────────
@@ -868,7 +882,7 @@ export function applyDiffWithDiagnostics(
     diffContent: string | DiffBlock[],
     selectedIndices?: number[]
 ): DiffApplyResult {
-    let blocks = typeof diffContent === 'string' ? parseDiffBlocks(diffContent) : [...diffContent];
+    let blocks = typeof diffContent === 'string' ? parseDiffContent(diffContent).blocks : [...diffContent];
 
     // Объединяем перекрывающиеся диффы перед применением
     blocks = mergeOverlappingBlocks(blocks);
@@ -946,7 +960,7 @@ export function formatDiffErrorMessage(result: DiffApplyResult): string | null {
     const lines: string[] = [];
 
     if (result.failedCount > 0) {
-        lines.push(`⚠️ **${result.failedCount} из ${result.blocks.length} блоков изменений не применены:**`);
+        lines.push(`⚠️ ${result.failedCount} из ${result.blocks.length} блоков изменений не применены:`);
         result.blocks
             .filter(b => b.applyStatus === 'failed_not_found' || b.applyStatus === 'failed_ambiguous')
             .forEach((b, i) => {
@@ -956,7 +970,7 @@ export function formatDiffErrorMessage(result: DiffApplyResult): string | null {
     }
 
     if (result.fuzzyCount > 0) {
-        lines.push(`⚡ **${result.fuzzyCount} блок(а/ов) применены приблизительно (проверьте результат).**`);
+        lines.push(`⚡ ${result.fuzzyCount} блок(а/ов) применены приблизительно. Проверьте результат.`);
     }
 
     return lines.join('\n');
@@ -966,9 +980,10 @@ export function formatDiffErrorMessage(result: DiffApplyResult): string | null {
 
 /** Проверяет, содержит ли сообщение блоки diff */
 export function hasDiffBlocks(content: string): boolean {
-    return /<<<<<<< SEARCH/.test(content)
-        || /<diff(?:\s+[^>]*)?>/.test(content)
-        || /<search(?:\s+[^>]*)?>[\s\S]*?<\/search>\s*<replace(?:\s+[^>]*)?>/.test(content);
+    const normalized = normalizeDiffMarkup(content);
+    return /<<<<<<< SEARCH/.test(normalized)
+        || /<diff(?:\s+[^>]*)?>/.test(normalized)
+        || /<search(?:\s+[^>]*)?>[\s\S]*?<\/search>\s*<replace(?:\s+[^>]*)?>/.test(normalized);
 }
 
 /** Проверяет, можно ли применить хотя бы один дифф-блок к исходному коду */
@@ -989,7 +1004,7 @@ export function hasApplicableDiffBlocks(originalCode: string, content: string): 
 
 /** Очищает сообщение от технических блоков diff */
 export function cleanDiffArtifacts(content: string): string {
-    let cleaned = content.replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
+    let cleaned = normalizeDiffMarkup(content).replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
     cleaned = cleaned.replace(/<<<<<<< SEARCH[\s\S]*?=======[\s\S]*?(?:\n|$)/g, '');
     cleaned = cleaned.replace(/<diff(?:\s+[^>]*)?>[\s\S]*?<\/diff>/g, '');
     cleaned = cleaned.replace(/<diff(?:\s+[^>]*)?>[\s\S]*?(?:\n|$)/g, '');
@@ -1023,7 +1038,7 @@ export function extractDisplayCode(originalCode: string, response: string): stri
 
 /** Удаляет все блоки кода и diff-блоки, оставляя только текст */
 export function stripCodeBlocks(content: string): string {
-    let s = content.replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
+    let s = normalizeDiffMarkup(content).replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
     s = s.replace(/<<<<<<< SEARCH[\s\S]*?=======[\s\S]*?(?:\n|$)/g, '');
     s = s.replace(/<diff(?:\s+[^>]*)?>[\s\S]*?<\/diff>/g, '');
     s = s.replace(/<diff(?:\s+[^>]*)?>[\s\S]*?(?:\n|$)/g, '');

@@ -11,7 +11,7 @@ import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor,
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
-import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
+import { applyDiffWithDiagnostics, formatDiffErrorMessage, parseDiffBlocks, hasApplicableDiffBlocks, hasBlockingIncompleteDiffBlocks } from '../../utils/diffViewer';
 import { isOllamaCloudProfile } from '../../utils/profileHelpers';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
@@ -26,6 +26,7 @@ import McpToolsPopover from './McpToolsPopover';
 import { VoiceInputControl } from '../voice/VoiceInputControl';
 import { ContextUsageBar } from './ContextUsageBar';
 import { applySelectiveFixScopeInstructions } from '../../utils/fixPromptScope';
+import { formatSyntaxSafeFallbackMessage, isRecoverableSyntaxValidationMessage, salvageSyntaxSafeDiffBlocks } from '../../utils/bslSyntaxGuard';
 import { resolveEffectiveSelectedDiagnostics } from '../../utils/diagnosticsSelection';
 
 interface ChatAreaProps {
@@ -36,6 +37,7 @@ interface ChatAreaProps {
     onClearContext?: () => void;
     onPrepareDiffBase?: (code: string) => void;
     onApplyCode?: (code: string) => void;
+    onValidateAppliedCode?: (baseCode: string, candidateCode: string) => Promise<string | null>;
     onCommitCode?: (code: string) => void;
     onCodeLoaded?: (code: string, isSelection: boolean) => void;
     diagnostics?: any[];
@@ -102,6 +104,10 @@ function buildCopyContent(msg: ChatMessage): string {
     }
     return sections.join('\n\n') || msg.content;
 }
+
+const INCOMPLETE_DIFF_MESSAGE = 'Ответ модели содержит незавершённый diff-блок. Применение отменено: попросите модель прислать изменения повторно целиком.';
+
+const BSL_VALIDATION_FAILURE_MESSAGE = 'Применение отменено: не удалось проверить синтаксис BSL перед применением.';
 
 function formatProfileSummary(profile: { provider: string; model: string; reasoning_effort?: string | null }) {
     const parts = [profile.provider, profile.model];
@@ -304,6 +310,7 @@ export function ChatArea({
     onClearContext,
     onPrepareDiffBase,
     onApplyCode,
+    onValidateAppliedCode,
     onCommitCode,
     onCodeLoaded,
     diagnostics,
@@ -332,6 +339,7 @@ export function ChatArea({
     const [appliedDiffMessages, setAppliedDiffMessages] = useState<Set<string>>(new Set());
     const [dismissedDiffMessages, setDismissedDiffMessages] = useState<Set<string>>(new Set());
     const [diffActions, setDiffActions] = useState<Map<string, 'accepted' | 'rejected'>>(new Map());
+    const [validatingDiffMessageKey, setValidatingDiffMessageKey] = useState<string | null>(null);
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
     const [showConfigDropdown, setShowConfigDropdown] = useState(false);
@@ -809,16 +817,6 @@ export function ChatArea({
         // Если пользователь уже принял/отклонил изменения через баннер — не перебиваем его выбор
         if (diffActions.has(msgKey)) return;
 
-        // Если превью уже было показано, а затем явно очищено (например, через боковую панель) —
-        // не восстанавливаем его снова и помечаем как обработанное, чтобы баннер в чате
-        // переключился на badge "Изменения приняты" вместо кнопок "Принять / Отменить".
-        if (!activeDiffContent && appliedDiffMessages.has(msgKey)) {
-            if (!diffActions.has(msgKey)) {
-                setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
-            }
-            return;
-        }
-
         // Показываем diff-превью только ПОСЛЕ завершения стриминга
         if (!isLoading) {
             // Открываем боковую панель только если есть базовый код для сравнения.
@@ -1284,8 +1282,18 @@ export function ChatArea({
                                                             // text
                                                             const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
                                                             const cleanedContent = cleanDiffArtifacts(part.content || '', currentOriginalCode);
+                                                            const hasApplicableDiff = hasApplicableDiffBlocks(currentOriginalCode, part.content || '');
+                                                            const hasBlockingIncompleteDiff = hasBlockingIncompleteDiffBlocks(part.content || '');
                                                             if (cleanedContent.trim().length === 0) {
-                                                                if (!hasApplicableDiffBlocks(currentOriginalCode, part.content || '')) return null;
+                                                                if (!hasApplicableDiff) {
+                                                                    if (!hasBlockingIncompleteDiff) return null;
+                                                                    return (
+                                                                        <div key={partIdx} className="flex items-center gap-1.5 text-amber-400/80 text-xs italic py-0.5">
+                                                                            <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                            <span>Неполный diff-ответ: применение заблокировано</span>
+                                                                        </div>
+                                                                    );
+                                                                }
                                                                 return (
                                                                     <div key={partIdx} className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
                                                                         <FileDiff className="w-3 h-3 flex-shrink-0" />
@@ -1370,10 +1378,20 @@ export function ChatArea({
                                                         const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
                                                         const cleanedContent = cleanDiffArtifacts(msg.content || '', currentOriginalCode);
                                                         const hasVisibleContent = cleanedContent.trim().length > 0;
+                                                        const hasApplicableDiff = hasApplicableDiffBlocks(currentOriginalCode, msg.content || '');
+                                                        const hasBlockingIncompleteDiff = hasBlockingIncompleteDiffBlocks(msg.content || '');
 
                                                         if (msg.role !== 'assistant') return null;
                                                         if (!hasVisibleContent) {
-                                                            if (!hasApplicableDiffBlocks(currentOriginalCode, msg.content || '')) return null;
+                                                            if (!hasApplicableDiff) {
+                                                                if (!hasBlockingIncompleteDiff) return null;
+                                                                return (
+                                                                    <div className="flex items-center gap-1.5 text-amber-400/80 text-xs italic py-0.5">
+                                                                        <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                        <span>Неполный diff-ответ: применение заблокировано</span>
+                                                                    </div>
+                                                                );
+                                                            }
                                                             return (
                                                                 <div className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
                                                                     <FileDiff className="w-3 h-3 flex-shrink-0" />
@@ -1438,18 +1456,81 @@ export function ChatArea({
                                                         return (
                                                             <DiffSummaryBanner
                                                                 content={msg.content}
-                                                                onApply={() => {
+                                                                disabled={validatingDiffMessageKey === msgKey}
+                                                                onApply={async () => {
                                                                     // Применяем дифф только сейчас — по явному подтверждению пользователя
+                                                                    if (hasBlockingIncompleteDiffBlocks(msg.content)) {
+                                                                        addSystemMessage(INCOMPLETE_DIFF_MESSAGE);
+                                                                        return;
+                                                                    }
                                                                     const diffResult = applyDiffWithDiagnostics(currentOriginalCode, msg.content);
-                                                                    if (onApplyCode) {
-                                                                        onApplyCode(diffResult.code);
+                                                                    const diffWarningMessage = formatDiffErrorMessage(diffResult);
+                                                                    const appliedBlockCount = diffResult.blocks.filter(block =>
+                                                                        block.applyStatus?.startsWith('applied_'),
+                                                                    ).length;
+                                                                    if (diffResult.failedCount > 0 && appliedBlockCount === 0) {
+                                                                        if (diffWarningMessage) addSystemMessage(diffWarningMessage, 'warning');
+                                                                        return;
                                                                     }
-                                                                    if (diffResult.failedCount > 0 || diffResult.fuzzyCount > 0) {
-                                                                        const errorMsg = formatDiffErrorMessage(diffResult);
-                                                                        if (errorMsg) addSystemMessage(errorMsg);
+                                                                    setValidatingDiffMessageKey(msgKey);
+                                                                    try {
+                                                                        if (onValidateAppliedCode) {
+                                                                            let validationError: string | null = null;
+                                                                            try {
+                                                                                validationError = await onValidateAppliedCode(
+                                                                                    currentOriginalCode,
+                                                                                    diffResult.code,
+                                                                                );
+                                                                            } catch (error) {
+                                                                                const details = error instanceof Error ? error.message : String(error);
+                                                                                validationError = details
+                                                                                    ? `${BSL_VALIDATION_FAILURE_MESSAGE} ${details}`
+                                                                                    : BSL_VALIDATION_FAILURE_MESSAGE;
+                                                                            }
+
+                                                                            if (validationError) {
+                                                                                if (isRecoverableSyntaxValidationMessage(validationError)) {
+                                                                                    const fallbackResult = await salvageSyntaxSafeDiffBlocks(
+                                                                                        currentOriginalCode,
+                                                                                        diffResult.blocks,
+                                                                                        onValidateAppliedCode,
+                                                                                    );
+                                                                                    const fallbackMessage = formatSyntaxSafeFallbackMessage(fallbackResult);
+
+                                                                                    if (fallbackResult.appliedBlockCount > 0) {
+                                                                                        if (onApplyCode) {
+                                                                                            onApplyCode(fallbackResult.code);
+                                                                                        }
+                                                                                        if (onActiveDiffChange) onActiveDiffChange('');
+                                                                                        setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                                        if (fallbackMessage) {
+                                                                                            addSystemMessage(fallbackMessage, 'warning');
+                                                                                        }
+                                                                                        return;
+                                                                                    }
+
+                                                                                    addSystemMessage(fallbackMessage ?? validationError, 'warning');
+                                                                                    return;
+                                                                                }
+
+                                                                                addSystemMessage(validationError);
+                                                                                return;
+                                                                            }
+                                                                        }
+
+                                                                        if (onApplyCode) {
+                                                                            onApplyCode(diffResult.code);
+                                                                        }
+                                                                        if (onActiveDiffChange) onActiveDiffChange('');
+                                                                        setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                        if (diffWarningMessage) {
+                                                                            addSystemMessage(diffWarningMessage, 'warning');
+                                                                        }
+                                                                    } finally {
+                                                                        setValidatingDiffMessageKey(current =>
+                                                                            current === msgKey ? null : current,
+                                                                        );
                                                                     }
-                                                                    if (onActiveDiffChange) onActiveDiffChange('');
-                                                                    setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
                                                                 }}
                                                                 onReject={() => {
                                                                     // Просто сбрасываем превью — код в редакторе не тронут

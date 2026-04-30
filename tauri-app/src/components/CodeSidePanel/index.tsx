@@ -25,6 +25,7 @@ export function CodeSidePanel({
     activeDiffContent,
     onActiveDiffChange,
     onDiffRejected,
+    onCommitCode,
     isFullWidth,
     onDiagnosticSelectionChange,
 }: CodeSidePanelProps) {
@@ -186,6 +187,22 @@ export function CodeSidePanel({
     // Флаг: авто-скролл к первому изменению уже выполнен для текущего превью.
     // Сбрасывается при смене activeDiffContent — чтобы не скроллить повторно.
     const hasAutoScrolledRef = useRef(false);
+
+    const handleFooterApply = useCallback(() => {
+        const previewCode = previewFrozenCodeRef.current;
+        if (activeDiffContentRef.current && previewCode !== null) {
+            if (onCommitCode) {
+                onCommitCode(previewCode);
+            } else {
+                onModifiedCodeChange(previewCode);
+                onActiveDiffChange?.('');
+            }
+            anyChunkHandledRef.current = false;
+            return;
+        }
+
+        onApply();
+    }, [onActiveDiffChange, onApply, onCommitCode, onModifiedCodeChange]);
 
     useEffect(() => {
         anyChunkHandledRef.current = false;
@@ -635,7 +652,7 @@ export function CodeSidePanel({
             />
 
             <Footer
-                onApply={onApply}
+                onApply={handleFooterApply}
                 isApplying={isApplying}
                 modifiedCode={modifiedCode}
             />

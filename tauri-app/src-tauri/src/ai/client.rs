@@ -207,6 +207,18 @@ fn reduce_qwen_request_pressure(
     changed
 }
 
+fn sanitize_messages_for_ollama_cloud(messages: Vec<ApiMessage>) -> Vec<ApiMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if message.content.is_none() {
+                message.content = Some(String::new());
+            }
+            message
+        })
+        .collect()
+}
+
 fn build_qwen_rate_limit_message(ctx: &QwenRateLimitContext) -> String {
     let provider_message = ctx
         .message
@@ -300,6 +312,9 @@ pub async fn stream_chat_completion(
         name: None,
     }];
     api_messages.extend(messages);
+    if matches!(profile.provider, LLMProvider::OllamaCloud) {
+        api_messages = sanitize_messages_for_ollama_cloud(api_messages);
+    }
 
     if matches!(profile.provider, LLMProvider::CodexCli) {
         return super::codex_client::stream_codex_completion(api_messages, app_handle).await;
@@ -1621,6 +1636,53 @@ mod tests {
         };
 
         assert_eq!(qwen_retry_delay(1, &ctx), None);
+    }
+
+    #[test]
+    fn ollama_cloud_sanitizer_replaces_missing_content_with_empty_string() {
+        let messages = vec![
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "search_code".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "tool".to_string(),
+                content: None,
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+                name: Some("search_code".to_string()),
+            },
+        ];
+
+        let sanitized = sanitize_messages_for_ollama_cloud(messages);
+
+        assert_eq!(sanitized[0].content.as_deref(), Some(""));
+        assert_eq!(sanitized[1].content.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn ollama_cloud_sanitizer_keeps_existing_content_unchanged() {
+        let messages = vec![ApiMessage {
+            role: "assistant".to_string(),
+            content: Some("ready".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let sanitized = sanitize_messages_for_ollama_cloud(messages.clone());
+
+        assert_eq!(sanitized[0].content, messages[0].content);
     }
 
     #[test]

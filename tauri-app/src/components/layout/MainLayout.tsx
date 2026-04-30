@@ -4,11 +4,13 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { Minus, Square, X } from 'lucide-react';
+import type { BslDiagnostic } from '../../api/bsl';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useBsl } from '../../contexts/BslContext';
 import { useChat } from '../../contexts/ChatContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { getConfiguratorApplySupport } from '../../api/configurator';
+import { findFirstIntroducedParseError, formatIntroducedParseErrorMessage } from '../../utils/bslSyntaxGuard';
 import { CodeSidePanel } from '../CodeSidePanel';
 import { SettingsPanel } from '../SettingsPanel';
 import { ConflictDialog } from '../ui/ConflictDialog';
@@ -375,9 +377,35 @@ export function MainLayout() {
 
     const handleChatApplyCode = useCallback((code: string) => {
         applyAICode(code);
+        acceptDiff();
         setActiveDiffContent('');
         setViewMode(prev => prev === 'assistant' ? 'split' : prev);
-    }, [applyAICode]);
+    }, [acceptDiff, applyAICode]);
+
+    const handleValidateChatAppliedCode = useCallback(async (baseCode: string, candidateCode: string) => {
+        try {
+            const [baseDiagnostics, candidateDiagnostics] = await Promise.all([
+                analyzeCode(baseCode),
+                analyzeCode(candidateCode),
+            ]);
+
+            const introducedParseError = findFirstIntroducedParseError(
+                baseDiagnostics as BslDiagnostic[],
+                candidateDiagnostics,
+            );
+
+            if (!introducedParseError) {
+                return null;
+            }
+
+            return formatIntroducedParseErrorMessage(introducedParseError);
+        } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            return details
+                ? `Применение отменено: не удалось проверить синтаксис BSL перед применением. ${details}`
+                : 'Применение отменено: не удалось проверить синтаксис BSL перед применением.';
+        }
+    }, [analyzeCode]);
 
     const handleActiveDiffChange = useCallback((content: string) => {
         setActiveDiffContent(content);
@@ -476,6 +504,7 @@ export function MainLayout() {
                             onClearContext={clearContext}
                             onPrepareDiffBase={syncBaseline}
                             onApplyCode={handleChatApplyCode}
+                            onValidateAppliedCode={handleValidateChatAppliedCode}
                             onCommitCode={handleCommitCode}
                             onCodeLoaded={handleCodeLoaded}
                             diagnostics={diagnostics}

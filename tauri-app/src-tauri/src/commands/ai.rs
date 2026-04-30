@@ -240,6 +240,14 @@ fn prune_tool_context(messages: &mut Vec<ApiMessage>, max_tokens: usize) {
 }
 
 /// Clear 1С:Напарник session (called on chat clear when provider == OneCNaparnik)
+fn assistant_message_has_meaningful_payload(message: &ApiMessage) -> bool {
+    message.content.as_deref().is_some_and(|content| !content.is_empty())
+        || message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tool_calls| !tool_calls.is_empty())
+}
+
 #[tauri::command]
 pub async fn clear_naparnik_session() -> Result<(), String> {
     if let Some(profile) = crate::llm_profiles::get_active_profile() {
@@ -435,8 +443,14 @@ pub async fn stream_chat(
                 }
                 m
             };
-            api_messages.push(assistant_msg_to_push);
-            emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
+            if assistant_message_has_meaningful_payload(&assistant_msg_to_push) {
+                api_messages.push(assistant_msg_to_push);
+                emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
+            } else {
+                crate::app_log!(
+                    "[AI][LOOP] Skipping empty assistant response in history before retry"
+                );
+            }
 
             // 1. Check for tool calls (use original to get full count for UI)
             if let Some(tool_calls) = &assistant_msg.tool_calls {
@@ -1010,6 +1024,7 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::models::ToolCallFunction;
 
     #[test]
     fn cache_key_is_stable_for_equivalent_json_arguments() {
@@ -1057,5 +1072,38 @@ mod tests {
             cache_key,
             "builtin-1c-metadata::get_metadata_structure::{invalid json}"
         );
+    }
+
+    #[test]
+    fn empty_assistant_message_is_not_meaningful_for_history() {
+        let message = ApiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        };
+
+        assert!(!assistant_message_has_meaningful_payload(&message));
+    }
+
+    #[test]
+    fn assistant_tool_call_message_is_meaningful_for_history_even_without_content() {
+        let message = ApiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![crate::ai::models::ToolCall {
+                id: "call_1".to_string(),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "search_code".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        };
+
+        assert!(assistant_message_has_meaningful_payload(&message));
     }
 }
