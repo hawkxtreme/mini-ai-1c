@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use tauri::Emitter;
 
 use super::models::{ApiMessage, ToolInfo};
-use super::prompts::get_system_prompt;
+use super::prompts::{get_system_prompt, has_code_context};
 use super::tools::get_available_tools;
 use crate::llm_profiles::get_active_profile;
 use crate::settings::{load_settings, McpServerConfig, McpTransport};
@@ -204,11 +204,46 @@ fn build_local_tool_routes(tools_info: &[ToolInfo]) -> HashMap<String, String> {
         .collect()
 }
 
+fn build_naparnik_diff_instruction(has_code_context: bool) -> &'static str {
+    if has_code_context {
+        r#"
+
+[NAPARNIK TEXT DIFF MODE]
+Mini AI 1C applies code edits locally after the user reviews them. Naparnik must return edit text; it must NOT call `apply_diff`, `replace_in_file`, or any other native apply/edit tool.
+This section overrides generic XML diff instructions for Naparnik: when editing existing BSL code, use ONLY this SEARCH/REPLACE block format:
+  <<<<<<< SEARCH
+exact original complete lines
+  =======
+replacement complete lines
+  >>>>>>> REPLACE
+Rules:
+- Use SEARCH/REPLACE only when the user asks to change existing code.
+- Do not wrap SEARCH/REPLACE blocks in Markdown fences.
+- The SEARCH part must be an exact copy of complete original lines, including indentation.
+- Include enough original context to make each SEARCH block unique, but keep blocks small.
+- The REPLACE part must contain the full replacement for the SEARCH part.
+- Use tab characters for BSL indentation in replacement code.
+- When returning SEARCH/REPLACE blocks, do not also include a full modified ```bsl code block in the same response.
+- If the user asks a question or explanation only, answer normally and do not return diff blocks.
+- If the original code is empty or you cannot produce an exact SEARCH block, return a full ```bsl code block instead and briefly explain that a text diff was not safe.
+[/NAPARNIK TEXT DIFF MODE]"#
+    } else {
+        r#"
+
+[NAPARNIK TEXT DIFF MODE]
+No editable source code is loaded in Mini AI 1C. Do NOT use SEARCH/REPLACE diff blocks and do NOT call `apply_diff`.
+For new BSL code, return the complete code in a ```bsl block.
+[/NAPARNIK TEXT DIFF MODE]"#
+    }
+}
+
 fn build_naparnik_instruction(
     system_prompt: &str,
     user_instruction: &str,
     tools_info: &[ToolInfo],
+    has_code_context: bool,
 ) -> String {
+    let diff_instruction = build_naparnik_diff_instruction(has_code_context);
     let bridge_instruction = if tools_info.is_empty() {
         String::new()
     } else {
@@ -234,8 +269,8 @@ If a `{bridge_tool}` result contains "Mini AI 1C MCP tool `<name>` result", trea
     };
 
     format!(
-        "[SYSTEM INSTRUCTIONS FROM MINI AI 1C]\n{}{}\n[/SYSTEM INSTRUCTIONS]\n\n[USER REQUEST]\n{}\n[/USER REQUEST]",
-        system_prompt, bridge_instruction, user_instruction
+        "[SYSTEM INSTRUCTIONS FROM MINI AI 1C]\n{}{}{}\n[/SYSTEM INSTRUCTIONS]\n\n[USER REQUEST]\n{}\n[/USER REQUEST]",
+        system_prompt, diff_instruction, bridge_instruction, user_instruction
     )
 }
 
@@ -270,6 +305,27 @@ fn truncate_tool_result(result: String) -> String {
         &result[..boundary],
         MAX_NAPARNIK_TOOL_RESULT_CHARS
     )
+}
+
+fn build_naparnik_tool_result_content(
+    local_name: &str,
+    result: String,
+    has_code_context: bool,
+) -> String {
+    let mut content = format!("Mini AI 1C MCP tool `{}` result:\n{}", local_name, result);
+
+    if has_code_context {
+        content.push_str(
+            r#"
+
+[NAPARNIK TEXT DIFF REMINDER]
+If the next answer edits the existing BSL code, return only SEARCH/REPLACE blocks that Mini AI 1C can apply locally.
+Do not return a full modified ```bsl code block when a safe SEARCH/REPLACE block can be produced.
+[/NAPARNIK TEXT DIFF REMINDER]"#,
+        );
+    }
+
+    content
 }
 
 fn tool_call_name(tool_call: &Value) -> Option<String> {
@@ -468,8 +524,13 @@ pub async fn stream_naparnik_completion(
     let naparnik_tools = build_naparnik_tools(&naparnik_tools_info);
     let local_tool_routes = build_local_tool_routes(&naparnik_tools_info);
     let system_prompt = get_system_prompt(&naparnik_tools_info, &messages);
-    let instruction =
-        build_naparnik_instruction(&system_prompt, &instruction, &naparnik_tools_info);
+    let has_code_context = has_code_context(&messages);
+    let instruction = build_naparnik_instruction(
+        &system_prompt,
+        &instruction,
+        &naparnik_tools_info,
+        has_code_context,
+    );
 
     let full_content = run_message_loop(
         &client,
@@ -480,6 +541,7 @@ pub async fn stream_naparnik_completion(
         instruction,
         naparnik_tools,
         local_tool_routes,
+        has_code_context,
         &app_handle,
     )
     .await?;
@@ -508,6 +570,7 @@ async fn run_message_loop(
     instruction: String,
     naparnik_tools: Vec<Value>,
     local_tool_routes: HashMap<String, String>,
+    has_code_context: bool,
     app_handle: &tauri::AppHandle,
 ) -> Result<String, String> {
     let url = format!(
@@ -627,7 +690,11 @@ async fn run_message_loop(
                     "status": "ok",
                     "tool_call_id": tc_id,
                     "name": name,
-                    "content": format!("Mini AI 1C MCP tool `{}` result:\n{}", local_name, result)
+                    "content": build_naparnik_tool_result_content(
+                        &local_name,
+                        result,
+                        has_code_context
+                    )
                 }));
             } else {
                 items.push(serde_json::json!({
@@ -836,4 +903,61 @@ async fn process_sse_stream(
     }
 
     Ok(tool_calls_pending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn naparnik_diff_instruction_uses_text_search_replace_when_code_is_loaded() {
+        let instruction =
+            build_naparnik_instruction("BASE SYSTEM", "Измени текст сообщения", &[], true);
+
+        assert!(instruction.contains("[NAPARNIK TEXT DIFF MODE]"));
+        assert!(instruction.contains("<<<<<<< SEARCH"));
+        assert!(instruction.contains(">>>>>>> REPLACE"));
+        assert!(instruction.contains("must NOT call `apply_diff`"));
+        assert!(instruction.contains("Do not wrap SEARCH/REPLACE blocks in Markdown fences"));
+        assert!(instruction.contains("do not also include a full modified ```bsl code block"));
+        assert!(instruction.contains("BASE SYSTEM"));
+        assert!(instruction.contains("Измени текст сообщения"));
+    }
+
+    #[test]
+    fn naparnik_diff_instruction_disables_diff_without_code_context() {
+        let instruction =
+            build_naparnik_instruction("BASE SYSTEM", "Напиши новую функцию", &[], false);
+
+        assert!(instruction.contains("No editable source code is loaded"));
+        assert!(instruction.contains("Do NOT use SEARCH/REPLACE diff blocks"));
+        assert!(instruction.contains("return the complete code in a ```bsl block"));
+        assert!(!instruction.contains("exact original complete lines"));
+    }
+
+    #[test]
+    fn naparnik_tool_result_reinforces_text_diff_after_mcp_when_code_is_loaded() {
+        let content = build_naparnik_tool_result_content(
+            "mcp__syntax-checker__validate",
+            "[]".to_string(),
+            true,
+        );
+
+        assert!(content.contains("Mini AI 1C MCP tool `mcp__syntax-checker__validate` result"));
+        assert!(content.contains("[NAPARNIK TEXT DIFF REMINDER]"));
+        assert!(content.contains("SEARCH/REPLACE"));
+        assert!(content.contains("Do not return a full modified ```bsl code block"));
+    }
+
+    #[test]
+    fn naparnik_tool_result_does_not_reinforce_text_diff_without_code_context() {
+        let content = build_naparnik_tool_result_content(
+            "mcp__syntax-checker__validate",
+            "[]".to_string(),
+            false,
+        );
+
+        assert!(content.contains("Mini AI 1C MCP tool `mcp__syntax-checker__validate` result"));
+        assert!(!content.contains("[NAPARNIK TEXT DIFF REMINDER]"));
+    }
 }

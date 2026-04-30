@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import {
     applyDiffWithDiagnostics,
     formatDiffErrorMessage,
+    getApplicableDiffContent,
     hasApplicableDiffBlocks,
+    hasApplicableDiffContent,
     hasBlockingIncompleteDiffBlocks,
     hasDiffBlocks,
     hasIncompleteDiffBlocks,
@@ -45,6 +47,59 @@ test('hasApplicableDiffBlocks returns true when SEARCH/REPLACE changes the code'
     ].join('\n');
 
     assert.equal(hasApplicableDiffBlocks(originalCode, diffContent), true);
+});
+
+test('getApplicableDiffContent converts a full BSL code block into an applyable replacement diff', () => {
+    const originalCode = [
+        'Procedure Demo()',
+        '\tMessage("old");',
+        'EndProcedure',
+    ].join('\n');
+
+    const response = [
+        'Вот исправленный код:',
+        '',
+        '```bsl',
+        'Procedure Demo()',
+        '\tMessage("new");',
+        'EndProcedure',
+        '```',
+    ].join('\n');
+
+    const diffContent = getApplicableDiffContent(originalCode, response);
+
+    assert.ok(diffContent);
+    assert.equal(hasApplicableDiffContent(originalCode, response), true);
+
+    const result = applyDiffWithDiagnostics(originalCode, diffContent);
+
+    assert.equal(result.failedCount, 0);
+    assert.equal(result.code, [
+        'Procedure Demo()',
+        '\tMessage("new");',
+        'EndProcedure',
+    ].join('\n'));
+});
+
+test('getApplicableDiffContent ignores short BSL snippets that are not full replacements', () => {
+    const originalCode = [
+        'Procedure Demo()',
+        '\tMessage("old");',
+        '\tMessage("second");',
+        '\tMessage("third");',
+        'EndProcedure',
+    ].join('\n');
+
+    const response = [
+        'Например:',
+        '',
+        '```bsl',
+        '\tMessage("new");',
+        '```',
+    ].join('\n');
+
+    assert.equal(getApplicableDiffContent(originalCode, response), null);
+    assert.equal(hasApplicableDiffContent(originalCode, response), false);
 });
 
 test('hasApplicableDiffBlocks returns true for a non-empty replacement on an empty base code', () => {

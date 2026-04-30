@@ -360,6 +360,51 @@ function normalizeDiffMarkup(content: string): string {
     return content;
 }
 
+function extractBslCodeBlock(content: string): string | null {
+    const normalized = decodeHtmlEntities(content.replace(/\r\n/g, '\n'));
+    const match = normalized.match(/```(?:bsl|1c|1с)[^\n\r]*\n([\s\S]*?)```/i);
+    if (!match) return null;
+
+    return normalizeBslIndent(match[1]).trim();
+}
+
+function firstNonEmptyLine(code: string): string {
+    return code.split('\n').find(line => line.trim().length > 0)?.trim() ?? '';
+}
+
+function isLikelyFullCodeReplacement(originalCode: string, candidateCode: string): boolean {
+    const original = originalCode.replace(/\r\n/g, '\n').trim();
+    const candidate = candidateCode.replace(/\r\n/g, '\n').trim();
+    if (!original || !candidate || original === candidate) return false;
+
+    const originalLines = original.split('\n').filter(line => line.trim().length > 0).length;
+    const candidateLines = candidate.split('\n').filter(line => line.trim().length > 0).length;
+    if (originalLines >= 8 && candidateLines < Math.ceil(originalLines * 0.5)) {
+        return false;
+    }
+
+    if (original.length >= 800 && candidate.length < original.length * 0.35) {
+        return false;
+    }
+
+    const firstLine = firstNonEmptyLine(original);
+    if (firstLine && candidate.includes(firstLine)) {
+        return true;
+    }
+
+    return candidate.length >= original.length * 0.75;
+}
+
+function buildFullCodeReplacementDiff(originalCode: string, candidateCode: string): string {
+    return [
+        '<<<<<<< SEARCH',
+        originalCode.replace(/\r\n/g, '\n').trimEnd(),
+        '=======',
+        candidateCode.replace(/\r\n/g, '\n').trimEnd(),
+        '>>>>>>> REPLACE',
+    ].join('\n');
+}
+
 function parseDiffContent(content: string): ParsedDiffContent {
     content = normalizeDiffMarkup(content);
 
@@ -1002,6 +1047,37 @@ export function hasApplicableDiffBlocks(originalCode: string, content: string): 
     return result.code.replace(/\r\n/g, '\n') !== normalizedOriginalCode;
 }
 
+/**
+ * Возвращает diff-контент, который можно применить к исходному коду.
+ *
+ * Основной путь — нативные SEARCH/REPLACE или XML diff-блоки. Fallback нужен для
+ * провайдеров, которые иногда возвращают полный ```bsl блок вместо точечного diff:
+ * если блок похож на полную замену текущего кода, конвертируем его в один
+ * SEARCH/REPLACE-блок и дальше используем общий механизм валидации/применения.
+ */
+export function getApplicableDiffContent(originalCode: string, content: string): string | null {
+    if (hasApplicableDiffBlocks(originalCode, content)) {
+        return content;
+    }
+
+    if (!originalCode.trim() || hasDiffBlocks(content)) {
+        return null;
+    }
+
+    const candidateCode = extractBslCodeBlock(content);
+    if (!candidateCode || !isLikelyFullCodeReplacement(originalCode, candidateCode)) {
+        return null;
+    }
+
+    const diffContent = buildFullCodeReplacementDiff(originalCode, candidateCode);
+    return hasApplicableDiffBlocks(originalCode, diffContent) ? diffContent : null;
+}
+
+/** Проверяет, есть ли в ответе применимые изменения: diff-блоки или полный BSL-код. */
+export function hasApplicableDiffContent(originalCode: string, content: string): boolean {
+    return getApplicableDiffContent(originalCode, content) !== null;
+}
+
 /** Очищает сообщение от технических блоков diff */
 export function cleanDiffArtifacts(content: string): string {
     let cleaned = normalizeDiffMarkup(content).replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/g, '');
@@ -1032,8 +1108,7 @@ export function processDiffResponse(originalCode: string, response: string): str
 /** Извлекает код для отображения в редакторе */
 export function extractDisplayCode(originalCode: string, response: string): string | null {
     if (hasDiffBlocks(response)) return applyDiff(originalCode, response);
-    const match = response.match(/```(?:bsl|1c)([\s\S]*?)```/i);
-    return match ? match[1].trim() : null;
+    return extractBslCodeBlock(response);
 }
 
 /** Удаляет все блоки кода и diff-блоки, оставляя только текст */

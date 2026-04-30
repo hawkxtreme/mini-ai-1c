@@ -11,7 +11,7 @@ import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor,
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
-import { applyDiffWithDiagnostics, formatDiffErrorMessage, parseDiffBlocks, hasApplicableDiffBlocks, hasBlockingIncompleteDiffBlocks } from '../../utils/diffViewer';
+import { applyDiffWithDiagnostics, formatDiffErrorMessage, parseDiffBlocks, getApplicableDiffContent, hasBlockingIncompleteDiffBlocks } from '../../utils/diffViewer';
 import { isOllamaCloudProfile } from '../../utils/profileHelpers';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
@@ -319,7 +319,7 @@ export function ChatArea({
     onActiveDiffChange,
     activeDiffContent
 }: ChatAreaProps) {
-    const { messages, compressionIndicator, isLoading, streamStartTime, chatStatus, currentIteration, messageQueue, activeSessionId, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue, clearChat } = useChat();
+    const { messages, compressionIndicator, isLoading, streamStartTime, chatStatus, currentIteration, messageQueue, activeSessionId, sendMessage, stopChat, editAndRerun, addSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue, clearChat } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
@@ -493,25 +493,6 @@ export function ChatArea({
     const appendVoiceText = useCallback((text: string) => {
         setInput(prev => prev + (prev ? ' ' : '') + text);
     }, []);
-
-    // Welcome message when switching to Напарник
-    const NAPARNIK_INFO_MSG = [
-        '1С:Напарник подключён',
-        'Доступно: поиск по ИТС и документации 1С',
-        'Доступно: системные инструкции Mini AI 1C через адаптер',
-        'Ограничение: прямой diff/apply не поддерживается'
-    ].join('\n');
-    const prevProfileIdRef = useRef<string | null>(null);
-    useEffect(() => {
-        if (prevProfileIdRef.current === activeProfileId) return;
-        const wasNaparnik = profiles.find(p => p.id === prevProfileIdRef.current)?.provider === 'OneCNaparnik';
-        prevProfileIdRef.current = activeProfileId ?? null;
-        if (isNaparnikActive && !wasNaparnik && messages.length === 0) {
-            addSystemMessage(NAPARNIK_INFO_MSG, 'info');
-        } else if (!isNaparnikActive && wasNaparnik) {
-            removeSystemMessage(NAPARNIK_INFO_MSG);
-        }
-    }, [activeProfileId]);
 
     const fetchCliStatusForProfile = useCallback(async (profileId: string, provider: ChatCliProvider) => {
         try {
@@ -810,7 +791,10 @@ export function ChatArea({
         // Срабатывает сразу (в том числе во время стриминга), чтобы DiffEditor обновлялся в реальном времени.
         if (messages.length === 0) return;
         const lastMsg = messages[messages.length - 1];
-        if (lastMsg.role !== 'assistant' || !hasApplicableDiffBlocks(currentDiffBaseCode, lastMsg.content)) return;
+        const applicableDiffContent = lastMsg.role === 'assistant'
+            ? getApplicableDiffContent(currentDiffBaseCode, lastMsg.content)
+            : null;
+        if (!applicableDiffContent) return;
 
         const msgKey = lastMsg.id || String(messages.length - 1);
 
@@ -823,7 +807,7 @@ export function ChatArea({
             // Если код не был загружен из Конфигуратора — панель не открываем.
             const hasBaseCode = !!currentDiffBaseCode;
             if (hasBaseCode && onActiveDiffChange) {
-                onActiveDiffChange(lastMsg.content);
+                onActiveDiffChange(applicableDiffContent);
             }
             // Фиксируем как "показанное"
             if (!appliedDiffMessages.has(msgKey)) {
@@ -1079,7 +1063,7 @@ export function ChatArea({
     // два сообщения показывают кнопки одновременно.
     const lastDiffMsgIndex = useMemo(() => {
         for (let i = messages.length - 1; i >= 0; i--) {
-            if (messages[i].role === 'assistant' && hasApplicableDiffBlocks(currentDiffBaseCode, messages[i].content)) {
+            if (messages[i].role === 'assistant' && getApplicableDiffContent(currentDiffBaseCode, messages[i].content)) {
                 return i;
             }
         }
@@ -1282,7 +1266,7 @@ export function ChatArea({
                                                             // text
                                                             const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
                                                             const cleanedContent = cleanDiffArtifacts(part.content || '', currentOriginalCode);
-                                                            const hasApplicableDiff = hasApplicableDiffBlocks(currentOriginalCode, part.content || '');
+                                                            const hasApplicableDiff = !!getApplicableDiffContent(currentOriginalCode, part.content || '');
                                                             const hasBlockingIncompleteDiff = hasBlockingIncompleteDiffBlocks(part.content || '');
                                                             if (cleanedContent.trim().length === 0) {
                                                                 if (!hasApplicableDiff) {
@@ -1378,7 +1362,7 @@ export function ChatArea({
                                                         const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
                                                         const cleanedContent = cleanDiffArtifacts(msg.content || '', currentOriginalCode);
                                                         const hasVisibleContent = cleanedContent.trim().length > 0;
-                                                        const hasApplicableDiff = hasApplicableDiffBlocks(currentOriginalCode, msg.content || '');
+                                                        const hasApplicableDiff = !!getApplicableDiffContent(currentOriginalCode, msg.content || '');
                                                         const hasBlockingIncompleteDiff = hasBlockingIncompleteDiffBlocks(msg.content || '');
 
                                                         if (msg.role !== 'assistant') return null;
@@ -1444,26 +1428,27 @@ export function ChatArea({
                                                         }
 
                                                         const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
+                                                        const applicableDiffContent = getApplicableDiffContent(currentOriginalCode, msg.content);
                                                         const hasContext = currentOriginalCode.trim().length > 0;
                                                         const shouldShowBanner = hasContext &&
                                                             i === lastDiffMsgIndex &&
                                                             !isLoading &&
-                                                            hasApplicableDiffBlocks(currentOriginalCode, msg.content) &&
+                                                            !!applicableDiffContent &&
                                                             !dismissedDiffMessages.has(msgKey);
 
                                                         if (!shouldShowBanner) return null;
 
                                                         return (
                                                             <DiffSummaryBanner
-                                                                content={msg.content}
+                                                                content={applicableDiffContent}
                                                                 disabled={validatingDiffMessageKey === msgKey}
                                                                 onApply={async () => {
                                                                     // Применяем дифф только сейчас — по явному подтверждению пользователя
-                                                                    if (hasBlockingIncompleteDiffBlocks(msg.content)) {
+                                                                    if (hasBlockingIncompleteDiffBlocks(applicableDiffContent)) {
                                                                         addSystemMessage(INCOMPLETE_DIFF_MESSAGE);
                                                                         return;
                                                                     }
-                                                                    const diffResult = applyDiffWithDiagnostics(currentOriginalCode, msg.content);
+                                                                    const diffResult = applyDiffWithDiagnostics(currentOriginalCode, applicableDiffContent);
                                                                     const diffWarningMessage = formatDiffErrorMessage(diffResult);
                                                                     const appliedBlockCount = diffResult.blocks.filter(block =>
                                                                         block.applyStatus?.startsWith('applied_'),
