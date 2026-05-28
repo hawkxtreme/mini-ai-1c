@@ -1,13 +1,16 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { Minus, Square, X } from 'lucide-react';
+import type { BslDiagnostic } from '../../api/bsl';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useBsl } from '../../contexts/BslContext';
 import { useChat } from '../../contexts/ChatContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { getConfiguratorApplySupport } from '../../api/configurator';
+import { findFirstIntroducedParseError, formatIntroducedParseErrorMessage } from '../../utils/bslSyntaxGuard';
 import { CodeSidePanel } from '../CodeSidePanel';
 import { SettingsPanel } from '../SettingsPanel';
 import { ConflictDialog } from '../ui/ConflictDialog';
@@ -36,8 +39,8 @@ interface OverlayExplainPayload {
 export function MainLayout() {
     const { settings } = useSettings();
     const { status: bslStatus, analyzeCode } = useBsl();
-    const { clearChat, isLoading } = useChat();
-    const { pasteCode, checkSelection } = useConfigurator();
+    const { clearChat, exportChat, isLoading } = useChat();
+    const { pasteCode, checkSelection, getCode } = useConfigurator();
 
     const [viewMode, setViewMode] = useState<'assistant' | 'split' | 'code'>('assistant');
     const [showSettings, setShowSettings] = useState(false);
@@ -46,6 +49,7 @@ export function MainLayout() {
     const [isApplying, setIsApplying] = useState(false);
     const [isValidating, setIsValidating] = useState(false);
     const [diagnostics, setDiagnostics] = useState<any[]>([]);
+    const [selectedDiagnostics, setSelectedDiagnostics] = useState<any[] | null>(null);
     const [showConflictDialog, setShowConflictDialog] = useState(false);
     const [selectionActive, setSelectionActive] = useState(true);
     const [activeDiffContent, setActiveDiffContent] = useState('');
@@ -71,6 +75,8 @@ export function MainLayout() {
         loadedContextCode,
         isContextSelection,
     } = codeSession;
+    const deferredModifiedCode = useDeferredValue(modifiedCode);
+    const getLatestWorkingCode = useCallback(() => codeSessionRef.current.workingCode, [codeSessionRef]);
 
     // useMemo + try/catch защищает от ошибки "Cannot read properties of undefined (reading 'metadata')"
     // которая возникает если Tauri IPC не инициализирован (первый рендер / dev-режим браузера)
@@ -256,6 +262,22 @@ export function MainLayout() {
                 : (!lastConfiguratorCode || lastConfiguratorCode.trim().length === 0);
             const originalContent = writeSession?.originalCode || lastConfiguratorCode || undefined;
 
+            // Проверка конфликта на фронтенде до вставки — читаем текущее содержимое
+            // через тот же путь (Ctrl+C), что использовался при захвате
+            if (originalContent) {
+                try {
+                    const currentContent = await getCode(useSelectAll);
+                    if (currentContent.trim() !== originalContent.trim()) {
+                        const isActive = await checkSelection();
+                        setSelectionActive(isActive);
+                        setShowConflictDialog(true);
+                        return;
+                    }
+                } catch {
+                    // не удалось прочитать — продолжаем без проверки
+                }
+            }
+
             await pasteCode(
                 modifiedCode,
                 useSelectAll,
@@ -276,18 +298,12 @@ export function MainLayout() {
             setActiveQuickActionSession(null);
         } catch (e: any) {
             const errorMsg = typeof e === 'string' ? e : e?.message || String(e);
-            if (errorMsg.includes('CONFLICT')) {
-                const isActive = await checkSelection();
-                setSelectionActive(isActive);
-                setShowConflictDialog(true);
-            } else {
-                console.error('Apply failed', e);
-                alert('Ошибка применения: ' + errorMsg);
-            }
+            console.error('Apply failed', e);
+            alert('Ошибка применения: ' + errorMsg);
         } finally {
             setIsApplying(false);
         }
-    }, [activeQuickActionSession, applySucceeded, checkSelection, lastConfiguratorCode, modifiedCode, pasteCode]);
+    }, [activeQuickActionSession, applySucceeded, checkSelection, getCode, lastConfiguratorCode, modifiedCode, pasteCode]);
 
     const handleConflictApplyToAll = useCallback(async () => {
         setShowConflictDialog(false);
@@ -363,9 +379,35 @@ export function MainLayout() {
 
     const handleChatApplyCode = useCallback((code: string) => {
         applyAICode(code);
+        acceptDiff();
         setActiveDiffContent('');
         setViewMode(prev => prev === 'assistant' ? 'split' : prev);
-    }, [applyAICode]);
+    }, [acceptDiff, applyAICode]);
+
+    const handleValidateChatAppliedCode = useCallback(async (baseCode: string, candidateCode: string) => {
+        try {
+            const [baseDiagnostics, candidateDiagnostics] = await Promise.all([
+                analyzeCode(baseCode),
+                analyzeCode(candidateCode),
+            ]);
+
+            const introducedParseError = findFirstIntroducedParseError(
+                baseDiagnostics as BslDiagnostic[],
+                candidateDiagnostics,
+            );
+
+            if (!introducedParseError) {
+                return null;
+            }
+
+            return formatIntroducedParseErrorMessage(introducedParseError);
+        } catch (error) {
+            const details = error instanceof Error ? error.message : String(error);
+            return details
+                ? `Применение отменено: не удалось проверить синтаксис BSL перед применением. ${details}`
+                : 'Применение отменено: не удалось проверить синтаксис BSL перед применением.';
+        }
+    }, [analyzeCode]);
 
     const handleActiveDiffChange = useCallback((content: string) => {
         setActiveDiffContent(content);
@@ -382,12 +424,44 @@ export function MainLayout() {
         setActiveDiffContent('');
     }, [clearAll, clearChat]);
 
+    const [appVersion, setAppVersion] = useState<string>('');
+    useEffect(() => {
+        getVersion().then(v => setAppVersion(v)).catch(() => {});
+    }, []);
+
     const minimize = () => appWindow?.minimize();
     const maximize = async () => {
         const isMaximized = await appWindow?.isMaximized();
         isMaximized ? appWindow?.unmaximize() : appWindow?.maximize();
     };
     const close = () => appWindow?.close();
+
+    useEffect(() => {
+        (window as any).__MINI_AI_LAYOUT_TEST__ = {
+            setDiagnosticsState: (payload: {
+                diagnostics?: any[];
+                selectedDiagnostics?: any[] | null;
+            }) => {
+                if (payload.diagnostics !== undefined) {
+                    setDiagnostics(payload.diagnostics);
+                }
+                if (Object.prototype.hasOwnProperty.call(payload, 'selectedDiagnostics')) {
+                    setSelectedDiagnostics(payload.selectedDiagnostics ?? null);
+                }
+            },
+            getDiagnosticsState: () => ({
+                diagnostics,
+                selectedDiagnostics,
+                viewMode,
+                baselineCode: uiBaselineCode,
+                modifiedCode,
+            }),
+        };
+
+        return () => {
+            delete (window as any).__MINI_AI_LAYOUT_TEST__;
+        };
+    }, [diagnostics, modifiedCode, selectedDiagnostics, uiBaselineCode, viewMode]);
 
     return (
         <div className="flex flex-col h-screen bg-transparent relative overflow-hidden">
@@ -398,6 +472,7 @@ export function MainLayout() {
                 <div className="relative z-10 flex items-center gap-2 pointer-events-none">
                     <img src={logo} alt="Logo" className="w-5 h-5" />
                     <span className="text-sm font-medium text-zinc-300">Mini AI 1C</span>
+                    {appVersion && <span className="text-xs text-zinc-600">v{appVersion}</span>}
                 </div>
                 <div className="relative z-50 flex items-center gap-1 pointer-events-auto">
                     <button onClick={minimize} className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white"><Minus className="w-4 h-4" /></button>
@@ -417,6 +492,7 @@ export function MainLayout() {
                     viewMode={viewMode}
                     onViewModeChange={setViewMode}
                     onNewChat={handleNewChat}
+                    onExportChat={exportChat}
                     onOpenSettings={(tab) => { if (tab) setSettingsTab(tab as any); setShowSettings(true); }}
                 />
 
@@ -424,15 +500,18 @@ export function MainLayout() {
                     <div className={`flex flex-1 overflow-hidden transition-all duration-300 ${viewMode === 'code' ? 'hidden' : 'opacity-100'}`}>
                         <ChatArea
                             originalCode={uiBaselineCode}
-                            modifiedCode={modifiedCode}
+                            modifiedCode={deferredModifiedCode}
                             loadedContextCode={loadedContextCode}
                             isContextSelection={isContextSelection}
+                            getLatestWorkingCode={getLatestWorkingCode}
                             onClearContext={clearContext}
                             onPrepareDiffBase={syncBaseline}
                             onApplyCode={handleChatApplyCode}
+                            onValidateAppliedCode={handleValidateChatAppliedCode}
                             onCommitCode={handleCommitCode}
                             onCodeLoaded={handleCodeLoaded}
                             diagnostics={diagnostics}
+                            selectedDiagnostics={selectedDiagnostics}
                             onOpenSettings={(tab) => {
                                 setSettingsTab(tab as any);
                                 setShowSettings(true);
@@ -457,6 +536,7 @@ export function MainLayout() {
                             activeDiffContent={activeDiffContent}
                             onActiveDiffChange={setActiveDiffContent}
                             onCommitCode={handleCommitCode}
+                            onDiagnosticSelectionChange={setSelectedDiagnostics}
                         />
                     </div>
                 </div>

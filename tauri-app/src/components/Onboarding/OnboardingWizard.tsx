@@ -112,6 +112,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
             const currentSettings = settings || {
                 configurator: {
                     window_title_pattern: "",
+                    extra_window_title_patterns: [],
                     selected_window_hwnd: null,
                     selected_window_pid: null,
                     selected_window_title: null,
@@ -128,6 +129,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                     java_path: "",
                     auto_download: true
                 },
+                node_path: "node",
                 mcp_servers: [],
                 onboarding_completed: false,
                 debug_mode: false,
@@ -171,8 +173,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onComplete }
                         name: '1C:Напарник',
                         enabled: true,
                         transport: 'stdio',
-                        command: 'npx',
-                        args: ['--yes', 'tsx', 'src/mcp-servers/1c-naparnik.ts'],
+                        command: currentSettings.node_path || 'node',
+                        args: ['mcp-servers/1c-naparnik.cjs'],
                         env: { 'ONEC_AI_TOKEN': naparnikToken }
                     } as any);
                 }

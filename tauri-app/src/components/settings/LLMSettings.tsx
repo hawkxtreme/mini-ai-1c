@@ -9,6 +9,9 @@ import { CodexAuthModal } from './CodexAuthModal';
 import { CliStatus, CliUsageWindow } from '../../types/settings';
 
 import { LLMProfile, ProfileStore } from '../../contexts/ProfileContext';
+import { applyFetchedModelMetadata, applySelectedModelMetadata } from '../../utils/llmProfileModelMetadata';
+import { isOllamaCloudProfile } from '../../utils/profileHelpers';
+import { shouldResetApiKeyDraft } from '../../utils/profileSecretDraft';
 
 interface LLMSettingsProps {
     profiles: ProfileStore;
@@ -27,9 +30,11 @@ const PROVIDERS = [
     { value: 'ZAI', label: 'Z.ai (Zhipu)', defaultModel: 'glm-5', defaultUrl: 'https://api.z.ai/api/coding/paas/v4', type: 'standard' },
     { value: 'OpenRouter', label: 'OpenRouter', defaultModel: 'google/gemini-2.0-flash-001', defaultUrl: 'https://openrouter.ai/api/v1', type: 'standard' },
     { value: 'Ollama', label: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434/v1', type: 'standard' },
+    { value: 'OllamaCloud', label: 'Ollama Cloud', defaultModel: 'qwen3-coder:480b', defaultUrl: 'https://ollama.com/v1', type: 'ollama-cloud' },
     { value: 'LMStudio', label: 'LM Studio (Local)', defaultModel: '', defaultUrl: 'http://localhost:1234/v1', type: 'standard' },
     { value: 'QwenCli', label: 'Qwen Code (CLI)', defaultModel: 'coder-model', defaultUrl: 'https://portal.qwen.ai/v1', type: 'cli' },
-    { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'gpt-5.4', defaultUrl: 'https://chatgpt.com/backend-api/codex', type: 'cli' },
+    { value: 'CodexCli', label: 'OpenAI Codex (CLI)', defaultModel: 'gpt-5.5', defaultUrl: 'https://chatgpt.com/backend-api/codex', type: 'cli' },
+    { value: 'MiniMax', label: 'MiniMax', defaultModel: 'MiniMax-M2.7', defaultUrl: 'https://api.minimax.io/v1', type: 'standard' },
     { value: 'Custom', label: 'Custom / Other', defaultModel: '', defaultUrl: '', type: 'standard' },
     { value: 'OneCNaparnik', label: '1С:Напарник', defaultModel: 'naparnik', defaultUrl: 'https://code.1c.ai', type: 'naparnik' },
 ];
@@ -92,12 +97,14 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
         if (editingId) {
             const p = profiles.profiles.find(p => p.id === editingId);
             if (p) {
-                const isNewProfile = prevEditingIdRef.current !== editingId;
+                const isNewProfile = shouldResetApiKeyDraft(prevEditingIdRef.current, editingId);
                 prevEditingIdRef.current = editingId;
 
                 setEditForm(prev => (prev?.id === editingId ? prev : { ...p }));
-                setNewApiKey('');
-                setConnectionTest(null);
+                if (isNewProfile) {
+                    setNewApiKey('');
+                    setConnectionTest(null);
+                }
 
                 // Only reset model list when switching to a different profile
                 if (isNewProfile) {
@@ -129,6 +136,61 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         setModelList(sortModels(res));
                     }).catch(e => {
                         console.error('[LLMSettings] Failed to auto-fetch CLI models:', e);
+                    }).finally(() => {
+                        setLoadingModels(false);
+                    });
+                } else if (p.provider === 'MiniMax' && isNewProfile) {
+                    // MiniMax: auto-fetch static list once on profile switch (no key needed)
+                    setLoadingModels(true);
+                    invoke<any[]>('fetch_models_from_provider', {
+                        providerId: p.provider,
+                        baseUrl: p.base_url || 'https://api.minimax.io/v1',
+                        apiKey: ''
+                    }).then(res => {
+                        const sorted = sortModels(res);
+                        setModelList(sorted);
+                        // Sync max_tokens for the currently selected model
+                        const currentModel = sorted.find((m: any) => m.id === p.model);
+                        if (currentModel?.context_window) {
+                            setEditForm(prev => prev?.id === p.id ? applyFetchedModelMetadata(prev, currentModel) : prev);
+                        }
+                    }).catch(e => {
+                        console.error('[LLMSettings] Failed to auto-fetch MiniMax models:', e);
+                    }).finally(() => {
+                        setLoadingModels(false);
+                    });
+                } else if (p.provider === 'LMStudio' || p.provider === 'Ollama') {
+                    // Auto-fetch to get real context_window for local providers
+                    setLoadingModels(true);
+                    invoke<any[]>('fetch_models_from_provider', {
+                        providerId: p.provider,
+                        baseUrl: p.base_url || PROVIDERS.find(prov => prov.value === p.provider)?.defaultUrl || '',
+                        apiKey: ''
+                    }).then(res => {
+                        const sorted = sortModels(res);
+                        setModelList(sorted);
+                        const currentModel = sorted.find((m: any) => m.id === p.model);
+                        if (currentModel?.context_window) {
+                            setEditForm(prev => prev?.id === p.id ? applyFetchedModelMetadata(prev, currentModel) : prev);
+                        }
+                    }).catch(e => {
+                        console.error('[LLMSettings] Failed to auto-fetch LMStudio/Ollama models:', e);
+                    }).finally(() => {
+                        setLoadingModels(false);
+                    });
+                } else if (p.provider === 'OllamaCloud' && p.api_key_encrypted) {
+                    // Cloud Ollama: use profile-based fetch so backend decrypts the API key.
+                    // /api/show needs auth on ollama.com, so apiKey: '' would fail.
+                    setLoadingModels(true);
+                    invoke<any[]>('fetch_models_for_profile', { profileId: p.id }).then(res => {
+                        const sorted = sortModels(res);
+                        setModelList(sorted);
+                        const currentModel = sorted.find((m: any) => m.id === p.model);
+                        if (currentModel?.context_window) {
+                            setEditForm(prev => prev?.id === p.id ? applyFetchedModelMetadata(prev, currentModel) : prev);
+                        }
+                    }).catch(e => {
+                        console.error('[LLMSettings] Failed to auto-fetch Ollama Cloud models:', e);
                     }).finally(() => {
                         setLoadingModels(false);
                     });
@@ -211,8 +273,8 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             api_key_encrypted: '',
             base_url: provider.defaultUrl,
             max_tokens: 4096,
-            temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli') ? 0.1 : 0.7,
-            reasoning_effort: providerValue === 'CodexCli' ? 'xhigh' : undefined,
+            temperature: (providerValue === 'QwenCli' || providerValue === 'CodexCli' || providerValue === 'OllamaCloud') ? 0.1 : 0.7,
+            reasoning_effort: providerValue === 'CodexCli' ? 'medium' : undefined,
         };
         try {
             await invoke('save_profile', { profile: newProfile, apiKey: null });
@@ -254,11 +316,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
             if (editForm.model) {
                 const currentModel = sortedModels.find(m => m.id === editForm.model);
                 if (currentModel) {
-                    setEditForm(prev => prev ? ({
-                        ...prev,
-                        max_tokens: currentModel.context_window || prev.max_tokens,
-                        context_window_override: currentModel.context_window
-                    }) : null);
+                    setEditForm(prev => prev ? applyFetchedModelMetadata(prev, currentModel) : null);
                 }
             }
         } catch (e) {
@@ -284,7 +342,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             <div className="h-[1px] flex-1 bg-zinc-800"></div>
                         </div>
                         <div className="space-y-1.5">
-                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'CodexCli' && p.provider !== 'OneCNaparnik').map(p => (
+                            {profiles.profiles.filter(p => p.provider !== 'QwenCli' && p.provider !== 'CodexCli' && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).map(p => (
                                 <div
                                     key={p.id}
                                     onClick={() => setEditingId(p.id)}
@@ -384,6 +442,41 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             </button>
                         </div>
                     </div>
+
+                    {/* Ollama Cloud Group */}
+                    <div className="space-y-2">
+                        <div className="px-1 flex items-center gap-2 opacity-50">
+                            <span className="text-[10px] uppercase font-black tracking-widest text-zinc-400">Ollama Cloud</span>
+                            <div className="h-[1px] flex-1 bg-zinc-800"></div>
+                        </div>
+                        <div className="space-y-1.5">
+                            {profiles.profiles.filter(isOllamaCloudProfile).map(p => (
+                                <div
+                                    key={p.id}
+                                    onClick={() => setEditingId(p.id)}
+                                    className={`p-2 sm:p-3 rounded-lg border cursor-pointer transition-all ${editingId === p.id
+                                        ? 'border-cyan-400 bg-cyan-400/10'
+                                        : 'border-zinc-800 bg-zinc-800 hover:border-zinc-600'
+                                        }`}
+                                >
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <span className="font-medium text-xs sm:text-sm text-zinc-200 truncate pr-1">{p.name}</span>
+                                        {profiles.active_profile_id === p.id && <Check className="w-3 h-3 text-cyan-400 flex-shrink-0" />}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500 truncate">{p.model || 'ollama.com'}</div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="space-y-1.5 pt-1">
+                            <button
+                                onClick={() => handleCreate('OllamaCloud')}
+                                className="w-full py-2 flex items-center justify-center gap-2 border border-dashed border-zinc-700 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition text-[10px] font-medium"
+                            >
+                                <Plus className="w-3 h-3" /> Добавить Ollama Cloud
+                            </button>
+                        </div>
+                    </div>
+
                 </div>
             </div>
 
@@ -423,7 +516,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             base_url: def?.defaultUrl || '',
                                             model: def?.defaultModel || '',
                                             reasoning_effort: v === 'CodexCli'
-                                                ? (prev.reasoning_effort || 'xhigh')
+                                                ? (prev.reasoning_effort || 'medium')
                                                 : undefined
                                         };
                                     });
@@ -436,6 +529,11 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             <>
                                                 <div className="px-2 py-1.5 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">1С:Напарник</div>
                                                 {PROVIDERS.filter(p => p.type === 'naparnik').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
+                                            </>
+                                        ) : editForm.provider === 'OllamaCloud' ? (
+                                            <>
+                                                <div className="px-2 py-1.5 text-[10px] font-bold text-cyan-500/70 uppercase tracking-wider">Ollama Cloud</div>
+                                                {PROVIDERS.filter(p => p.type === 'ollama-cloud').map(p => <SelectItem key={p.value} value={p.value} className="text-xs">{p.label}</SelectItem>)}
                                             </>
                                         ) : PROVIDERS.find(p => p.value === editForm.provider)?.type === 'cli' ? (
                                             <>
@@ -457,6 +555,30 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                         <div className="space-y-4">
                             {editForm.provider === 'QwenCli' && (
                                 <div className="p-4 bg-zinc-950/50 rounded-lg border border-zinc-800 space-y-4">
+                                    <div className="qwen-paid-notice p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                                        <p className="text-xs text-amber-400 font-medium leading-relaxed">
+                                            ⚠️ Qwen Code CLI стал платным с апреля 2026 — бесплатный OAuth-доступ более не работает.
+                                        </p>
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                            <a
+                                                href="https://dashscope.aliyun.com/"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="inline-flex items-center gap-1 text-[10px] text-amber-400/80 hover:text-amber-300 underline underline-offset-2 transition-colors"
+                                            >
+                                                <ExternalLink className="w-3 h-3" /> Купить подписку (DashScope)
+                                            </a>
+                                            <span className="text-[10px] text-zinc-600">·</span>
+                                            <a
+                                                href="https://openrouter.ai/models?q=qwen"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="inline-flex items-center gap-1 text-[10px] text-amber-400/80 hover:text-amber-300 underline underline-offset-2 transition-colors"
+                                            >
+                                                <ExternalLink className="w-3 h-3" /> Qwen через OpenRouter
+                                            </a>
+                                        </div>
+                                    </div>
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-2">
                                             <label className="text-xs text-zinc-500 uppercase font-bold">Authentication</label>
@@ -674,7 +796,67 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                 </div>
                             )}
 
-                        {editForm.provider !== 'QwenCli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && (
+                            {editForm.provider === 'MiniMax' && (
+                                <div className="p-4 bg-zinc-950/50 rounded-lg border border-violet-900/40 space-y-3">
+                                    <label className="text-xs text-zinc-500 uppercase font-bold">API Key MiniMax</label>
+                                    <input
+                                        ref={apiKeyInputRef}
+                                        type="password"
+                                        className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-violet-500 outline-none placeholder-zinc-700 text-zinc-200"
+                                        placeholder={editForm.api_key_encrypted ? "•••••••••••• (Encrypted)" : "eyJ..."}
+                                        value={newApiKey}
+                                        onChange={e => setNewApiKey(e.target.value)}
+                                    />
+                                    <div>
+                                        <label className="text-xs text-zinc-500 uppercase font-bold px-0.5">Base URL</label>
+                                        <input
+                                            className="w-full mt-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 h-9 text-sm focus:border-violet-500 outline-none font-mono text-zinc-400"
+                                            value={editForm.base_url || 'https://api.minimax.io/v1'}
+                                            onChange={e => setEditForm({ ...editForm, base_url: e.target.value })}
+                                        />
+                                    </div>
+                                    <p className="text-[10px] text-zinc-500 leading-relaxed flex items-start gap-1.5">
+                                        <Info className="w-3 h-3 shrink-0 mt-0.5" />
+                                        <span>
+                                            Получить API key:{' '}
+                                            <button
+                                                type="button"
+                                                onClick={() => openUrl('https://www.minimax.io/platform')}
+                                                className="text-violet-400 hover:text-violet-300 inline-flex items-center gap-0.5 transition-colors"
+                                            >
+                                                minimax.io/platform <ExternalLink className="w-2.5 h-2.5" />
+                                            </button>
+                                            {' '}→ API Keys.
+                                            Ключ хранится зашифрованным в системном keychain.
+                                        </span>
+                                    </p>
+                                </div>
+                            )}
+
+                            {editForm.provider === 'OllamaCloud' && (
+                                <div className="p-3 bg-cyan-50 dark:bg-cyan-500/5 border border-cyan-300 dark:border-cyan-500/30 rounded-lg space-y-2">
+                                    <p className="text-[11px] text-cyan-900 dark:text-cyan-200 font-medium leading-relaxed flex items-start gap-1.5">
+                                        <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                        <span>
+                                            Облачные модели Ollama (kimi, qwen3-coder, gpt-oss, deepseek и др.).
+                                            Получить API ключ:{' '}
+                                            <button
+                                                type="button"
+                                                onClick={() => openUrl('https://ollama.com/settings/keys')}
+                                                className="text-cyan-700 dark:text-cyan-400 hover:text-cyan-900 dark:hover:text-cyan-300 inline-flex items-center gap-0.5 transition-colors underline underline-offset-2"
+                                            >
+                                                ollama.com/settings/keys <ExternalLink className="w-2.5 h-2.5" />
+                                            </button>.
+                                        </span>
+                                    </p>
+                                    <p className="text-[10px] text-cyan-800 dark:text-cyan-300/80 leading-relaxed">
+                                        Часть моделей (kimi-k2.5/2.6, glm-5/5.1, deepseek-v4-flash/pro) требует платной подписки.
+                                        Бесплатно доступны: gpt-oss:20b/120b, qwen3-coder:480b, qwen3-next:80b, kimi-k2-thinking, glm-4.6 и другие.
+                                    </p>
+                                </div>
+                            )}
+
+                        {editForm.provider !== 'QwenCli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && editForm.provider !== 'MiniMax' && (
                                 <div>
                                     <label className="text-xs text-zinc-500 uppercase font-bold px-1">API Key</label>
                                     <input
@@ -689,7 +871,7 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                             )}
                         </div>
 
-                        {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && (
+                        {PROVIDERS.find(p => p.value === editForm.provider)?.type !== 'cli' && editForm.provider !== 'CodexCli' && editForm.provider !== 'OneCNaparnik' && editForm.provider !== 'MiniMax' && (
                             <div>
                                 <label className="text-xs text-zinc-500 uppercase font-bold px-1">Base URL</label>
                                 <input
@@ -724,12 +906,17 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             const m = modelList.find(m => m.id === v);
                                             setEditForm(prev => {
                                                 if (!prev) return prev;
-                                                return {
-                                                    ...prev,
-                                                    model: v,
-                                                    max_tokens: m?.context_window || prev.max_tokens,
-                                                    context_window_override: m?.context_window
-                                                };
+                                                const isLocalProvider =
+                                                    prev.provider === 'Ollama' ||
+                                                    prev.provider === 'LMStudio';
+                                                return applySelectedModelMetadata(
+                                                    prev,
+                                                    {
+                                                        id: v,
+                                                        context_window: m?.context_window,
+                                                    },
+                                                    { syncMaxTokens: !isLocalProvider },
+                                                );
                                             });
                                         }}
                                     >
@@ -767,12 +954,35 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                                             <span className="ml-1 text-zinc-600 normal-case font-normal">(фиксировано 65536)</span>
                                         )}
                                     </label>
-                                    <input
-                                        type="number"
-                                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-md px-3 h-9 text-sm text-zinc-200"
-                                        value={editForm.max_tokens}
-                                        onChange={e => setEditForm({ ...editForm, max_tokens: parseInt(e.target.value) || 0 })}
-                                    />
+                                    <div className="relative mt-1">
+                                        <input
+                                            type="number"
+                                            className="w-full bg-zinc-900 border border-zinc-700 rounded-md pl-3 pr-16 h-9 text-sm text-zinc-200"
+                                            value={editForm.max_tokens}
+                                            onChange={e => setEditForm({ ...editForm, max_tokens: parseInt(e.target.value) || 0 })}
+                                        />
+                                        {(() => {
+                                            const currentModel = modelList.find(m => m.id === editForm.model);
+                                            const ctx = currentModel?.context_window;
+                                            if (!ctx) return null;
+                                            const disabled = editForm.max_tokens === ctx;
+                                            return (
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        setEditForm(prev =>
+                                                            prev ? { ...prev, max_tokens: ctx } : prev,
+                                                        )
+                                                    }
+                                                    disabled={disabled}
+                                                    title={`Подставить максимум модели: ${ctx}`}
+                                                    className="absolute right-1 top-1 h-7 px-2 rounded text-[10px] uppercase font-bold tracking-wide bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                                >
+                                                    ↑ max
+                                                </button>
+                                            );
+                                        })()}
+                                    </div>
                                 </div>
                                 {editForm.provider === 'CodexCli' ? (
                                     <div className="flex-1 min-w-[120px]">

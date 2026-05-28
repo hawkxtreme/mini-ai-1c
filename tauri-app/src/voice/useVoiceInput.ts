@@ -1,16 +1,51 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { MicActivityMonitor } from './micActivity';
 import { speechService } from './speechRecognition';
 
+const HOOK_PREFIX = '[VoiceInput:hook]';
+
 function hookLog(level: 'info' | 'warn' | 'error', ...args: unknown[]) {
     const ts = new Date().toISOString().slice(11, 23);
-    console[level]('[VoiceInput:hook]', `[${ts}]`, ...args);
+    console[level](HOOK_PREFIX, `[${ts}]`, ...args);
+
+    const parts = args.map((a) =>
+        typeof a === 'object' ? JSON.stringify(a) : String(a),
+    );
+    const message = `${HOOK_PREFIX} [${ts}] ${parts.join(' ')}`;
+    invoke('write_frontend_log', { message }).catch(() => {/* best effort */});
+}
+
+/**
+ * Преобразует код ошибки Web Speech API в понятное пользователю сообщение на русском.
+ * Отдельно выделяет ошибки, связанные с групповой политикой Windows.
+ */
+function mapSpeechError(code: string): string {
+    switch (code) {
+        case 'service-not-allowed':
+            return 'Служба распознавания речи недоступна. Возможно, голосовые функции отключены групповой политикой Windows. Обратитесь к системному администратору или проверьте настройки конфиденциальности (Параметры → Конфиденциальность → Распознавание речи).';
+        case 'not-allowed':
+            return 'Доступ к микрофону запрещён. Проверьте разрешения браузера или групповую политику Windows.';
+        case 'no-speech':
+            return 'Речь не обнаружена. Проверьте микрофон и попробуйте снова.';
+        case 'audio-capture':
+            return 'Не удалось захватить аудио. Проверьте, что микрофон подключён и не занят другим приложением.';
+        case 'network':
+            return 'Ошибка сети при распознавании речи. Проверьте подключение к интернету.';
+        case 'aborted':
+            return 'Распознавание речи прервано.';
+        case 'language-not-supported':
+            return 'Язык "ru-RU" не поддерживается службой распознавания речи.';
+        default:
+            return `Ошибка голосового ввода: ${code}`;
+    }
 }
 
 export function useVoiceInput(onText: (text: string) => void, _selectedHwnd: number | null) {
     const [isRecording, setIsRecording] = useState(false);
     const [permissionState, setPermissionState] = useState<PermissionState | 'unknown'>('unknown');
     const [error, setError] = useState<string | null>(null);
+    const [rawErrorCode, setRawErrorCode] = useState<string | null>(null);
     const [micLevel, setMicLevel] = useState(0);
     const [hasMicSignal, setHasMicSignal] = useState(false);
     const [isMicMonitoringAvailable, setIsMicMonitoringAvailable] = useState(false);
@@ -150,6 +185,7 @@ export function useVoiceInput(onText: (text: string) => void, _selectedHwnd: num
 
         await checkPermission();
         setError(null);
+        setRawErrorCode(null);
         resetTranscriptState();
 
         sessionIdRef.current += 1;
@@ -168,15 +204,17 @@ export function useVoiceInput(onText: (text: string) => void, _selectedHwnd: num
                     return;
                 }
 
-                const normalizedError =
+                const rawCode =
                     typeof rawError === 'string'
                         ? rawError
                         : rawError instanceof Error
                             ? rawError.message
                             : rawError?.message || 'voice-error';
 
-                hookLog('error', 'Ошибка голосового ввода', { rawError, normalizedError, sessionId });
-                setError(normalizedError);
+                const userMessage = mapSpeechError(rawCode);
+                hookLog('error', 'Ошибка голосового ввода', { rawError, rawCode, userMessage, sessionId });
+                setError(userMessage);
+                setRawErrorCode(rawCode);
                 void finishRecording();
                 void checkPermission();
             },
@@ -221,6 +259,7 @@ export function useVoiceInput(onText: (text: string) => void, _selectedHwnd: num
     return {
         isRecording,
         error,
+        rawErrorCode,
         permissionState,
         toggleRecording,
         isSupported: speechService.isSupported(),

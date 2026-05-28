@@ -31,6 +31,7 @@ tauri-app/mcp-1c-search/**/target/
 .cursor/
 # Project specifics
 _archive/
+artifacts/
 specs/
 temp/
 *.tmp
@@ -66,3 +67,4 @@ tauri-app/src-tauri/editor-bridge/EditorBridge.deps.json
 tauri-app/src-tauri/editor-bridge/EditorBridge.runtimeconfig.json
 tauri-app/src-tauri/editor-bridge/Interop.UIAutomationClient.dll
 1c_mcp_ext/*.md
+tauri-app/src-tauri/tauri.vm202.v2.conf.json

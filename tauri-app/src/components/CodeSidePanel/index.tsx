@@ -5,10 +5,11 @@ import { CodeSidePanelProps } from './types';
 import { useResizing } from './useResizing';
 import { Header } from './Header';
 import { Footer } from './Footer';
-import { DiagnosticsView } from './DiagnosticsView';
+import { DiagnosticsView, diagnosticKey } from './DiagnosticsView';
 import McpToolsView from './McpToolsView';
 import { applyDiffWithDiagnostics, hasDiffBlocks } from '../../utils/diffViewer';
 import { useSettings } from '@/contexts/SettingsContext';
+import { markInputLatency } from '../../utils/performanceDiagnostics';
 
 export { type BslDiagnostic, type CodeSidePanelProps } from './types';
 
@@ -25,10 +26,21 @@ export function CodeSidePanel({
     activeDiffContent,
     onActiveDiffChange,
     onDiffRejected,
-    isFullWidth
+    onCommitCode,
+    isFullWidth,
+    onDiagnosticSelectionChange,
 }: CodeSidePanelProps) {
     const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'tools'>('diff');
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
+    const [selectedDiagnosticKeys, setSelectedDiagnosticKeys] = useState<Set<string>>(
+        () => new Set(diagnostics.map(diagnosticKey))
+    );
+
+    // When diagnostics list changes, reset selection to all-selected
+    useEffect(() => {
+        setSelectedDiagnosticKeys(new Set(diagnostics.map(diagnosticKey)));
+        onDiagnosticSelectionChange?.(diagnostics);
+    }, [diagnostics, onDiagnosticSelectionChange]);
     const { settings } = useSettings();
     const monacoTheme = settings?.theme === 'light' ? 'vs' : 'vs-dark';
     const isLightTheme = settings?.theme === 'light';
@@ -161,6 +173,66 @@ export function CodeSidePanel({
     baseCodeRef.current = localOriginalCode || modifiedCode;
     const localOriginalCodeRef = useRef(localOriginalCode);
     localOriginalCodeRef.current = localOriginalCode;
+    const latestEditorCodeRef = useRef(modifiedCode);
+    const pendingModifiedCodeRef = useRef<string | null>(null);
+    const modifiedCodeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const applyingExternalCodeRef = useRef(false);
+
+    useEffect(() => {
+        latestEditorCodeRef.current = modifiedCode;
+    }, [modifiedCode]);
+
+    useEffect(() => {
+        if (viewMode !== 'editor' || !editorRef.current || pendingModifiedCodeRef.current !== null) return;
+        if (editorRef.current.getValue?.() === modifiedCode) return;
+
+        applyingExternalCodeRef.current = true;
+        try {
+            editorRef.current.setValue(modifiedCode);
+            latestEditorCodeRef.current = modifiedCode;
+        } finally {
+            applyingExternalCodeRef.current = false;
+        }
+    }, [modifiedCode, viewMode]);
+
+    const flushModifiedCodeChange = useCallback(() => {
+        if (modifiedCodeFlushTimerRef.current !== null) {
+            clearTimeout(modifiedCodeFlushTimerRef.current);
+            modifiedCodeFlushTimerRef.current = null;
+        }
+
+        const pendingCode = pendingModifiedCodeRef.current;
+        if (pendingCode === null) return;
+
+        pendingModifiedCodeRef.current = null;
+        latestEditorCodeRef.current = pendingCode;
+        onModifiedCodeChange(pendingCode);
+    }, [onModifiedCodeChange]);
+
+    const scheduleModifiedCodeChange = useCallback((code: string) => {
+        latestEditorCodeRef.current = code;
+        pendingModifiedCodeRef.current = code;
+
+        if (modifiedCodeFlushTimerRef.current !== null) {
+            clearTimeout(modifiedCodeFlushTimerRef.current);
+        }
+
+        modifiedCodeFlushTimerRef.current = setTimeout(() => {
+            modifiedCodeFlushTimerRef.current = null;
+            const pendingCode = pendingModifiedCodeRef.current;
+            if (pendingCode === null) return;
+            pendingModifiedCodeRef.current = null;
+            onModifiedCodeChange(pendingCode);
+        }, 250);
+    }, [onModifiedCodeChange]);
+
+    useEffect(() => {
+        return () => {
+            if (modifiedCodeFlushTimerRef.current !== null) {
+                clearTimeout(modifiedCodeFlushTimerRef.current);
+            }
+        };
+    }, []);
 
     // ЗАМОРОЖЕННЫЙ превью-код: вычисляется ОДИН РАЗ при изменении activeDiffContent
     // и НЕ пересчитывается при принятии чанков — это предотвращает повторный fuzzy-match
@@ -176,6 +248,26 @@ export function CodeSidePanel({
     // Флаг: авто-скролл к первому изменению уже выполнен для текущего превью.
     // Сбрасывается при смене activeDiffContent — чтобы не скроллить повторно.
     const hasAutoScrolledRef = useRef(false);
+
+    const handleFooterApply = useCallback(() => {
+        flushModifiedCodeChange();
+
+        const previewCode = previewFrozenCodeRef.current;
+        if (activeDiffContentRef.current && previewCode !== null) {
+            if (onCommitCode) {
+                onCommitCode(previewCode);
+            } else {
+                onModifiedCodeChange(previewCode);
+                onActiveDiffChange?.('');
+            }
+            anyChunkHandledRef.current = false;
+            return;
+        }
+
+        window.setTimeout(() => {
+            onApply();
+        }, 0);
+    }, [flushModifiedCodeChange, onActiveDiffChange, onApply, onCommitCode, onModifiedCodeChange]);
 
     useEffect(() => {
         anyChunkHandledRef.current = false;
@@ -265,6 +357,46 @@ export function CodeSidePanel({
         }
     }, [activeDiffContent]);
 
+    useEffect(() => {
+        (window as any).__MINI_AI_CODE_PANEL_TEST__ = {
+            measureWorkingCodeUpdates: async (iterations = 80, chunk = '\n// perf') => {
+                const durations: number[] = [];
+                let nextCode = latestEditorCodeRef.current || modifiedCode || '';
+
+                for (let i = 0; i < iterations; i += 1) {
+                    const startedAt = performance.now();
+                    nextCode += `${chunk} ${i}`;
+                    markInputLatency('code-side-panel');
+                    scheduleModifiedCodeChange(nextCode);
+                    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+                    durations.push(performance.now() - startedAt);
+                }
+                const flushStartedAt = performance.now();
+                flushModifiedCodeChange();
+
+                const sorted = [...durations].sort((a, b) => a - b);
+                const percentile = (ratio: number) => sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)] ?? 0;
+                return {
+                    count: durations.length,
+                    p50: Math.round(percentile(0.5)),
+                    p95: Math.round(percentile(0.95)),
+                    max: Math.round(sorted[sorted.length - 1] ?? 0),
+                    flushMs: Math.round(performance.now() - flushStartedAt),
+                };
+            },
+            getState: () => ({
+                isOpen,
+                viewMode,
+                originalLength: originalCode.length,
+                modifiedLength: modifiedCode.length,
+            }),
+        };
+
+        return () => {
+            delete (window as any).__MINI_AI_CODE_PANEL_TEST__;
+        };
+    }, [flushModifiedCodeChange, isOpen, modifiedCode, originalCode.length, scheduleModifiedCodeChange, viewMode]);
+
 
     useEffect(() => {
         loader.init().then(monaco => {
@@ -339,12 +471,19 @@ export function CodeSidePanel({
                         height="100%"
                         language="bsl"
                         theme={monacoTheme}
-                        value={modifiedCode}
+                        defaultValue={modifiedCode}
                         onMount={(editor, monaco) => {
                             registerBSL(monaco);
                             editorRef.current = editor;
+                            editor.onDidBlurEditorText(() => {
+                                flushModifiedCodeChange();
+                            });
                         }}
-                        onChange={(value) => onModifiedCodeChange(value || '')}
+                        onChange={(value) => {
+                            if (applyingExternalCodeRef.current) return;
+                            markInputLatency('code-side-panel');
+                            scheduleModifiedCodeChange(value || '');
+                        }}
                         options={{
                             minimap: { enabled: false },
                             fontSize: 13,
@@ -353,6 +492,9 @@ export function CodeSidePanel({
                             automaticLayout: true,
                             wordWrap: 'on',
                             readOnly: false,
+                            occurrencesHighlight: 'off',
+                            selectionHighlight: false,
+                            unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false },
                         }}
                     />
                 ) : viewMode === 'diff' ? (
@@ -370,9 +512,13 @@ export function CodeSidePanel({
 
                             modifiedEditor.onDidChangeModelContent(() => {
                                 // В режиме превью не перезаписываем modifiedCode — это предпросмотр
-                                if (!previewModeRef.current) {
-                                    onModifiedCodeChange(modifiedEditor.getValue());
+                                if (!previewModeRef.current && !applyingExternalCodeRef.current) {
+                                    markInputLatency('code-side-panel');
+                                    scheduleModifiedCodeChange(modifiedEditor.getValue());
                                 }
+                            });
+                            modifiedEditor.onDidBlurEditorText(() => {
+                                flushModifiedCodeChange();
                             });
 
                             const updateInlineWidgets = () => {
@@ -569,6 +715,11 @@ export function CodeSidePanel({
                             originalEditable: false,
                             automaticLayout: true,
                             ignoreTrimWhitespace: false,
+                            renderLineHighlight: 'none',
+                            occurrencesHighlight: 'off',
+                            selectionHighlight: false,
+                            matchBrackets: 'never',
+                            unicodeHighlight: { ambiguousCharacters: false, invisibleCharacters: false },
                         }}
                     />
                 ) : (
@@ -601,6 +752,12 @@ export function CodeSidePanel({
                 height={diagnosticsHeight}
                 isResizing={isDiagnosticsResizing}
                 isLightTheme={isLightTheme}
+                selectedKeys={selectedDiagnosticKeys}
+                onSelectionChange={(keys) => {
+                    setSelectedDiagnosticKeys(keys);
+                    const selected = diagnostics.filter(d => keys.has(diagnosticKey(d)));
+                    onDiagnosticSelectionChange?.(selected);
+                }}
                 onDiagnosticClick={(targetLine) => {
                     if (editorRef.current) {
                         editorRef.current.revealLineInCenter(targetLine);
@@ -611,7 +768,7 @@ export function CodeSidePanel({
             />
 
             <Footer
-                onApply={onApply}
+                onApply={handleFooterApply}
                 isApplying={isApplying}
                 modifiedCode={modifiedCode}
             />

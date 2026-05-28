@@ -1,4 +1,4 @@
-import { Fragment, useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import { Fragment, useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { BslDiagnostic } from '../../api/bsl';
 import { useChat, ToolCall, ChatMessage } from '../../contexts/ChatContext';
@@ -11,7 +11,8 @@ import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor,
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
-import { applyDiff, applyDiffWithDiagnostics, formatDiffErrorMessage, hasDiffBlocks, extractDisplayCode, stripCodeBlocks, parseDiffBlocks, hasApplicableDiffBlocks } from '../../utils/diffViewer';
+import { applyDiffWithDiagnostics, formatDiffErrorMessage, parseDiffBlocks, getApplicableDiffContent, hasBlockingIncompleteDiffBlocks } from '../../utils/diffViewer';
+import { isOllamaCloudProfile } from '../../utils/profileHelpers';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
 import { ContextChips } from './ContextChips';
@@ -23,6 +24,21 @@ import { CodexAuthModal } from '../settings/CodexAuthModal';
 import { QueuedMessages } from './QueuedMessages';
 import McpToolsPopover from './McpToolsPopover';
 import { VoiceInputControl } from '../voice/VoiceInputControl';
+import { ContextUsageBar } from './ContextUsageBar';
+import { applySelectiveFixScopeInstructions } from '../../utils/fixPromptScope';
+import { formatSyntaxSafeFallbackMessage, isRecoverableSyntaxValidationMessage, salvageSyntaxSafeDiffBlocks } from '../../utils/bslSyntaxGuard';
+import { resolveEffectiveSelectedDiagnostics } from '../../utils/diagnosticsSelection';
+import {
+    findSlashCommandById,
+    getQuickActionCommandId,
+    resolveSlashCommandsForRuntime,
+} from '../../utils/slashCommands';
+import { getStreamingAutoScrollTop, isChatNearBottom } from '../../utils/chatAutoScroll';
+import {
+    createDiffRenderSummaryCache,
+    createTextFingerprintCache,
+} from '../../utils/diffRenderCache';
+import { markInputLatency } from '../../utils/performanceDiagnostics';
 
 interface ChatAreaProps {
     originalCode?: string;
@@ -32,12 +48,29 @@ interface ChatAreaProps {
     onClearContext?: () => void;
     onPrepareDiffBase?: (code: string) => void;
     onApplyCode?: (code: string) => void;
+    onValidateAppliedCode?: (baseCode: string, candidateCode: string) => Promise<string | null>;
     onCommitCode?: (code: string) => void;
     onCodeLoaded?: (code: string, isSelection: boolean) => void;
     diagnostics?: any[];
+    selectedDiagnostics?: any[] | null;
     onOpenSettings?: (tab?: string) => void;
     onActiveDiffChange?: (content: string) => void;
     activeDiffContent?: string;
+    getLatestWorkingCode?: () => string;
+}
+
+interface CachedDiffRenderSummary {
+    cleanedContent: string;
+    hasVisibleContent: boolean;
+    applicableDiffContent: string | null;
+    hasApplicableDiff: boolean;
+    hasBlockingIncompleteDiff: boolean;
+}
+
+const LARGE_DIFF_CONTENT_CHAR_LIMIT = 180_000;
+
+function isLargeDiffContent(content: string | null | undefined): boolean {
+    return (content?.length ?? 0) > LARGE_DIFF_CONTENT_CHAR_LIMIT;
 }
 
 interface OverlayExplainPayload {
@@ -56,6 +89,13 @@ function formatDiagnosticsLines(diagnostics?: Array<BslDiagnostic | string> | nu
 
         return `- Line ${diagnostic.line + 1}: ${diagnostic.message} (${diagnostic.severity})`;
     });
+}
+
+function resolveDiagnosticsForChat(
+    diagnostics: any[] | undefined,
+    selectedDiagnostics: any[] | null | undefined,
+) {
+    return resolveEffectiveSelectedDiagnostics(diagnostics || [], selectedDiagnostics);
 }
 
 function buildCopyContent(msg: ChatMessage): string {
@@ -90,6 +130,10 @@ function buildCopyContent(msg: ChatMessage): string {
     }
     return sections.join('\n\n') || msg.content;
 }
+
+const INCOMPLETE_DIFF_MESSAGE = 'Ответ модели содержит незавершённый diff-блок. Применение отменено: попросите модель прислать изменения повторно целиком.';
+
+const BSL_VALIDATION_FAILURE_MESSAGE = 'Применение отменено: не удалось проверить синтаксис BSL перед применением.';
 
 function formatProfileSummary(profile: { provider: string; model: string; reasoning_effort?: string | null }) {
     const parts = [profile.provider, profile.model];
@@ -177,6 +221,23 @@ function WaitingStatusNotice({ chatStatus }: { chatStatus: string }) {
     );
 }
 
+function formatElapsed(ms: number): string {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}с`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return rem > 0 ? `${m}м ${rem}с` : `${m}м`;
+}
+
+function ElapsedTimer({ startTime }: { startTime: number }) {
+    const [elapsed, setElapsed] = useState(() => Date.now() - startTime);
+    useEffect(() => {
+        const id = setInterval(() => setElapsed(Date.now() - startTime), 1000);
+        return () => clearInterval(id);
+    }, [startTime]);
+    return <span className="font-mono text-zinc-500 text-[10px] tabular-nums">{formatElapsed(elapsed)}</span>;
+}
+
 type ChatCliProvider = 'qwen' | 'codex';
 
 function getCliProviderType(provider: string): ChatCliProvider | null {
@@ -191,8 +252,13 @@ function getCliProviderType(provider: string): ChatCliProvider | null {
 }
 
 function DiffSummaryBanner({ content, onApply, onReject, disabled }: { content: string, onApply?: () => void, onReject?: () => void, disabled?: boolean }) {
-    const blocks = useMemo(() => parseDiffBlocks(content), [content]);
+    const isLargeDiff = isLargeDiffContent(content);
+    const blocks = useMemo(() => isLargeDiff ? [] : parseDiffBlocks(content), [content, isLargeDiff]);
     const stats = useMemo(() => {
+        if (isLargeDiff) {
+            return null;
+        }
+
         let added = 0;
         let removed = 0;
         let modified = 0;
@@ -204,14 +270,20 @@ function DiffSummaryBanner({ content, onApply, onReject, disabled }: { content: 
             }
         });
         return { added, removed, modified };
-    }, [blocks]);
+    }, [blocks, isLargeDiff]);
 
     return (
         <div className="flex items-center gap-3 bg-zinc-900/40 border border-zinc-800/80 rounded-lg px-2 py-1 mt-2 w-fit ml-auto shadow-sm">
             <div className="flex items-center gap-2 text-[10px] font-mono leading-none">
-                <span className="text-emerald-500">+{stats.added}</span>
-                <span className="text-red-500">-{stats.removed}</span>
-                {stats.modified > 0 && <span className="text-blue-400">~{stats.modified}</span>}
+                {stats ? (
+                    <>
+                        <span className="text-emerald-500">+{stats.added}</span>
+                        <span className="text-red-500">-{stats.removed}</span>
+                        {stats.modified > 0 && <span className="text-blue-400">~{stats.modified}</span>}
+                    </>
+                ) : (
+                    <span className="text-blue-400">large diff</span>
+                )}
             </div>
             <div className="w-[1px] h-3 bg-zinc-800" />
             <div className="flex items-center gap-2">
@@ -267,7 +339,7 @@ function isCompressionSystemMessage(msg: ChatMessage): boolean {
     );
 }
 
-export function ChatArea({
+export const ChatArea = memo(function ChatArea({
     originalCode,
     modifiedCode,
     loadedContextCode,
@@ -275,14 +347,17 @@ export function ChatArea({
     onClearContext,
     onPrepareDiffBase,
     onApplyCode,
+    onValidateAppliedCode,
     onCommitCode,
     onCodeLoaded,
     diagnostics,
+    selectedDiagnostics,
     onOpenSettings,
     onActiveDiffChange,
-    activeDiffContent
+    activeDiffContent,
+    getLatestWorkingCode,
 }: ChatAreaProps) {
-    const { messages, compressionIndicator, isLoading, chatStatus, currentIteration, messageQueue, sendMessage, stopChat, editAndRerun, addSystemMessage, removeSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue } = useChat();
+    const { messages, compressionIndicator, isLoading, streamStartTime, chatStatus, currentIteration, messageQueue, activeSessionId, sendMessage, stopChat, editAndRerun, addSystemMessage, injectMessage, removeQueuedMessage, updateQueuedMessage, clearQueue, clearChat } = useChat();
     const { profiles, activeProfileId, activeProfile, setActiveProfile } = useProfiles();
     const isNaparnikActive = activeProfile?.provider === 'OneCNaparnik';
     const { settings, updateSettings } = useSettings();
@@ -302,6 +377,7 @@ export function ChatArea({
     const [appliedDiffMessages, setAppliedDiffMessages] = useState<Set<string>>(new Set());
     const [dismissedDiffMessages, setDismissedDiffMessages] = useState<Set<string>>(new Set());
     const [diffActions, setDiffActions] = useState<Map<string, 'accepted' | 'rejected'>>(new Map());
+    const [validatingDiffMessageKey, setValidatingDiffMessageKey] = useState<string | null>(null);
     const [input, setInput] = useState('');
     const [showModelDropdown, setShowModelDropdown] = useState(false);
     const [showConfigDropdown, setShowConfigDropdown] = useState(false);
@@ -314,20 +390,38 @@ export function ChatArea({
     const [editText, setEditText] = useState('');
     const contextCode = loadedContextCode;
     const isContextSelection = isContextSelectionProp;
+    const currentDiffBaseCode = modifiedCode || contextCode || originalCode || '';
+    const diffRenderCacheRef = useRef(createDiffRenderSummaryCache<CachedDiffRenderSummary>(160));
+    const textFingerprintCacheRef = useRef(createTextFingerprintCache(360));
+    const currentDiffBaseKey = useMemo(
+        () => textFingerprintCacheRef.current.get(currentDiffBaseCode),
+        [currentDiffBaseCode],
+    );
+    const getLatestCodeForActions = useCallback(() => {
+        return getLatestWorkingCode?.() ?? modifiedCode ?? '';
+    }, [getLatestWorkingCode, modifiedCode]);
+    const getDiffRenderSummary = useCallback((content: string, contentScopeKey: string): CachedDiffRenderSummary => {
+        const contentKey = `${contentScopeKey}:${textFingerprintCacheRef.current.get(content)}`;
+        return diffRenderCacheRef.current.get(currentDiffBaseKey, contentKey, () => {
+            const cleanedContent = cleanDiffArtifacts(content, currentDiffBaseCode);
+            const applicableDiffContent = getApplicableDiffContent(currentDiffBaseCode, content);
+            const hasBlockingIncompleteDiff = hasBlockingIncompleteDiffBlocks(content);
+
+            return {
+                cleanedContent,
+                hasVisibleContent: cleanedContent.trim().length > 0,
+                applicableDiffContent,
+                hasApplicableDiff: applicableDiffContent !== null,
+                hasBlockingIncompleteDiff,
+            };
+        });
+    }, [currentDiffBaseCode, currentDiffBaseKey]);
 
     // Slash Commands state
     const [showCommands, setShowCommands] = useState(false);
     const [commandFilter, setCommandFilter] = useState('');
     const resolvedSlashCommands = useMemo(() => {
-        const saved = settings?.slash_commands || DEFAULT_SLASH_COMMANDS;
-        // Системные команды всегда используют актуальный шаблон из дефолтов
-        return saved.map(cmd => {
-            if (cmd.is_system) {
-                const def = DEFAULT_SLASH_COMMANDS.find(d => d.id === cmd.id);
-                if (def) return { ...cmd, template: def.template };
-            }
-            return cmd;
-        });
+        return resolveSlashCommandsForRuntime(settings?.slash_commands, DEFAULT_SLASH_COMMANDS);
     }, [settings?.slash_commands]);
 
     const availableCommands = useMemo(() => {
@@ -352,6 +446,23 @@ export function ChatArea({
         );
     }, [availableCommands, resolvedSlashCommands]);
 
+    const resolveSlashCommandById = useCallback((commandId: string): SlashCommand | undefined => {
+        return (
+            findSlashCommandById(resolvedSlashCommands, commandId) ||
+            findSlashCommandById(DEFAULT_SLASH_COMMANDS, commandId)
+        );
+    }, [resolvedSlashCommands]);
+
+    const buildSlashCommandTextById = useCallback((commandId: string, query?: string | null): string => {
+        const command = resolveSlashCommandById(commandId);
+        if (!command) {
+            return '';
+        }
+
+        const trimmedQuery = query?.trim();
+        return trimmedQuery ? `/${command.command} ${trimmedQuery}` : `/${command.command}`;
+    }, [resolveSlashCommandById]);
+
     const expandSlashCommand = useCallback(async (
         rawInput: string,
         options?: {
@@ -363,6 +474,7 @@ export function ChatArea({
         content: string;
         displayContent?: string;
         isSlashCommand: boolean;
+        commandId?: string;
     }> => {
         let textToSend = rawInput;
         let displayContent: string | undefined;
@@ -399,7 +511,7 @@ export function ChatArea({
         }
 
         let expanded = foundCmd.template;
-        let activeCode = options?.codeOverride ?? modifiedCode ?? contextCode ?? '';
+        let activeCode = options?.codeOverride ?? (getLatestCodeForActions() || contextCode || '');
         if (expanded.includes('{code}') && !options?.codeOverride && !activeCode && selectedHwnd) {
             try {
                 const fetchedCode = await getCode(true);
@@ -416,22 +528,35 @@ export function ChatArea({
             }
         }
 
-        const diagStringsText = formatDiagnosticsLines(options?.diagnosticsOverride ?? diagnostics).join('\n');
+        const currentDiagnostics = options?.diagnosticsOverride ?? (diagnostics || []);
+        const selection = resolveDiagnosticsForChat(currentDiagnostics, selectedDiagnostics);
+        const effectiveDiagnostics = selection.effectiveDiagnostics;
+        const diagStringsText = formatDiagnosticsLines(options?.diagnosticsOverride ?? effectiveDiagnostics).join('\n');
         expanded = expanded.replace('{diagnostics}', diagStringsText || 'Ошибок не обнаружено');
         expanded = expanded.replace('{code}', activeCode);
         expanded = expanded.replace('{query}', queryPart);
+        expanded = applySelectiveFixScopeInstructions(expanded, {
+            commandId: foundCmd.id,
+            totalDiagnosticsCount: currentDiagnostics.length,
+            selectedDiagnosticsCount: selection.selectionWasExplicit ? effectiveDiagnostics.length : null,
+            diagnosticsText: diagStringsText || 'Ошибок не обнаружено',
+            code: activeCode,
+            queryPart,
+        });
 
         return {
             content: expanded,
             displayContent,
             isSlashCommand,
+            commandId: foundCmd.id,
         };
     }, [
         contextCode,
         diagnostics,
+        selectedDiagnostics,
         getCode,
         isNaparnikActive,
-        modifiedCode,
+        getLatestCodeForActions,
         resolveSlashCommand,
         selectedHwnd,
         settings?.mcp_servers,
@@ -440,24 +565,6 @@ export function ChatArea({
     const appendVoiceText = useCallback((text: string) => {
         setInput(prev => prev + (prev ? ' ' : '') + text);
     }, []);
-
-    // Welcome message when switching to Напарник
-    const NAPARNIK_INFO_MSG = [
-        '1С:Напарник подключён',
-        'Доступно: поиск по ИТС и документации 1С',
-        'Недоступно: диффы и локальный MCP'
-    ].join('\n');
-    const prevProfileIdRef = useRef<string | null>(null);
-    useEffect(() => {
-        if (prevProfileIdRef.current === activeProfileId) return;
-        const wasNaparnik = profiles.find(p => p.id === prevProfileIdRef.current)?.provider === 'OneCNaparnik';
-        prevProfileIdRef.current = activeProfileId ?? null;
-        if (isNaparnikActive && !wasNaparnik && messages.length === 0) {
-            addSystemMessage(NAPARNIK_INFO_MSG, 'info');
-        } else if (!isNaparnikActive && wasNaparnik) {
-            removeSystemMessage(NAPARNIK_INFO_MSG);
-        }
-    }, [activeProfileId]);
 
     const fetchCliStatusForProfile = useCallback(async (profileId: string, provider: ChatCliProvider) => {
         try {
@@ -512,7 +619,13 @@ export function ChatArea({
                 setConfiguratorTitleCtx(parsedTitleContext);
                 onActiveDiffChange?.('');
 
-                const prepared = await expandSlashCommand('/объясни', {
+                const commandId = getQuickActionCommandId('explain');
+                const commandText = commandId ? buildSlashCommandTextById(commandId) : '';
+                if (!commandText) {
+                    throw new Error('Не найдена system-команда для действия "Объяснить".');
+                }
+
+                const prepared = await expandSlashCommand(commandText, {
                     codeOverride: explainCode,
                 });
 
@@ -532,7 +645,7 @@ export function ChatArea({
         return () => {
             unlisten.then(fn => fn());
         };
-    }, [addSystemMessage, expandSlashCommand, onActiveDiffChange, parsedTitleContext, sendMessage]);
+    }, [addSystemMessage, buildSlashCommandTextById, expandSlashCommand, onActiveDiffChange, parsedTitleContext, sendMessage]);
 
     useEffect(() => {
         const unlisten = listen<OverlayQuickActionSessionPayload>('open-quick-action-session-from-overlay', async (event) => {
@@ -541,18 +654,13 @@ export function ChatArea({
                 return;
             }
 
-            const commandText = (() => {
-                switch (event.payload.action) {
-                    case 'review':
-                        return '/ревью';
-                    case 'fix':
-                        return '/исправить';
-                    case 'elaborate':
-                        return `/доработай ${event.payload.task?.trim() ?? ''}`.trim();
-                    default:
-                        return '';
-                }
-            })();
+            const commandId = getQuickActionCommandId(event.payload.action);
+            const commandText = commandId
+                ? buildSlashCommandTextById(
+                    commandId,
+                    event.payload.action === 'elaborate' ? event.payload.task : null,
+                )
+                : '';
 
             if (!commandText) {
                 return;
@@ -589,7 +697,7 @@ export function ChatArea({
         return () => {
             unlisten.then(fn => fn());
         };
-    }, [addSystemMessage, expandSlashCommand, onActiveDiffChange, parsedTitleContext, sendMessage]);
+    }, [addSystemMessage, buildSlashCommandTextById, expandSlashCommand, onActiveDiffChange, parsedTitleContext, sendMessage]);
 
     // Update status when generation completed
     const prevIsLoadingRef = useRef(false);
@@ -662,8 +770,7 @@ export function ChatArea({
     // Обработчик скролла — отслеживаем ручную прокрутку вверх
     const handleScroll = () => {
         if (scrollRef.current) {
-            const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-            const isAtBottom = scrollHeight - scrollTop <= clientHeight + 100;
+            const isAtBottom = isChatNearBottom(scrollRef.current);
             wasAtBottom.current = isAtBottom;
             // Пользователь прокрутил вверх — останавливаем автоскролл
             if (!isAtBottom && autoScrollRaf.current) {
@@ -701,10 +808,9 @@ export function ChatArea({
                 autoScrollRaf.current = null;
                 return;
             }
-            const maxScroll = el.scrollHeight - el.clientHeight;
-            const diff = maxScroll - el.scrollTop;
-            if (diff > 1) {
-                el.scrollTop += Math.ceil(Math.max(3, diff * 0.2));
+            const nextScrollTop = getStreamingAutoScrollTop(el);
+            if (nextScrollTop !== null && Math.abs(nextScrollTop - el.scrollTop) > 1) {
+                el.scrollTop = nextScrollTop;
             }
             autoScrollRaf.current = requestAnimationFrame(tick);
         };
@@ -737,6 +843,8 @@ export function ChatArea({
             });
         }
         if (messages.length === 0) {
+            diffRenderCacheRef.current.clear();
+            textFingerprintCacheRef.current.clear();
             setConfiguratorTitleCtx(null);
             setAppliedDiffMessages(new Set());
             setDismissedDiffMessages(new Set());
@@ -756,37 +864,30 @@ export function ChatArea({
         // Срабатывает сразу (в том числе во время стриминга), чтобы DiffEditor обновлялся в реальном времени.
         if (messages.length === 0) return;
         const lastMsg = messages[messages.length - 1];
-        if (lastMsg.role !== 'assistant' || !hasDiffBlocks(lastMsg.content)) return;
+        const applicableDiffContent = lastMsg.role === 'assistant'
+            ? getDiffRenderSummary(lastMsg.content, `message:${lastMsg.id || messages.length - 1}`).applicableDiffContent
+            : null;
+        if (!applicableDiffContent) return;
 
         const msgKey = lastMsg.id || String(messages.length - 1);
 
         // Если пользователь уже принял/отклонил изменения через баннер — не перебиваем его выбор
         if (diffActions.has(msgKey)) return;
 
-        // Если превью уже было показано, а затем явно очищено (например, через боковую панель) —
-        // не восстанавливаем его снова и помечаем как обработанное, чтобы баннер в чате
-        // переключился на badge "Изменения приняты" вместо кнопок "Принять / Отменить".
-        if (!activeDiffContent && appliedDiffMessages.has(msgKey)) {
-            if (!diffActions.has(msgKey)) {
-                setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
-            }
-            return;
-        }
-
         // Показываем diff-превью только ПОСЛЕ завершения стриминга
         if (!isLoading) {
             // Открываем боковую панель только если есть базовый код для сравнения.
             // Если код не был загружен из Конфигуратора — панель не открываем.
-            const hasBaseCode = !!(modifiedCode || contextCode || originalCode);
-            if (hasBaseCode && onActiveDiffChange) {
-                onActiveDiffChange(lastMsg.content);
+            const hasBaseCode = !!currentDiffBaseCode;
+            if (hasBaseCode && onActiveDiffChange && !isLargeDiffContent(applicableDiffContent)) {
+                onActiveDiffChange(applicableDiffContent);
             }
             // Фиксируем как "показанное"
             if (!appliedDiffMessages.has(msgKey)) {
                 setAppliedDiffMessages(prev => new Set(prev).add(msgKey));
             }
         }
-    }, [messages, isLoading, onActiveDiffChange, appliedDiffMessages, diffActions, activeDiffContent]);
+    }, [messages, isLoading, onActiveDiffChange, appliedDiffMessages, diffActions, activeDiffContent, currentDiffBaseCode, getDiffRenderSummary]);
 
     const handleSendMessage = async (textOverride?: string) => {
         const rawInput = textOverride || input;
@@ -794,11 +895,13 @@ export function ChatArea({
         let displayContent: string | undefined = undefined;
         let isSlashCommand = false;
 
+        let commandId: string | undefined;
         try {
             const prepared = await expandSlashCommand(rawInput);
             textToSend = prepared.content;
             displayContent = prepared.displayContent;
             isSlashCommand = prepared.isSlashCommand;
+            commandId = prepared.commandId;
         } catch (err) {
             alert(String(err));
             return;
@@ -806,16 +909,37 @@ export function ChatArea({
 
         if (!textToSend.trim()) return;
 
-        const requestBaseCode = modifiedCode || contextCode || originalCode || '';
+        const requestBaseCode = getLatestCodeForActions() || contextCode || originalCode || '';
         if (requestBaseCode.trim()) {
             onPrepareDiffBase?.(requestBaseCode);
         }
 
-        const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+        const diagnosticsSelection = resolveDiagnosticsForChat(diagnostics || [], selectedDiagnostics);
+        const diagSource = diagnosticsSelection.effectiveDiagnostics;
+        // Блокируем только команду /исправить (id: 'fix') когда явно не выбрана ни одна диагностика.
+        // Свободные сообщения и другие команды не требуют выбранных диагностик.
+        if (
+            commandId === 'fix'
+            && diagnosticsSelection.selectionWasExplicit
+            && diagSource.length === 0
+            && (diagnostics || []).length > 0
+        ) {
+            injectMessage({
+                role: 'assistant',
+                content: 'Выберите хотя бы одну проблему в панели **Problems**.',
+                parts: [{ type: 'text', content: 'Выберите хотя бы одну проблему в панели **Problems**.' }],
+                timestamp: Date.now(),
+            });
+            setTimeout(() => {
+                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+            }, 50);
+            return;
+        }
+        const diagStrings = diagSource.map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
 
         // Если это расширенная слеш-команда, мы НЕ передаем contextCode повторно, 
         // так как он уже вставлен в expanded-шаблон через {code}
-        const finalContext = isSlashCommand ? undefined : (modifiedCode || contextCode || undefined);
+        const finalContext = isSlashCommand ? undefined : (getLatestCodeForActions() || contextCode || undefined);
 
         sendMessage(textToSend, finalContext, diagStrings, displayContent, configuratorTitleCtx);
         setInput('');
@@ -869,6 +993,10 @@ export function ChatArea({
                 console.log("[TEST] Triggering sendMessage with:", text);
                 handleSendMessage(text);
             },
+            expandSlashCommand: async (text: string) => {
+                console.log("[TEST] Expanding slash command:", text);
+                return await expandSlashCommand(text);
+            },
             injectAssistantMessage: (content: string) => {
                 console.log("[TEST] injectAssistantMessage called, length:", content.length);
                 injectMessage({
@@ -880,7 +1008,7 @@ export function ChatArea({
             },
             getCodeState: () => ({
                 originalCode,
-                modifiedCode,
+                modifiedCode: getLatestCodeForActions() || modifiedCode,
                 loadedContextCode: contextCode,
                 activeDiffContent: activeDiffContent || '',
             }),
@@ -889,8 +1017,10 @@ export function ChatArea({
     }, [
         activeDiffContent,
         contextCode,
+        expandSlashCommand,
         handleSendMessage,
         injectMessage,
+        getLatestCodeForActions,
         modifiedCode,
         onApplyCode,
         onCodeLoaded,
@@ -899,6 +1029,7 @@ export function ChatArea({
     ]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        markInputLatency('chat-input');
         const value = e.target.value;
         const cursorPosition = e.target.selectionStart;
         setInput(value);
@@ -983,8 +1114,9 @@ export function ChatArea({
 
     const handleSaveEdit = (index: number) => {
         if (editText.trim()) {
-            const diagStrings = (diagnostics || []).map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
-            const rerunBaseCode = modifiedCode || contextCode || originalCode || '';
+            const editDiagSource = resolveDiagnosticsForChat(diagnostics || [], selectedDiagnostics).effectiveDiagnostics;
+            const diagStrings = editDiagSource.map((d: any) => `- Line ${d.line + 1}: ${d.message} (${d.severity})`);
+            const rerunBaseCode = getLatestCodeForActions() || contextCode || originalCode || '';
             if (rerunBaseCode.trim()) {
                 onPrepareDiffBase?.(rerunBaseCode);
             }
@@ -1006,12 +1138,12 @@ export function ChatArea({
     // два сообщения показывают кнопки одновременно.
     const lastDiffMsgIndex = useMemo(() => {
         for (let i = messages.length - 1; i >= 0; i--) {
-            if (messages[i].role === 'assistant' && hasDiffBlocks(messages[i].content)) {
+            if (messages[i].role === 'assistant' && getDiffRenderSummary(messages[i].content, `message:${messages[i].id || i}`).hasApplicableDiff) {
                 return i;
             }
         }
         return -1;
-    }, [messages]);
+    }, [messages, getDiffRenderSummary]);
 
     return (
         <div id="chat-area" className="flex flex-col flex-1 min-w-[300px] transition-all duration-300">
@@ -1137,9 +1269,11 @@ export function ChatArea({
                                     </div>
                                 </div>
                                 ) : (
-                                    <div className="w-full max-w-full rounded-xl border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-[13px] text-amber-300/90 shadow-sm">
+                                    <div className={`w-full max-w-full rounded-xl border px-4 py-3 text-[13px] shadow-sm ${isLight
+                                        ? 'border-amber-300 bg-amber-50 text-amber-900'
+                                        : 'border-amber-700/40 bg-amber-950/30 text-amber-300/90'}`}>
                                         <div className="flex items-start gap-2">
-                                            <svg className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <svg className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLight ? 'text-amber-600' : 'text-amber-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
                                             </svg>
                                             <div className="flex-1 whitespace-pre-wrap leading-relaxed">
@@ -1174,6 +1308,7 @@ export function ChatArea({
                                                         }
                                                         return acc;
                                                     }, []).map((part, partIdx) => {
+                                                        const msgKey = msg.id || String(i);
                                                         if (part.type === 'thinking') {
                                                             const thinkingKey = `${i}-${partIdx}`;
                                                             const isThinkingStreaming = isLoading && i === messages.length - 1;
@@ -1205,10 +1340,18 @@ export function ChatArea({
                                                             );
                                                         } else {
                                                             // text
-                                                            const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
-                                                            const cleanedContent = cleanDiffArtifacts(part.content || '', currentOriginalCode);
-                                                            if (cleanedContent.trim().length === 0) {
-                                                                if (!hasDiffBlocks(part.content || '')) return null;
+                                                            const currentOriginalCode = currentDiffBaseCode;
+                                                        const diffSummary = getDiffRenderSummary(part.content || '', `part:${msgKey}:${partIdx}`);
+                                                            if (!diffSummary.hasVisibleContent) {
+                                                                if (!diffSummary.hasApplicableDiff) {
+                                                                    if (!diffSummary.hasBlockingIncompleteDiff) return null;
+                                                                    return (
+                                                                        <div key={partIdx} className="flex items-center gap-1.5 text-amber-400/80 text-xs italic py-0.5">
+                                                                            <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                            <span>Неполный diff-ответ: применение заблокировано</span>
+                                                                        </div>
+                                                                    );
+                                                                }
                                                                 return (
                                                                     <div key={partIdx} className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
                                                                         <FileDiff className="w-3 h-3 flex-shrink-0" />
@@ -1241,9 +1384,19 @@ export function ChatArea({
                                                                             Шаг {currentIteration}
                                                                         </span>
                                                                     )}
+                                                                    {streamStartTime && <ElapsedTimer startTime={streamStartTime} />}
                                                                 </div>
                                                                 <WaitingStatusNotice chatStatus={chatStatus} />
                                                             </div>
+                                                        </div>
+                                                    )}
+                                                    {/* Время ответа — заметный бейдж после завершения */}
+                                                    {!isLoading && msg.responseTime && (
+                                                        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-800/30">
+                                                            <span className="flex items-center gap-1 px-2 py-0.5 rounded-md border border-zinc-700/50 bg-zinc-800/40 text-[10px] font-mono tabular-nums text-zinc-500">
+                                                                <svg className="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                                Ответ за {formatElapsed(msg.responseTime)}
+                                                            </span>
                                                         </div>
                                                     )}
                                                 </>
@@ -1280,13 +1433,21 @@ export function ChatArea({
 
                                                     {/* Content */}
                                                     {(() => {
-                                                        const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
-                                                        const cleanedContent = cleanDiffArtifacts(msg.content || '', currentOriginalCode);
-                                                        const hasVisibleContent = cleanedContent.trim().length > 0;
+                                                        const currentOriginalCode = currentDiffBaseCode;
+                                                        const msgKey = msg.id || String(i);
+                                                        const diffSummary = getDiffRenderSummary(msg.content || '', `message:${msgKey}`);
 
                                                         if (msg.role !== 'assistant') return null;
-                                                        if (!hasVisibleContent) {
-                                                            if (!hasDiffBlocks(msg.content || '')) return null;
+                                                        if (!diffSummary.hasVisibleContent) {
+                                                            if (!diffSummary.hasApplicableDiff) {
+                                                                if (!diffSummary.hasBlockingIncompleteDiff) return null;
+                                                                return (
+                                                                    <div className="flex items-center gap-1.5 text-amber-400/80 text-xs italic py-0.5">
+                                                                        <FileDiff className="w-3 h-3 flex-shrink-0" />
+                                                                        <span>Неполный diff-ответ: применение заблокировано</span>
+                                                                    </div>
+                                                                );
+                                                            }
                                                             return (
                                                                 <div className="flex items-center gap-1.5 text-zinc-500 text-xs italic py-0.5">
                                                                     <FileDiff className="w-3 h-3 flex-shrink-0" />
@@ -1338,32 +1499,95 @@ export function ChatArea({
                                                             );
                                                         }
 
-                                                        const currentOriginalCode = modifiedCode || contextCode || originalCode || "";
+                                                        const currentOriginalCode = currentDiffBaseCode;
+                                                        const applicableDiffContent = getDiffRenderSummary(msg.content, `message:${msgKey}`).applicableDiffContent;
                                                         const hasContext = currentOriginalCode.trim().length > 0;
                                                         const shouldShowBanner = hasContext &&
                                                             i === lastDiffMsgIndex &&
                                                             !isLoading &&
-                                                            hasDiffBlocks(msg.content) &&
-                                                            parseDiffBlocks(msg.content).length > 0 &&
+                                                            !!applicableDiffContent &&
                                                             !dismissedDiffMessages.has(msgKey);
 
                                                         if (!shouldShowBanner) return null;
 
                                                         return (
                                                             <DiffSummaryBanner
-                                                                content={msg.content}
-                                                                onApply={() => {
+                                                                content={applicableDiffContent}
+                                                                disabled={validatingDiffMessageKey === msgKey}
+                                                                onApply={async () => {
                                                                     // Применяем дифф только сейчас — по явному подтверждению пользователя
-                                                                    const diffResult = applyDiffWithDiagnostics(currentOriginalCode, msg.content);
-                                                                    if (onApplyCode) {
-                                                                        onApplyCode(diffResult.code);
+                                                                    if (hasBlockingIncompleteDiffBlocks(applicableDiffContent)) {
+                                                                        addSystemMessage(INCOMPLETE_DIFF_MESSAGE);
+                                                                        return;
                                                                     }
-                                                                    if (diffResult.failedCount > 0 || diffResult.fuzzyCount > 0) {
-                                                                        const errorMsg = formatDiffErrorMessage(diffResult);
-                                                                        if (errorMsg) addSystemMessage(errorMsg);
+                                                                    const diffResult = applyDiffWithDiagnostics(currentOriginalCode, applicableDiffContent);
+                                                                    const diffWarningMessage = formatDiffErrorMessage(diffResult);
+                                                                    const appliedBlockCount = diffResult.blocks.filter(block =>
+                                                                        block.applyStatus?.startsWith('applied_'),
+                                                                    ).length;
+                                                                    if (diffResult.failedCount > 0 && appliedBlockCount === 0) {
+                                                                        if (diffWarningMessage) addSystemMessage(diffWarningMessage, 'warning');
+                                                                        return;
                                                                     }
-                                                                    if (onActiveDiffChange) onActiveDiffChange('');
-                                                                    setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                    setValidatingDiffMessageKey(msgKey);
+                                                                    try {
+                                                                        if (onValidateAppliedCode) {
+                                                                            let validationError: string | null = null;
+                                                                            try {
+                                                                                validationError = await onValidateAppliedCode(
+                                                                                    currentOriginalCode,
+                                                                                    diffResult.code,
+                                                                                );
+                                                                            } catch (error) {
+                                                                                const details = error instanceof Error ? error.message : String(error);
+                                                                                validationError = details
+                                                                                    ? `${BSL_VALIDATION_FAILURE_MESSAGE} ${details}`
+                                                                                    : BSL_VALIDATION_FAILURE_MESSAGE;
+                                                                            }
+
+                                                                            if (validationError) {
+                                                                                if (isRecoverableSyntaxValidationMessage(validationError)) {
+                                                                                    const fallbackResult = await salvageSyntaxSafeDiffBlocks(
+                                                                                        currentOriginalCode,
+                                                                                        diffResult.blocks,
+                                                                                        onValidateAppliedCode,
+                                                                                    );
+                                                                                    const fallbackMessage = formatSyntaxSafeFallbackMessage(fallbackResult);
+
+                                                                                    if (fallbackResult.appliedBlockCount > 0) {
+                                                                                        if (onApplyCode) {
+                                                                                            onApplyCode(fallbackResult.code);
+                                                                                        }
+                                                                                        if (onActiveDiffChange) onActiveDiffChange('');
+                                                                                        setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                                        if (fallbackMessage) {
+                                                                                            addSystemMessage(fallbackMessage, 'warning');
+                                                                                        }
+                                                                                        return;
+                                                                                    }
+
+                                                                                    addSystemMessage(fallbackMessage ?? validationError, 'warning');
+                                                                                    return;
+                                                                                }
+
+                                                                                addSystemMessage(validationError);
+                                                                                return;
+                                                                            }
+                                                                        }
+
+                                                                        if (onApplyCode) {
+                                                                            onApplyCode(diffResult.code);
+                                                                        }
+                                                                        if (onActiveDiffChange) onActiveDiffChange('');
+                                                                        setDiffActions(prev => new Map(prev).set(msgKey, 'accepted'));
+                                                                        if (diffWarningMessage) {
+                                                                            addSystemMessage(diffWarningMessage, 'warning');
+                                                                        }
+                                                                    } finally {
+                                                                        setValidatingDiffMessageKey(current =>
+                                                                            current === msgKey ? null : current,
+                                                                        );
+                                                                    }
                                                                 }}
                                                                 onReject={() => {
                                                                     // Просто сбрасываем превью — код в редакторе не тронут
@@ -1425,6 +1649,7 @@ export function ChatArea({
                                                 Шаг {currentIteration}
                                             </span>
                                         )}
+                                        {streamStartTime && <ElapsedTimer startTime={streamStartTime} />}
                                     </div>
                                     <WaitingStatusNotice chatStatus={chatStatus} />
                                 </div>
@@ -1472,10 +1697,16 @@ export function ChatArea({
                     onUpdate={updateQueuedMessage}
                     onClearAll={clearQueue}
                 />
+                <ContextUsageBar
+                    onNewChat={clearChat}
+                    profileId={activeProfileId ?? undefined}
+                    chatId={activeSessionId}
+                />
                 <div className="relative bg-[#18181b] border border-[#27272a] rounded-xl focus-within:ring-1 focus-within:ring-blue-500/50 transition-all min-h-[120px] flex flex-col max-w-4xl mx-auto">
 
                     <textarea
                         ref={inputRef}
+                        data-testid="chat-textarea"
                         value={input}
                         onChange={handleInputChange}
                         onKeyDown={handleKeyDown}
@@ -1498,6 +1729,7 @@ export function ChatArea({
                             {/* Кнопка [+] (Опции) */}
                             <div className="relative">
                                 <button
+                                    data-testid="profile-selector-trigger"
                                     onClick={() => setShowModelDropdown(!showModelDropdown)}
                                     className="h-8 w-12 flex items-center justify-center gap-1 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-all active:scale-95 flex-shrink-0"
                                     title="Настройки профиля и генерации"
@@ -1562,14 +1794,16 @@ export function ChatArea({
                                             <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Ваши профили</span>
                                         </div>
                                         <div className="max-h-[250px] overflow-y-auto custom-scrollbar">
-                                            {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik').length > 0 && (
+                                            {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).length > 0 && (
                                                 <>
                                                     <div className="px-3 py-1.5 border-b border-[#27272a] mb-1 sticky top-0 bg-[#09090b] z-10">
                                                         <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Стандартные ассистенты</span>
                                                     </div>
-                                                    {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik').map(p => (
+                                                    {profiles.filter(p => getCliProviderType(p.provider) === null && p.provider !== 'OneCNaparnik' && !isOllamaCloudProfile(p)).map(p => (
                                                         <div
                                                             key={p.id}
+                                                            data-testid={`profile-item-${p.id}`}
+                                                            data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
                                                             className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-blue-500/10' : 'hover:bg-zinc-800/50'}`}
                                                             onClick={() => {
                                                                 setActiveProfile(p.id);
@@ -1602,6 +1836,8 @@ export function ChatArea({
                                                         return (
                                                             <div
                                                                 key={p.id}
+                                                                data-testid={`profile-item-${p.id}`}
+                                                                data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
                                                                 className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? activeRowClass : 'hover:bg-zinc-800/50'}`}
                                                                 onClick={() => {
                                                                     if (!isAuthenticated) {
@@ -1644,6 +1880,8 @@ export function ChatArea({
                                                     {profiles.filter(p => p.provider === 'OneCNaparnik').map(p => (
                                                         <div
                                                             key={p.id}
+                                                            data-testid={`profile-item-${p.id}`}
+                                                            data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
                                                             className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-orange-500/10' : 'hover:bg-zinc-800/50'}`}
                                                             onClick={() => {
                                                                 setActiveProfile(p.id);
@@ -1655,6 +1893,31 @@ export function ChatArea({
                                                                 <span className="text-[10px] text-zinc-500 truncate">code.1c.ai</span>
                                                             </div>
                                                             {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-orange-500 flex-shrink-0" />}
+                                                        </div>
+                                                    ))}
+                                                </>
+                                            )}
+                                            {profiles.filter(isOllamaCloudProfile).length > 0 && (
+                                                <>
+                                                    <div className="px-3 py-1.5 border-b border-[#27272a] mt-1 mb-1 sticky top-0 bg-[#09090b] z-10">
+                                                        <span className="text-[10px] font-bold text-cyan-500/70 uppercase tracking-wider">Ollama Cloud</span>
+                                                    </div>
+                                                    {profiles.filter(isOllamaCloudProfile).map(p => (
+                                                        <div
+                                                            key={p.id}
+                                                            data-testid={`profile-item-${p.id}`}
+                                                            data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-cyan-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            onClick={() => {
+                                                                setActiveProfile(p.id);
+                                                                setShowModelDropdown(false);
+                                                            }}
+                                                        >
+                                                            <div className="flex flex-col gap-0.5 min-w-0">
+                                                                <span className={`text-[12px] font-semibold truncate ${activeProfileId === p.id ? 'text-cyan-400' : 'text-zinc-200'}`}>{p.name}</span>
+                                                                <span className="text-[10px] text-zinc-500 truncate">{p.model || 'ollama.com'}</span>
+                                                            </div>
+                                                            {activeProfileId === p.id && <Check className="w-3.5 h-3.5 text-cyan-500 flex-shrink-0" />}
                                                         </div>
                                                     ))}
                                                 </>
@@ -1801,7 +2064,12 @@ export function ChatArea({
                                 )}
                             </div>
 
-                            <button onClick={isLoading ? stopChat : () => handleSendMessage()} disabled={!isLoading && !input.trim()} className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors flex-shrink-0 ${isLoading ? 'bg-red-500/10 text-red-400' : input.trim() ? 'bg-blue-600 text-white' : 'bg-[#27272a] text-zinc-600'}`}>
+                            <button
+                                data-testid="send-stop-button"
+                                onClick={isLoading ? stopChat : () => handleSendMessage()}
+                                disabled={!isLoading && !input.trim()}
+                                className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors flex-shrink-0 ${isLoading ? 'bg-red-500/10 text-red-400' : input.trim() ? 'bg-blue-600 text-white' : 'bg-[#27272a] text-zinc-600'}`}
+                            >
                                 {isLoading ? <Square className="w-4 h-4 fill-current" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                             </button>
                         </div>
@@ -1836,4 +2104,4 @@ export function ChatArea({
             )}
         </div >
     );
-}
+});

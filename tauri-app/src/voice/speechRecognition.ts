@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
+
 export interface SpeechRecognitionResult {
     text: string;
     isFinal: boolean;
@@ -15,6 +17,13 @@ const LOG_PREFIX = '[VoiceInput]';
 function voiceLog(level: 'info' | 'warn' | 'error', ...args: unknown[]) {
     const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
     console[level](LOG_PREFIX, `[${ts}]`, ...args);
+
+    // Дублируем в Rust backend (попадает в save_debug_logs)
+    const parts = args.map((a) =>
+        typeof a === 'object' ? JSON.stringify(a) : String(a),
+    );
+    const message = `${LOG_PREFIX} [${ts}] ${parts.join(' ')}`;
+    invoke('write_frontend_log', { message }).catch(() => {/* best effort */});
 }
 
 export class SpeechRecognitionService {
@@ -34,7 +43,7 @@ export class SpeechRecognitionService {
                 userAgent: navigator.userAgent,
             });
         } else {
-            voiceLog('error', 'SpeechRecognition API недоступен в этом WebView', {
+            voiceLog('error', 'SpeechRecognition API недоступен в этом WebView. Возможная причина: групповая политика Windows отключила службу распознавания речи.', {
                 hasSpeechRecognition: !!window.SpeechRecognition,
                 hasWebkitSpeechRecognition: !!(window as any).webkitSpeechRecognition,
                 userAgent: navigator.userAgent,

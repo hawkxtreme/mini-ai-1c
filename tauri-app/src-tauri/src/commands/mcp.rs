@@ -206,6 +206,13 @@ pub async fn get_mcp_server_logs(server_id: String) -> Result<Vec<String>, Strin
     Ok(crate::mcp_client::McpManager::get_logs(&server_id).await)
 }
 
+/// Write a log message from the frontend to the Rust backend log buffer
+#[tauri::command]
+pub async fn write_frontend_log(message: String) -> Result<(), String> {
+    crate::logger::log(&message, true);
+    Ok(())
+}
+
 /// Save all debug logs to a file
 #[tauri::command]
 pub async fn save_debug_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -291,8 +298,17 @@ pub async fn test_mcp_connection(config: McpServerConfig) -> Result<String, Stri
 #[tauri::command]
 pub async fn delete_search_index(config_path: String) -> Result<(), String> {
     let db = search_index_db_path(&config_path);
-    if db.exists() {
-        std::fs::remove_file(&db).map_err(|e| format!("Не удалось удалить файл индекса: {}", e))?;
+    for suffix in ["", "-wal", "-shm"] {
+        let path = std::path::PathBuf::from(format!("{}{}", db.to_string_lossy(), suffix));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "Не удалось удалить файл индекса {}: {}",
+                    path.to_string_lossy(),
+                    e
+                )
+            })?;
+        }
     }
     Ok(())
 }

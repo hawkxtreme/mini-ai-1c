@@ -88,10 +88,10 @@ pub fn infer_write_intent(
     if let Some(action) = action {
         return match action {
             QuickActionKind::Describe => {
-                if ctx.has_selection {
-                    Some(SemanticWriteIntent::ReplaceSelection)
-                } else if ctx.has_current_method {
+                if ctx.has_current_method {
                     Some(SemanticWriteIntent::InsertBeforeCurrentMethod)
+                } else if ctx.has_selection {
+                    Some(SemanticWriteIntent::ReplaceSelection)
                 } else {
                     Some(SemanticWriteIntent::ReplaceModule)
                 }
@@ -141,6 +141,7 @@ fn preferred_newline(module_text: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn split_lines_inclusive(text: &str) -> Vec<&str> {
     if text.is_empty() {
         Vec::new()
@@ -149,10 +150,12 @@ fn split_lines_inclusive(text: &str) -> Vec<&str> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn line_span_len(text: &str) -> usize {
     split_lines_inclusive(text).len()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn line_range_text(
     module_text: &str,
     start_line: usize,
@@ -171,6 +174,7 @@ fn line_range_text(
     Ok(lines[start_line..end_exclusive].concat())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn normalize_fragment_for_compare(module_text: &str, fragment_text: &str) -> String {
     normalize_text_for_module(module_text, fragment_text)
         .trim_end_matches(['\r', '\n'])
@@ -219,6 +223,7 @@ pub fn replace_method_in_module(
     Ok(result)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn replace_method_in_module_from_capture(
     module_text: &str,
     start_line: usize,
@@ -277,6 +282,7 @@ pub fn insert_before_method_in_module(
     Ok(result)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn insert_before_method_in_module_from_capture(
     module_text: &str,
     start_line: usize,
@@ -314,6 +320,21 @@ mod tests {
                 has_selection: false,
                 has_current_method: true,
                 prefer_full_module: true,
+            },
+        );
+
+        assert_eq!(intent, Some(SemanticWriteIntent::InsertBeforeCurrentMethod));
+    }
+
+    #[test]
+    fn infer_describe_prefers_current_method_over_selection() {
+        let intent = infer_write_intent(
+            None,
+            Some(QuickActionKind::Describe),
+            ResolverContext {
+                has_selection: true,
+                has_current_method: true,
+                prefer_full_module: false,
             },
         );
 

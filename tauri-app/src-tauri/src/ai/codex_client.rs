@@ -7,7 +7,7 @@
 //! Reference: https://github.com/router-for-me/CLIProxyAPI (translator/codex/openai/)
 
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Emitter;
@@ -22,13 +22,102 @@ const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_RESPONSES_ENDPOINT: &str = "/responses";
 const CODEX_USER_AGENT: &str = "codex-cli/0.1.0 (Windows NT 10.0; x86_64) vscode/1.111.0";
 const DEFAULT_CODEX_INSTRUCTIONS: &str =
-    "You are Codex, a coding assistant running inside Mini AI 1C.";
+    "You are Codex, a coding assistant running inside Mini AI 1C.\n\
+IMPORTANT: Always output raw characters — never use HTML entities. \
+Write `<`, `>`, `&`, `\"`, `'` literally. \
+Do NOT write `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;` or any other HTML escape sequences. \
+This applies to all code, diffs, BSL/1C code, and explanations.";
 /// Codex requires tool names ≤ 64 characters
 const MAX_TOOL_NAME_LEN: usize = 64;
 const CODEX_HTTP_TIMEOUT_SECS: u64 = 120;
 
 fn resolve_codex_stream_timeout_secs(configured_timeout_secs: Option<u32>) -> u32 {
     configured_timeout_secs.unwrap_or(DEFAULT_CODEX_STREAM_TIMEOUT_SECS)
+}
+
+/// Decode HTML entities that Codex sometimes emits (e.g. `&amp;` → `&`).
+fn unescape_html(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&#x2F;", "/")
+}
+
+fn unescape_html_in_json_strings(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            *s = unescape_html(s);
+        }
+        Value::Array(items) => {
+            for item in items {
+                unescape_html_in_json_strings(item);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                unescape_html_in_json_strings(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_codex_tool_arguments(arguments: &str) -> String {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(mut value) => {
+            unescape_html_in_json_strings(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+        }
+        Err(_) => unescape_html(arguments),
+    }
+}
+
+fn split_incomplete_html_entity_tail(s: &str) -> usize {
+    let Some(amp_idx) = s.rfind('&') else {
+        return s.len();
+    };
+
+    if s[amp_idx..].contains(';') {
+        return s.len();
+    }
+
+    let tail = &s[amp_idx..];
+    if tail.len() > 12 {
+        return s.len();
+    }
+
+    let is_entity_prefix = tail
+        .chars()
+        .enumerate()
+        .all(|(idx, ch)| idx == 0 || ch.is_ascii_alphanumeric() || ch == '#');
+
+    if is_entity_prefix {
+        amp_idx
+    } else {
+        s.len()
+    }
+}
+
+fn drain_decoded_html_stream(buffer: &mut String, final_flush: bool) -> String {
+    if buffer.is_empty() {
+        return String::new();
+    }
+
+    let drain_until = if final_flush {
+        buffer.len()
+    } else {
+        split_incomplete_html_entity_tail(buffer)
+    };
+
+    if drain_until == 0 {
+        return String::new();
+    }
+
+    let chunk = buffer.drain(..drain_until).collect::<String>();
+    unescape_html(&chunk)
 }
 
 // ─── Request types ──────────────────────────────────────────────────────────
@@ -127,6 +216,12 @@ fn sanitize_tool_name(name: &str) -> String {
 /// - `role: "assistant"` with tool_calls → one `function_call` item per call
 /// - `role: "tool"` → `function_call_output` item
 fn messages_to_codex_payload(messages: &[ApiMessage]) -> (String, Vec<CodexInputItem>) {
+    let completed_tool_call_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|msg| msg.role == "tool")
+        .filter_map(|msg| msg.tool_call_id.clone())
+        .collect();
+    let mut emitted_tool_call_ids = std::collections::HashSet::new();
     let mut instructions_parts = Vec::new();
     let mut input = Vec::new();
 
@@ -161,6 +256,11 @@ fn messages_to_codex_payload(messages: &[ApiMessage]) -> (String, Vec<CodexInput
                 // Tool calls → individual function_call items
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
+                        if !completed_tool_call_ids.contains(&tc.id) {
+                            continue;
+                        }
+
+                        emitted_tool_call_ids.insert(tc.id.clone());
                         input.push(CodexInputItem::FunctionCall(CodexFunctionCall {
                             r#type: "function_call".to_string(),
                             call_id: tc.id.clone(),
@@ -174,6 +274,10 @@ fn messages_to_codex_payload(messages: &[ApiMessage]) -> (String, Vec<CodexInput
             "tool" => {
                 // Tool result
                 if let Some(call_id) = &msg.tool_call_id {
+                    if !emitted_tool_call_ids.contains(call_id) {
+                        continue;
+                    }
+
                     let output = msg.content.clone().unwrap_or_default();
                     input.push(CodexInputItem::FunctionCallOutput(
                         CodexFunctionCallOutput {
@@ -236,6 +340,9 @@ fn tools_to_codex(tools: &[Tool]) -> Vec<CodexTool> {
 fn build_headers(access_token: &str, account_id: Option<&str>) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    // Codex streams SSE for a long time; avoid compressed response-body decoder failures
+    // from surfacing as fatal "error decoding response body" stream errors.
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", access_token))
@@ -260,10 +367,16 @@ fn resolve_codex_model(profile: &crate::llm_profiles::LLMProfile) -> String {
     if profile.model.trim().is_empty()
         || matches!(
             profile.model.as_str(),
-            "codex-cli" | "codex-mini-latest" | "o4-mini" | "o3" | "gpt-5-3" | "gpt-5-3-instant"
+            "codex-cli"
+                | "codex-mini-latest"
+                | "o4-mini"
+                | "o3"
+                | "gpt-5-3"
+                | "gpt-5-3-instant"
+                | "gpt-5.4"
         )
     {
-        "gpt-5.4".to_string()
+        "gpt-5.5".to_string()
     } else {
         profile.model.clone()
     }
@@ -300,7 +413,7 @@ fn build_codex_request(
         stream,
         reasoning: CodexReasoning {
             effort: resolve_codex_reasoning_effort(profile),
-            summary: "auto".to_string(),
+            summary: "concise".to_string(),
         },
         include: vec!["reasoning.encrypted_content".to_string()],
         store: false,
@@ -346,7 +459,7 @@ async fn send_codex_request(
     account_id: Option<&str>,
 ) -> Result<reqwest::Response, String> {
     let headers = build_headers(access_token, account_id)?;
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::http_client_builder()?
         .timeout(std::time::Duration::from_secs(CODEX_HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("HTTP client build error: {}", e))?;
@@ -429,7 +542,10 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
             for line in event_str.lines() {
                 if let Some(t) = line.strip_prefix("event: ") {
                     event_type = t.trim().to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
+                } else if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     event_data = d.trim().to_string();
                 }
             }
@@ -474,7 +590,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
         }
     }
 
-    Ok(full_content)
+    Ok(unescape_html(&full_content))
 }
 
 // ─── Main streaming function ──────────────────────────────────────────────
@@ -532,9 +648,15 @@ pub async fn stream_codex_completion(
     let model = if profile.model.trim().is_empty()
         || matches!(
             profile.model.as_str(),
-            "codex-cli" | "codex-mini-latest" | "o4-mini" | "o3" | "gpt-5-3" | "gpt-5-3-instant"
+            "codex-cli"
+                | "codex-mini-latest"
+                | "o4-mini"
+                | "o3"
+                | "gpt-5-3"
+                | "gpt-5-3-instant"
+                | "gpt-5.4"
         ) {
-        "gpt-5.4".to_string()
+        "gpt-5.5".to_string()
     } else {
         profile.model.clone()
     };
@@ -550,7 +672,7 @@ pub async fn stream_codex_completion(
         stream: true,
         reasoning: CodexReasoning {
             effort: reasoning_effort.clone(),
-            summary: "auto".to_string(),
+            summary: "concise".to_string(),
         },
         include: vec!["reasoning.encrypted_content".to_string()],
         store: false,
@@ -558,7 +680,7 @@ pub async fn stream_codex_completion(
 
     let headers = build_headers(&access_token, account_id.as_deref())?;
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::http_client_builder()?
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP client build error: {}", e))?;
@@ -616,6 +738,7 @@ pub async fn stream_codex_completion(
     let mut stream = response.bytes_stream();
     let mut byte_buffer = Vec::new();
     let mut full_content = String::new();
+    let mut text_entity_buffer = String::new();
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
 
     // Tracking state for streaming tool calls
@@ -658,7 +781,10 @@ pub async fn stream_codex_completion(
             for line in event_str.lines() {
                 if let Some(t) = line.strip_prefix("event: ") {
                     event_type = t.trim().to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
+                } else if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     event_data = d.trim().to_string();
                 }
             }
@@ -687,8 +813,12 @@ pub async fn stream_codex_completion(
                 "response.output_text.delta" => {
                     if let Some(delta) = &evt.delta {
                         if !delta.is_empty() {
-                            full_content.push_str(delta);
-                            let _ = app_handle.emit("chat-chunk", delta.clone());
+                            text_entity_buffer.push_str(delta);
+                            let clean = drain_decoded_html_stream(&mut text_entity_buffer, false);
+                            if !clean.is_empty() {
+                                full_content.push_str(&clean);
+                                let _ = app_handle.emit("chat-chunk", clean);
+                            }
                         }
                     }
                 }
@@ -714,8 +844,24 @@ pub async fn stream_codex_completion(
                                 call_id
                             );
                             pending_calls
-                                .entry(call_id)
-                                .or_insert((name, String::new()));
+                                .entry(call_id.clone())
+                                .or_insert((name.clone(), String::new()));
+
+                            // Announce the tool call as soon as Codex adds the function_call item.
+                            // Some responses skip incremental argument deltas, so waiting for the
+                            // first delta loses MCP call history in the UI.
+                            if !announced_calls.contains(call_id.as_str()) {
+                                let call_idx = announced_calls.len();
+                                announced_calls.insert(call_id.clone());
+                                let _ = app_handle.emit(
+                                    "tool-call-started",
+                                    serde_json::json!({
+                                        "index": call_idx,
+                                        "id": call_id,
+                                        "name": name
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
@@ -723,24 +869,8 @@ pub async fn stream_codex_completion(
                 "response.function_call_arguments.delta" => {
                     if let Some(call_id) = &evt.call_id {
                         if let Some(delta) = &evt.delta {
-                            let is_new = !announced_calls.contains(call_id.as_str());
-                            if let Some((name, args)) = pending_calls.get_mut(call_id) {
+                            if let Some((_, args)) = pending_calls.get_mut(call_id) {
                                 args.push_str(delta);
-                                // Announce tool call start on first arg delta
-                                if is_new {
-                                    let call_idx = accumulated_tool_calls.len();
-                                    let emit_name = name.clone();
-                                    let emit_id = call_id.clone();
-                                    announced_calls.insert(emit_id.clone());
-                                    let _ = app_handle.emit(
-                                        "tool-call-started",
-                                        serde_json::json!({
-                                            "index": call_idx,
-                                            "id": emit_id,
-                                            "name": emit_name
-                                        }),
-                                    );
-                                }
                             }
                         }
                     }
@@ -753,7 +883,9 @@ pub async fn stream_codex_completion(
                         if item_type == "function_call" {
                             let call_id = item["call_id"].as_str().unwrap_or("").to_string();
                             let name = item["name"].as_str().unwrap_or("").to_string();
-                            let arguments = item["arguments"].as_str().unwrap_or("{}").to_string();
+                            let arguments = normalize_codex_tool_arguments(
+                                item["arguments"].as_str().unwrap_or("{}"),
+                            );
 
                             if !call_id.is_empty() && !name.is_empty() {
                                 accumulated_tool_calls.push(ToolCall {
@@ -779,7 +911,7 @@ pub async fn stream_codex_completion(
                                 let arguments = if args.is_empty() {
                                     "{}".to_string()
                                 } else {
-                                    args
+                                    normalize_codex_tool_arguments(&args)
                                 };
                                 accumulated_tool_calls.push(ToolCall {
                                     id: call_id.clone(),
@@ -800,12 +932,18 @@ pub async fn stream_codex_completion(
                 }
 
                 "response.completed" => {
+                    let clean = drain_decoded_html_stream(&mut text_entity_buffer, true);
+                    if !clean.is_empty() {
+                        full_content.push_str(&clean);
+                        let _ = app_handle.emit("chat-chunk", clean);
+                    }
+
                     // Flush any remaining pending calls (shouldn't normally happen)
                     for (call_id, (name, args)) in pending_calls.drain() {
                         let arguments = if args.is_empty() {
                             "{}".to_string()
                         } else {
-                            args
+                            normalize_codex_tool_arguments(&args)
                         };
                         accumulated_tool_calls.push(ToolCall {
                             id: call_id,
@@ -837,6 +975,12 @@ pub async fn stream_codex_completion(
         }
     }
 
+    let clean = drain_decoded_html_stream(&mut text_entity_buffer, true);
+    if !clean.is_empty() {
+        full_content.push_str(&clean);
+        let _ = app_handle.emit("chat-chunk", clean);
+    }
+
     crate::app_log!(
         "[Codex] Stream complete: content_chars={} tool_calls={}",
         full_content.len(),
@@ -863,13 +1007,15 @@ pub async fn stream_codex_completion(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_codex_request, messages_to_codex_payload, resolve_codex_model,
-        resolve_codex_stream_timeout_secs, CodexInputItem, DEFAULT_CODEX_INSTRUCTIONS,
+        build_codex_request, build_headers, drain_decoded_html_stream, messages_to_codex_payload,
+        normalize_codex_tool_arguments, resolve_codex_model, resolve_codex_stream_timeout_secs,
+        CodexInputItem, DEFAULT_CODEX_INSTRUCTIONS,
     };
-    use crate::ai::models::ApiMessage;
+    use crate::ai::models::{ApiMessage, ToolCall, ToolCallFunction};
     use crate::llm_profiles::{
         LLMProfile, LLMProvider, DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_CODEX_STREAM_TIMEOUT_SECS,
     };
+    use reqwest::header::ACCEPT_ENCODING;
     use serde_json::Value;
 
     #[test]
@@ -929,6 +1075,71 @@ mod tests {
     }
 
     #[test]
+    fn messages_to_codex_payload_skips_orphan_assistant_tool_calls() {
+        let messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: Some("fix it".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_orphan".to_string(),
+                    r#type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "check_bsl_syntax".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let (_, input) = messages_to_codex_payload(&messages);
+
+        assert_eq!(input.len(), 1);
+        assert!(matches!(&input[0], CodexInputItem::Message(_)));
+    }
+
+    #[test]
+    fn messages_to_codex_payload_keeps_matched_tool_call_pairs() {
+        let messages = vec![
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_done".to_string(),
+                    r#type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "check_bsl_syntax".to_string(),
+                        arguments: "{\"code\":\"Сообщить(\\\"ok\\\");\"}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "tool".to_string(),
+                content: Some("{\"ok\":true}".to_string()),
+                tool_calls: None,
+                tool_call_id: Some("call_done".to_string()),
+                name: Some("check_bsl_syntax".to_string()),
+            },
+        ];
+
+        let (_, input) = messages_to_codex_payload(&messages);
+
+        assert_eq!(input.len(), 2);
+        assert!(matches!(&input[0], CodexInputItem::FunctionCall(_)));
+        assert!(matches!(&input[1], CodexInputItem::FunctionCallOutput(_)));
+    }
+
+    #[test]
     fn resolve_codex_stream_timeout_uses_codex_default_when_profile_timeout_missing() {
         assert_eq!(
             resolve_codex_stream_timeout_secs(None),
@@ -947,7 +1158,7 @@ mod tests {
         profile.provider = LLMProvider::CodexCli;
         profile.model = "codex-mini-latest".to_string();
 
-        assert_eq!(resolve_codex_model(&profile), "gpt-5.4");
+        assert_eq!(resolve_codex_model(&profile), "gpt-5.5");
     }
 
     #[test]
@@ -966,10 +1177,57 @@ mod tests {
 
         let request = build_codex_request(&profile, &messages, None, true);
 
-        assert_eq!(request.model, "gpt-5.4");
+        assert_eq!(request.model, "gpt-5.5");
         assert_eq!(request.reasoning.effort, DEFAULT_CODEX_REASONING_EFFORT);
         assert!(request.stream);
         assert!(request.tools.is_none());
         assert_eq!(request.input.len(), 1);
+    }
+
+    #[test]
+    fn normalize_codex_tool_arguments_decodes_html_entities_inside_json_strings() {
+        let raw = r#"{"code":"Пока СтрДлина(Номер) &lt; 9 Цикл","nested":{"text":"A &amp; B"}}"#;
+
+        let normalized = normalize_codex_tool_arguments(raw);
+        let parsed: Value = serde_json::from_str(&normalized).unwrap();
+
+        assert_eq!(parsed["code"], "Пока СтрДлина(Номер) < 9 Цикл");
+        assert_eq!(parsed["nested"]["text"], "A & B");
+    }
+
+    #[test]
+    fn normalize_codex_tool_arguments_keeps_json_valid_when_decoding_quotes() {
+        let raw = r#"{"code":"Сообщить(&quot;ok&quot;);"}"#;
+
+        let normalized = normalize_codex_tool_arguments(raw);
+        let parsed: Value = serde_json::from_str(&normalized).unwrap();
+
+        assert_eq!(parsed["code"], "Сообщить(\"ok\");");
+    }
+
+    #[test]
+    fn drain_decoded_html_stream_decodes_entities_split_across_chunks() {
+        let mut buffer = String::new();
+        let mut decoded = String::new();
+
+        buffer.push_str("Если A &l");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, false));
+        buffer.push_str("t;= B И C &g");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, false));
+        buffer.push_str("t; D");
+        decoded.push_str(&drain_decoded_html_stream(&mut buffer, true));
+
+        assert_eq!(decoded, "Если A <= B И C > D");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn build_headers_requests_uncompressed_codex_streams() {
+        let headers = build_headers("token", None).unwrap();
+
+        assert_eq!(
+            headers.get(ACCEPT_ENCODING).unwrap().to_str().unwrap(),
+            "identity"
+        );
     }
 }

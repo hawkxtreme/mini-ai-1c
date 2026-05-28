@@ -22,6 +22,19 @@ import type {
   QuickActionWriteIntent,
 } from '../types/quickActionSessions';
 import { applyDiffWithDiagnostics } from '../utils/diffViewer';
+import { decodeHtmlEntities } from '../utils/htmlEntities';
+import {
+  resolveCaptureFromEditorContext,
+  shouldSyncQuickActionToClickTarget,
+} from '../utils/quickActionContext';
+import { buildDescribePrompt } from '../utils/quickActionPrompts';
+import {
+  buildPromptFromSlashCommandTemplate,
+  findSlashCommandById,
+  getQuickActionCommandId,
+  resolveSlashCommandsForRuntime,
+} from '../utils/slashCommands';
+import { DEFAULT_SLASH_COMMANDS, type AppSettings } from '../types/settings';
 
 interface QuickActionEvent {
   action: QuickActionAction;
@@ -59,6 +72,35 @@ interface OverlayApplyEvent {
 type ResultType = 'comment' | 'diff' | 'explain_only';
 type WriteIntent = QuickActionWriteIntent;
 type CaptureScope = QuickActionCaptureScope;
+
+function buildSettingsBackedQuickActionPrompt(
+  action: string,
+  settings: AppSettings | null | undefined,
+  values: {
+    code: string;
+    query?: string | null;
+    diagnostics?: string | null;
+  },
+  options: { customOnly?: boolean } = {},
+): string | null {
+  const commandId = getQuickActionCommandId(action);
+  if (!commandId) {
+    return null;
+  }
+
+  const commands = resolveSlashCommandsForRuntime(settings?.slash_commands, DEFAULT_SLASH_COMMANDS);
+  const command = findSlashCommandById(commands, commandId);
+  if (!command?.template) {
+    return null;
+  }
+
+  const defaultTemplate = DEFAULT_SLASH_COMMANDS.find((item) => item.id === commandId)?.template;
+  if (options.customOnly && command.template === defaultTemplate) {
+    return null;
+  }
+
+  return buildPromptFromSlashCommandTemplate(command.template, values);
+}
 
 
 interface OverlayStateUpdate {
@@ -376,10 +418,6 @@ function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n/g, '\n');
 }
 
-function restoreLineEndings(template: string, text: string): string {
-  return template.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text;
-}
-
 function trimPreview(text: string): string {
   return text.split('\n').slice(0, 8).join('\n');
 }
@@ -398,21 +436,6 @@ function extractCommentBlock(rawResult: string): string {
   }
 
   return fallback;
-}
-
-function insertCommentBeforeRoutine(code: string, commentBlock: string): string {
-  const normalizedCode = normalizeLineEndings(code);
-  const lines = normalizedCode.split('\n');
-  const routineLine = lines.findIndex(line =>
-    /^\s*(Процедура|Функция|Procedure|Function)\s+/i.test(line),
-  );
-
-  if (routineLine >= 0) {
-    lines.splice(routineLine, 0, commentBlock);
-    return restoreLineEndings(code, lines.join('\n'));
-  }
-
-  return restoreLineEndings(code, `${commentBlock}\n${normalizedCode}`);
 }
 
 function buildDiffFallbackPreview(rawDiff: string, failedCount: number, fuzzyCount: number): string {
@@ -441,6 +464,200 @@ interface EditorContext {
   primary_runtime_id?: string | null;
 }
 
+// Feature #6: insertion context from EditorBridge
+interface InsertionContext {
+  context: 'inside_method' | 'between_methods' | 'selection_inside_method' | 'selection_across_methods' | 'empty_module';
+  caret_line: number;
+  method_name: string | null;
+  method_start_line: number | null;
+  method_end_line: number | null;
+  has_selection: boolean;
+  selection_text: string;
+  insert_at_line: number;
+  append_after_line: number;
+  can_declare_method: boolean;
+  module_text: string;
+}
+
+
+function buildElaborateDirectPrompt(
+  code: string,
+  task: string | null,
+  canDeclareMethod: boolean,
+  settings?: AppSettings | null,
+): string {
+  const settingsPrompt = buildSettingsBackedQuickActionPrompt(
+    'elaborate',
+    settings,
+    { code, query: task ?? '' },
+    { customOnly: true },
+  );
+  if (settingsPrompt) {
+    return settingsPrompt;
+  }
+
+  const taskLine = task ? `Задача: ${task}` : 'Улучши или доработай код';
+  if (canDeclareMethod && !code.trim()) {
+    return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Напиши новую процедуру или функцию BSL. Верни только код без markdown-оформления.`;
+  }
+  if (canDeclareMethod) {
+    return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Существующий код:
+${code}
+
+Верни результат в формате SEARCH/REPLACE. Если создаёшь новый метод, можно вернуть его текст без SEARCH/REPLACE.`;
+  }
+  return `Ты — опытный 1С-разработчик. ${taskLine}
+
+Код:
+${code}
+
+Верни результат в формате SEARCH/REPLACE.`;
+}
+
+async function elaborateDirectlyToConfigurator(args: {
+  confHwnd: number;
+  capture: CaptureResult;
+  task: string | null;
+  settings?: AppSettings | null;
+  isStaleRequest: () => boolean;
+  targetX: number | null;
+  targetY: number | null;
+  targetChildHwnd: number | null;
+}): Promise<void> {
+  const { confHwnd, capture, task, settings, isStaleRequest, targetX, targetY, targetChildHwnd } = args;
+
+  // Get BSL insertion context for smart write strategy
+  let insCtx: InsertionContext | null = null;
+  try {
+    const raw = await invoke<unknown>('get_insertion_context_cmd', { hwnd: confHwnd });
+    insCtx = raw as InsertionContext;
+  } catch (e) {
+    console.warn('[elaborateDirect] insertion context unavailable, using capture scope:', e);
+  }
+
+  if (isStaleRequest()) return;
+
+  const canDeclare = insCtx?.can_declare_method ?? false;
+  const prompt = buildElaborateDirectPrompt(capture.promptCode, task, canDeclare, settings);
+
+  // Call AI (with timeout — если quick_chat_invoke не ответил за 90с, показываем ошибку в оверлее)
+  const rawResult = await Promise.race([
+    invoke<string>('quick_chat_invoke', { prompt }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Таймаут: ИИ не ответил за 90 секунд. Попробуйте ещё раз.')), 90_000)
+    ),
+  ]);
+  const safeResult = decodeHtmlEntities(rawResult);
+  if (isStaleRequest()) return;
+
+  // Determine if AI returned SEARCH/REPLACE diff
+  const hasDiff = /^<{5,9}\s*SEARCH>?/m.test(safeResult);
+
+  if (hasDiff) {
+    const diffResult = applyDiffWithDiagnostics(capture.promptCode, safeResult);
+
+    if (diffResult.failedCount > 0) {
+      // Diff failed → show in overlay for manual review
+      await invoke('update_overlay_state', {
+        state: {
+          phase: 'result',
+          action: 'elaborate',
+          resultType: 'diff' as ResultType,
+          preview: buildDiffFallbackPreview(safeResult, diffResult.failedCount, diffResult.fuzzyCount),
+          diffContent: safeResult,
+          confHwnd,
+          originalCode: capture.originalCode,
+          useSelectAll: capture.useSelectAll,
+          caretLine: capture.caretLine,
+          methodStartLine: capture.methodStartLine,
+          methodName: capture.methodName,
+          runtimeId: capture.runtimeId,
+          targetX,
+          targetY,
+          targetChildHwnd,
+        } satisfies OverlayStateUpdate,
+      });
+      return;
+    }
+
+    // Diff OK → write to configurator
+    let writeIntent: WriteIntent;
+    if (capture.scope === 'selection') {
+      writeIntent = 'replace_selection';
+    } else if (capture.scope === 'current_method') {
+      writeIntent = 'replace_current_method';
+    } else {
+      writeIntent = 'replace_module';
+    }
+
+    await invoke('paste_code_to_configurator', {
+      hwnd: confHwnd,
+      code: diffResult.code,
+      useSelectAll: capture.useSelectAll,
+      originalContent: capture.originalCode ?? null,
+      action: 'elaborate',
+      writeIntent,
+      caretLine: capture.caretLine ?? null,
+      methodStartLine: capture.methodStartLine ?? null,
+      methodName: capture.methodName ?? null,
+      runtimeId: capture.runtimeId ?? null,
+    });
+    await invoke('hide_overlay', { confHwnd });
+    return;
+  }
+
+  // No SEARCH/REPLACE — AI returned plain code
+  const cleanResult = safeResult.trim();
+
+  if (!cleanResult) {
+    await invoke('update_overlay_state', {
+      state: buildOverlayMessageState({
+        action: 'elaborate',
+        confHwnd,
+        preview: 'ИИ вернул пустой результат.',
+        capture,
+        target: { targetX, targetY, targetChildHwnd },
+      }),
+    });
+    return;
+  }
+
+  if (canDeclare && insCtx) {
+    // Between methods / empty module — insert plain code directly
+    if (insCtx.context === 'empty_module') {
+      await invoke('insert_at_line_cmd', { hwnd: confHwnd, line: 0, text: cleanResult });
+    } else {
+      await invoke('append_to_module_cmd', { hwnd: confHwnd, text: cleanResult });
+    }
+    await invoke('hide_overlay', { confHwnd });
+    return;
+  }
+
+  // Fallback: show for manual review
+  await invoke('update_overlay_state', {
+    state: {
+      phase: 'result',
+      action: 'elaborate',
+      resultType: 'diff' as ResultType,
+      preview: trimPreview(cleanResult),
+      diffContent: cleanResult,
+      confHwnd,
+      originalCode: capture.originalCode,
+      useSelectAll: capture.useSelectAll,
+      caretLine: capture.caretLine,
+      methodStartLine: capture.methodStartLine,
+      methodName: capture.methodName,
+      runtimeId: capture.runtimeId,
+      targetX,
+      targetY,
+      targetChildHwnd,
+    } satisfies OverlayStateUpdate,
+  });
+}
 
 async function captureQuickActionContext(
   confHwnd: number,
@@ -448,27 +665,16 @@ async function captureQuickActionContext(
 ): Promise<CaptureResult> {
   try {
     const ctx = await invoke<EditorContext>('get_editor_context_cmd', { hwnd: confHwnd, skipFocusRestore: action === 'describe' });
-    if (ctx.available) {
-      if (action === 'describe' && ctx.current_method_text) {
-        return { scope: 'current_method', promptCode: ctx.current_method_text, originalCode: ctx.current_method_text, useSelectAll: false, caretLine: ctx.caret_line, methodStartLine: ctx.method_start_line, methodName: ctx.current_method_name, runtimeId: ctx.primary_runtime_id };
-      }
-      if (ctx.has_selection && ctx.selection_text.trim()) {
-        const bslAnalysisCode = ctx.current_method_text || (ctx.module_text.trim() ? ctx.module_text : undefined);
-        return { scope: 'selection', promptCode: ctx.selection_text, originalCode: ctx.selection_text, useSelectAll: false, runtimeId: ctx.primary_runtime_id, bslAnalysisCode };
-      }
-      if (ctx.current_method_text) {
-        return { scope: 'current_method', promptCode: ctx.current_method_text, originalCode: ctx.current_method_text, useSelectAll: false, caretLine: ctx.caret_line, methodStartLine: ctx.method_start_line, methodName: ctx.current_method_name, runtimeId: ctx.primary_runtime_id };
-      }
-      if (ctx.module_text.trim()) {
-        return { scope: 'module', promptCode: ctx.module_text, originalCode: ctx.module_text, useSelectAll: true, runtimeId: ctx.primary_runtime_id };
-      }
+    const resolvedCapture = resolveCaptureFromEditorContext(ctx, action);
+    if (resolvedCapture) {
+      return resolvedCapture;
     }
   } catch (bridgeError) {
     console.warn('[useQuickActions] bridge context failed, falling back:', bridgeError);
   }
 
   if (action === 'describe') {
-    const promptCode = await invoke<string>('get_active_fragment_cmd', {
+    const promptCode = await invoke<string>('get_current_method_text_cmd', {
       hwnd: confHwnd,
       skipFocusRestore: true,
     });
@@ -515,12 +721,26 @@ export function useQuickActions() {
       const isStaleRequest = () => latestRequestIdRef.current !== requestId;
       const { action, confHwnd, task, targetX, targetY, targetChildHwnd } = event.payload;
       const autoApply = settings?.configurator?.editor_bridge_auto_apply ?? false;
+      const rdpMode = settings?.configurator?.rdp_mode ?? false;
+      let overlayTemporarilyHidden = false;
 
       try {
-        const shouldSyncToClickTarget =
+      const shouldSyncToClickTarget =
           typeof targetX === 'number' &&
           typeof targetY === 'number' &&
-          ((action === 'describe') || !(await invoke<boolean>('check_selection_state', { hwnd: confHwnd })));
+          shouldSyncQuickActionToClickTarget(
+            action,
+            await invoke<boolean>('check_selection_state', { hwnd: confHwnd }),
+          );
+
+        if (shouldSyncToClickTarget && rdpMode) {
+          try {
+            await invoke('hide_overlay', { confHwnd, restoreFocus: false });
+            overlayTemporarilyHidden = true;
+          } catch (hideError) {
+            console.warn('[useQuickActions] failed to hide overlay before RDP sync:', hideError);
+          }
+        }
 
         if (shouldSyncToClickTarget) {
           try {
@@ -536,6 +756,14 @@ export function useQuickActions() {
         }
 
         const capture = await captureQuickActionContext(confHwnd, action);
+        if (overlayTemporarilyHidden) {
+          try {
+            await invoke('show_hidden_overlay');
+          } catch (showError) {
+            console.warn('[useQuickActions] failed to restore overlay after RDP sync:', showError);
+          }
+          overlayTemporarilyHidden = false;
+        }
         if (isStaleRequest()) return;
 
         if (action === 'explain') {
@@ -588,13 +816,28 @@ export function useQuickActions() {
         }
 
         if (action === 'elaborate') {
-          await handoffQuickActionSession({
-            action,
-            mode: 'write',
-            confHwnd,
-            capture,
-            task: task?.trim() || null,
-          });
+          if (autoApply) {
+            // Feature #6: with autoApply — call AI directly and write result to configurator
+            // without opening chat. Respects BSL context (inside_method vs between_methods).
+            await elaborateDirectlyToConfigurator({
+              confHwnd,
+              capture,
+              task: task?.trim() || null,
+              settings,
+              isStaleRequest,
+              targetX: targetX ?? null,
+              targetY: targetY ?? null,
+              targetChildHwnd: targetChildHwnd ?? null,
+            });
+          } else {
+            await handoffQuickActionSession({
+              action,
+              mode: 'write',
+              confHwnd,
+              capture,
+              task: task?.trim() || null,
+            });
+          }
           return;
         }
 
@@ -608,8 +851,9 @@ export function useQuickActions() {
           return;
         }
 
-        const prompt = buildPrompt(action, capture.promptCode, task);
+        const prompt = buildPrompt(action, capture.promptCode, task, undefined, settings);
         const rawResult = await invoke<string>('quick_chat_invoke', { prompt });
+        const safeResult = decodeHtmlEntities(rawResult);
         if (isStaleRequest()) return;
 
         const { changed: contextChanged, freshCapture } = await refreshQuickActionContext(
@@ -627,29 +871,26 @@ export function useQuickActions() {
         const resultType = resultTypeFor(action);
         let resultCode: string | undefined;
         let diffContent: string | undefined;
-        let previewText = rawResult;
+        let previewText = safeResult;
         let writeIntent: WriteIntent | undefined;
         let applySupport: ConfiguratorApplySupport | undefined;
 
         if (action === 'describe') {
-          const commentBlock = extractCommentBlock(rawResult);
-          if (effectiveCapture.scope === 'selection') {
-            resultCode = insertCommentBeforeRoutine(effectiveCapture.promptCode, commentBlock);
-            writeIntent = 'replace_selection';
-          } else if (effectiveCapture.scope === 'current_method') {
-            resultCode = commentBlock;
-            writeIntent = 'insert_before_current_method';
-          } else {
-            resultCode = insertCommentBeforeRoutine(effectiveCapture.promptCode, commentBlock);
-            writeIntent = 'replace_module';
+          if (effectiveCapture.scope !== 'current_method') {
+            throw new Error(
+              'Описание можно добавлять только к текущей процедуре или функции. Повторите действие внутри нужного метода.',
+            );
           }
+          const commentBlock = extractCommentBlock(safeResult);
+          resultCode = commentBlock;
+          writeIntent = 'insert_before_current_method';
           previewText = commentBlock;
         } else if (action === 'review') {
-          resultCode = rawResult;
-          previewText = rawResult;
+          resultCode = safeResult;
+          previewText = safeResult;
         } else {
-          diffContent = rawResult;
-          const diffResult = applyDiffWithDiagnostics(effectiveCapture.promptCode, rawResult);
+          diffContent = safeResult;
+          const diffResult = applyDiffWithDiagnostics(effectiveCapture.promptCode, safeResult);
           if (diffResult.failedCount === 0 && diffResult.fuzzyCount === 0) {
             resultCode = diffResult.code;
             writeIntent = effectiveCapture.scope === 'selection'
@@ -657,9 +898,9 @@ export function useQuickActions() {
               : effectiveCapture.scope === 'current_method'
                 ? 'replace_current_method'
                 : 'replace_module';
-            previewText = rawResult;
+            previewText = safeResult;
           } else {
-            previewText = buildDiffFallbackPreview(rawResult, diffResult.failedCount, diffResult.fuzzyCount);
+            previewText = buildDiffFallbackPreview(safeResult, diffResult.failedCount, diffResult.fuzzyCount);
           }
         }
 
@@ -744,6 +985,13 @@ export function useQuickActions() {
             targetChildHwnd,
           } satisfies OverlayStateUpdate,
         });
+        if (overlayTemporarilyHidden) {
+          try {
+            await invoke('show_hidden_overlay');
+          } catch (showError) {
+            console.warn('[useQuickActions] failed to restore overlay after sync error:', showError);
+          }
+        }
       }
     });
 
@@ -801,66 +1049,23 @@ function buildPrompt(
   code: string,
   task?: string,
   diagnostics?: string,
+  settings?: AppSettings | null,
 ): string {
+  const settingsPrompt = buildSettingsBackedQuickActionPrompt(
+    action,
+    settings,
+    { code, query: task ?? '', diagnostics: diagnostics ?? '' },
+    { customOnly: true },
+  );
+  if (settingsPrompt) {
+    return settingsPrompt;
+  }
+
   if (action === 'describe') {
-    return `Ты — опытный 1С-разработчик. Сгенерируй комментарий к процедуре или функции строго по стандарту 1С «Описание процедур и функций» (#std453).
-
-Требования к результату:
-- Верни только блок комментария перед объявлением метода.
-- Каждая строка результата должна начинаться с //.
-- Если комментарий не помещается в одну строку, делай перенос по словам на следующую строку.
-- Каждая перенесенная строка тоже должна начинаться с //.
-- Ни одна строка готового комментария не должна превышать 120 символов.
-- Секция "Описание" обязательна и должна объяснять назначение метода так, чтобы был понятен сценарий использования без чтения реализации.
-- Описание должно начинаться с глагола.
-- Не начинай описание со слов "Процедура", "Функция" и не повторяй имя метода, если это не добавляет смысла.
-- Не пиши тавтологии и очевидные фразы, которые просто повторяют название метода или то, что это обработчик события.
-- Секция "Параметры:" добавляется только если у метода есть параметры.
-- Для каждого параметра используй формат:
-//  ИмяПараметра - Тип1, Тип2 - осмысленное описание
-- Тип параметра обязателен. Если точный тип неочевиден, определи наиболее вероятный по коду.
-- Секция "Возвращаемое значение:" добавляется только для функции.
-- Для простого возвращаемого значения используй формат:
-//  Тип - описание
-- Для составного возвращаемого значения каждый вариант пиши с новой строки:
-//  - Тип - описание
-- Не добавляй секцию "Пример".
-- Не возвращай код метода, сигнатуру метода, markdown или пояснения вне комментария.
-
-Код:
-${code}
-
-Верни только готовый комментарий по стандарту 1С.`;
+    return buildDescribePrompt(code);
   }
 
   switch (action) {
-    case 'describe':
-      return `Ты — опытный 1С-разработчик. Сгенерируй комментарий к процедуре или функции строго по стандарту 1С «Описание процедур и функций» (#std453).
-
-Требования к результату:
-- Верни только блок комментария перед объявлением метода.
-- Каждая строка результата должна начинаться с //.
-- Секция "Описание" обязательна и должна объяснять назначение метода так, чтобы был понятен сценарий использования без чтения реализации.
-- Описание должно начинаться с глагола.
-- Не начинай описание со слов "Процедура", "Функция" и не повторяй имя метода, если это не добавляет смысла.
-- Не пиши тавтологии и очевидные фразы, которые просто повторяют название метода или то, что это обработчик события.
-- Секция "Параметры:" добавляется только если у метода есть параметры.
-- Для каждого параметра используй формат:
-//  ИмяПараметра - Тип1, Тип2 - осмысленное описание
-- Тип параметра обязателен. Если точный тип неочевиден, определи наиболее вероятный по коду.
-- Секция "Возвращаемое значение:" добавляется только для функции.
-- Для простого возвращаемого значения используй формат:
-//  Тип - описание
-- Для составного возвращаемого значения каждый вариант пиши с новой строки:
-//  - Тип - описание
-- Не добавляй секцию "Пример".
-- Не возвращай код метода, сигнатуру метода, markdown или пояснения вне комментария.
-
-Код:
-${code}
-
-Верни только готовый комментарий по стандарту 1С.`;
-
     case 'elaborate':
       return `Ты — опытный 1С-разработчик. Доработай процедуру/функцию.
 Задача: ${task ?? 'улучши код'}

@@ -14,6 +14,7 @@ mod editor_bridge;
 #[cfg(windows)]
 mod editor_bridge_installer;
 mod history_manager;
+mod http_client;
 mod job_guard;
 mod llm;
 mod llm_profiles;
@@ -30,7 +31,11 @@ use std::sync::Arc;
 
 use commands::*;
 
-use tauri::{tray::TrayIconBuilder, Manager};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    Manager, WindowEvent,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -71,6 +76,7 @@ pub fn run() {
             install_editor_bridge_cmd,
             get_code_from_configurator,
             get_active_fragment_cmd,
+            get_current_method_text_cmd,
             get_editor_context_cmd,
             get_configurator_apply_support_cmd,
             diagnose_editor_bridge_cmd,
@@ -91,6 +97,8 @@ pub fn run() {
             diagnose_bsl_ls_cmd,
             check_java_cmd,
             check_node_version_cmd,
+            resolve_node_path_cmd,
+            check_node_path_cmd,
             complete_onboarding,
             reset_onboarding,
             restart_app_cmd,
@@ -102,10 +110,14 @@ pub fn run() {
             get_mcp_server_statuses,
             get_mcp_server_logs,
             save_debug_logs,
+            write_frontend_log,
             delete_search_index,
             open_search_index_dir,
             align_with_configurator,
             send_hotkey_cmd,
+            get_insertion_context_cmd,
+            insert_at_line_cmd,
+            append_to_module_cmd,
             // CLI Providers
             cli_auth_start,
             cli_auth_poll,
@@ -114,6 +126,7 @@ pub fn run() {
             cli_get_status,
             cli_refresh_usage,
             // Settings export/import
+            commands::settings::export_chat,
             commands::settings::export_settings,
             commands::settings::import_settings,
             commands::settings::validate_import_settings_file,
@@ -137,11 +150,60 @@ pub fn run() {
             quick_chat_invoke,
         ])
         .setup(|app| {
-            // Setup Tray Icon
-            let _tray = TrayIconBuilder::new()
+            // Setup Tray Icon with context menu
+            let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&quit_item])?;
+
+            let tray_handle = app.handle().clone();
+            let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Mini AI 1C")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(move |_tray, event| {
+                    match event {
+                        // Left click or double click — show/focus window
+                        // NOTE: do NOT match right-click here — set_focus() would steal focus
+                        // from the tray popup menu and cause it to close instantly (Windows bug).
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick { .. } => {
+                            if let Some(window) = tray_handle.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .on_menu_event({
+                    let app_handle = app.handle().clone();
+                    move |_, event| {
+                        if event.id().as_ref() == "quit" {
+                            if let Some(tray) = app_handle.tray_by_id("main-tray") {
+                                let _ = tray.set_visible(false);
+                            }
+                            app_handle.exit(0);
+                        }
+                    }
+                })
                 .build(app)?;
+
+            // Handle window close: hide tray icon then exit cleanly
+            if let Some(main_window) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                main_window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        // Hide tray icon before exit to prevent ghost icon in Windows tray
+                        if let Some(tray) = app_handle.tray_by_id("main-tray") {
+                            let _ = tray.set_visible(false);
+                        }
+                        app_handle.exit(0);
+                    }
+                });
+            }
 
             // Migration: com.miniai1c.agent → com.mini-ai-1c
             // The app identifier was changed; migrate old Tauri app data to the new folder.
@@ -184,6 +246,7 @@ pub fn run() {
             {
                 let current_settings = crate::settings::load_settings();
                 crate::configurator::set_rdp_mode(current_settings.configurator.rdp_mode);
+                crate::mouse_hook::set_rdp_mode(current_settings.configurator.rdp_mode);
                 crate::mouse_hook::set_editor_bridge_enabled(
                     current_settings.configurator.editor_bridge_enabled,
                 );

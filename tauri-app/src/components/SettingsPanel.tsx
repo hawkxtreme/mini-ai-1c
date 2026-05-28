@@ -16,6 +16,7 @@ import { SlashCommandsTab } from './settings/SlashCommandsTab';
 import { useProfiles } from '../contexts/ProfileContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { WindowInfo, BslStatus, AppSettings, BslDiagnosticItem } from '../types/settings';
+import { flushPerformanceDiagnosticsToLog } from '../utils/performanceDiagnostics';
 
 interface SettingsPanelProps {
     isOpen: boolean;
@@ -114,9 +115,10 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
 
     const refreshWindows = async () => {
         if (!settings) return;
-        const windows = await invoke<WindowInfo[]>('find_configurator_windows_cmd', {
-            pattern: settings.configurator.window_title_pattern
-        });
+        const base = settings.configurator.window_title_pattern || 'Конфигуратор|1C:Enterprise';
+        const extras = settings.configurator.extra_window_title_patterns ?? [];
+        const pattern = extras.length > 0 ? `${base}|${extras.join('|')}` : base;
+        const windows = await invoke<WindowInfo[]>('find_configurator_windows_cmd', { pattern });
         setDetectedWindows(windows);
     };
 
@@ -128,7 +130,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
             interval = setInterval(refreshWindows, 3000);
         }
         return () => interval && clearInterval(interval);
-    }, [tab, isOpen, settings?.configurator.window_title_pattern]);
+    }, [tab, isOpen, settings?.configurator.window_title_pattern, settings?.configurator.extra_window_title_patterns]);
 
     useEffect(() => {
         let interval: any;
@@ -209,7 +211,10 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 bg-black/60 flex items-start justify-center z-50 pt-12 pb-4 px-4 sm:pt-16 sm:pb-6 sm:px-6 animate-in fade-in duration-200 overflow-y-auto">
+        <div
+            data-testid="settings-modal"
+            className="fixed inset-0 bg-black/60 flex items-start justify-center z-50 pt-12 pb-4 px-4 sm:pt-16 sm:pb-6 sm:px-6 animate-in fade-in duration-200 overflow-y-auto"
+        >
             <div className="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-4xl h-full sm:h-[85vh] overflow-hidden flex flex-col shadow-2xl">
                 {/* Header */}
                 <div data-tauri-drag-region className="flex items-center justify-between px-6 sm:px-8 py-3 sm:py-4 border-b border-zinc-800 bg-zinc-900 select-none">
@@ -226,7 +231,11 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                         >
                             {globalSettings?.theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
                         </button>
-                        <button onClick={onClose} className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200">
+                        <button
+                            data-testid="settings-close"
+                            onClick={onClose}
+                            className="p-1.5 hover:bg-zinc-800 rounded transition text-zinc-400 hover:text-zinc-200"
+                        >
                             <X className="w-5 h-5" />
                         </button>
                     </div>
@@ -246,6 +255,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                     ].map((t) => (
                         <button
                             key={t.id}
+                            data-testid={`settings-tab-${t.id}`}
                             onClick={() => setTab(t.id)}
                             title={t.label}
                             className={`flex items-center gap-2 px-2.5 sm:px-4 py-3 sm:py-4 text-xs sm:text-sm font-medium transition-all border-b-2 whitespace-nowrap flex-shrink-0 ${tab === t.id
@@ -343,6 +353,7 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                             <div className="max-w-2xl mx-auto">
                                 <MCPSettings
                                     servers={settings.mcp_servers}
+                                    nodePath={settings.node_path}
                                     bslEnabled={settings.bsl_server.enabled}
                                     onUpdate={(mcpServers) => setSettings({ ...settings, mcp_servers: mcpServers })}
                                 />
@@ -361,7 +372,10 @@ export function SettingsPanel({ isOpen, onClose, initialTab }: SettingsPanelProp
                                 window.location.reload();
                             }}
                             saveDebugLogs={async () => {
-                                try { await invoke('save_debug_logs'); } catch (e) { console.error(e); }
+                                try {
+                                    await flushPerformanceDiagnosticsToLog('save_debug_logs');
+                                    await invoke('save_debug_logs');
+                                } catch (e) { console.error(e); }
                             }}
                             currentProvider={activeProfile?.provider}
                         />

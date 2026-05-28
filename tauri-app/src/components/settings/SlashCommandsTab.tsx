@@ -6,6 +6,11 @@ import {
     DEFAULT_SLASH_COMMANDS
 } from '../../types/settings';
 import McpToolsPopover from '../chat/McpToolsPopover';
+import {
+    getQuickActionMenuLabel,
+    isQuickActionSlashCommand,
+    resolveSlashCommandsForRuntime,
+} from '../../utils/slashCommands';
 
 function TokenCode({ code, colorClass = 'text-blue-400/80 bg-blue-400/5', onSelect }: { code: string, colorClass?: string, onSelect?: (code: string) => void }) {
     const [copied, setCopied] = useState(false);
@@ -43,7 +48,7 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
     const [mcpPopoverIndex, setMcpPopoverIndex] = useState<number | null>(null);
     const textareaRefs = React.useRef<Record<string, HTMLTextAreaElement | null>>({});
 
-    const slashCommands = settings.slash_commands || DEFAULT_SLASH_COMMANDS;
+    const slashCommands = resolveSlashCommandsForRuntime(settings.slash_commands, DEFAULT_SLASH_COMMANDS);
 
     const toggleExpand = (id: string) => {
         const newExpanded = new Set(expandedIds);
@@ -106,19 +111,24 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                     </div>
                     <div>
                         <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-2">Быстрые команды</h2>
-                        <p className="text-[11px] text-zinc-500">Настройка команд, вызываемых через "/" в чате</p>
+                        <p className="text-[11px] text-zinc-500">System-команды с бейджем Ctrl+ПКМ редактируют промпты меню Конфигуратора. Пользовательские команды доступны через "/" в чате.</p>
                     </div>
                 </div>
                 <button
                     onClick={addCommand}
+                    title="Добавить пользовательскую команду для slash-меню чата"
                     className="text-[11px] text-blue-400 hover:text-blue-300 transition-all font-bold px-3 py-1 bg-blue-400/5 rounded-lg border border-blue-400/20"
                 >
-                    + Добавить команду
+                    + Команда чата
                 </button>
             </div>
 
             <div className="space-y-2">
-                {slashCommands.map((cmd, index) => (
+                {slashCommands.map((cmd, index) => {
+                    const quickActionLabel = getQuickActionMenuLabel(cmd.id);
+                    const isQuickAction = isQuickActionSlashCommand(cmd.id);
+
+                    return (
                     <div
                         key={cmd.id}
                         className={`group border rounded-xl transition-all duration-200 overflow-hidden ${expandedIds.has(cmd.id)
@@ -143,6 +153,14 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                                     {cmd.is_system && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700/50 uppercase font-mono">
                                             System
+                                        </span>
+                                    )}
+                                    {isQuickAction && (
+                                        <span
+                                            className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 uppercase font-mono"
+                                            title={`Используется пунктом Ctrl+ПКМ -> ${quickActionLabel}`}
+                                        >
+                                            Ctrl+ПКМ
                                         </span>
                                     )}
                                     {!cmd.is_enabled && (
@@ -176,6 +194,16 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                         {/* Expanded Content */}
                         {expandedIds.has(cmd.id) && (
                             <div className="px-5 pb-5 pt-1 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                                {quickActionLabel && (
+                                    <div className="rounded-lg border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-200/80">
+                                        Этот промпт используется пунктом Конфигуратора: {'Ctrl+ПКМ -> '}{quickActionLabel}.
+                                    </div>
+                                )}
+                                {!cmd.is_system && (
+                                    <div className="rounded-lg border border-zinc-700/40 bg-zinc-800/30 px-3 py-2 text-[11px] text-zinc-400">
+                                        Пользовательская команда доступна через slash-меню чата и не добавляет пункт в меню Ctrl+ПКМ.
+                                    </div>
+                                )}
                                 <div className="grid grid-cols-2 gap-4">
                                     <div className="space-y-1.5">
                                         <label className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider px-1 flex items-center gap-1.5">
@@ -358,7 +386,8 @@ export function SlashCommandsTab({ settings, onSettingsChange, onSave, saving }:
                             </div>
                         )}
                     </div>
-                ))}
+                    );
+                })}
             </div>
 
         </div>

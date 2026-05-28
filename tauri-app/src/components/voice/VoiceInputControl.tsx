@@ -30,6 +30,7 @@ export function VoiceInputControl({
         toggleRecording,
         isSupported,
         error: voiceError,
+        rawErrorCode: voiceErrorCode,
         permissionState,
         micLevel,
         hasMicSignal,
@@ -59,10 +60,10 @@ export function VoiceInputControl({
     }, [clearHintTimer]);
 
     useEffect(() => {
-        if (voiceError === 'not-allowed') {
+        if (voiceErrorCode === 'not-allowed') {
             showHintFor(8000);
         }
-    }, [showHintFor, voiceError]);
+    }, [showHintFor, voiceErrorCode]);
 
     useEffect(() => {
         if (disabled && isRecording) {
@@ -159,7 +160,14 @@ export function VoiceInputControl({
             )}
 
             <div className="relative">
-                {showVoiceHint && (
+                {voiceError && !isRecording && (
+                    <div className="absolute bottom-full right-0 mb-4 w-72 p-3 bg-red-900/90 text-red-100 text-xs rounded-xl shadow-2xl z-50 border border-red-700/50 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                        <div className="font-semibold mb-1">Голосовой ввод недоступен</div>
+                        <div className="leading-relaxed">{voiceError}</div>
+                        <div className="absolute top-full right-4 w-3 h-3 bg-red-900/90 rotate-45 -translate-y-1.5 border-r border-b border-red-700/50" />
+                    </div>
+                )}
+                {showVoiceHint && !voiceError && (
                     <div className="absolute bottom-full right-0 mb-4 w-64 p-3 bg-blue-600 text-white text-xs rounded-xl shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-300 z-50">
                         <div className="font-bold mb-1 flex items-center gap-2">
                             <Mic className="w-3 h-3" />

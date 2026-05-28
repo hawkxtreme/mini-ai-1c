@@ -49,7 +49,7 @@ export function CommandMenu({ commands, onSelect, onClose, anchorRect }: Command
     return (
         <div
             ref={menuRef}
-            className="absolute bottom-full left-0 mb-2 w-full max-w-[400px] bg-[#1f1f23] border border-[#27272a] rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200 ring-1 ring-black/50"
+            className="absolute bottom-full left-0 mb-2 w-full max-w-[580px] bg-[#1f1f23] border border-[#27272a] rounded-xl shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200 ring-1 ring-black/50"
             style={{
                 maxHeight: '300px',
                 overflowY: 'auto'
@@ -84,7 +84,7 @@ export function CommandMenu({ commands, onSelect, onClose, anchorRect }: Command
                                 </span>
                             )}
                         </div>
-                        <span className="text-[11px] text-zinc-500 truncate leading-tight">
+                        <span className="text-[11px] text-zinc-500 line-clamp-2 leading-tight">
                             {cmd.description}
                         </span>
                     </div>

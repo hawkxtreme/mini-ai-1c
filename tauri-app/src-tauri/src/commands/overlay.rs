@@ -528,7 +528,7 @@ pub async fn quick_chat_invoke(prompt: String) -> Result<String, String> {
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::build_http_client()?;
 
     // Anthropic uses a different API format
     if matches!(profile.provider, LLMProvider::Anthropic) {

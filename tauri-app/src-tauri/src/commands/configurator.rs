@@ -169,6 +169,18 @@ pub fn sync_configurator_caret_to_point_cmd(
         }
         thread::sleep(Duration::from_millis(35));
 
+        if crate::settings::load_settings().configurator.rdp_mode {
+            crate::configurator::send_left_click(screen_x, screen_y);
+            thread::sleep(Duration::from_millis(80));
+            crate::app_log!(
+                "[1C] Synced caret to right-click point via SendInput: top_hwnd={}, screen=({}, {})",
+                hwnd,
+                screen_x,
+                screen_y
+            );
+            return Ok(true);
+        }
+
         let mut window_rect = RECT::default();
         let mut message_target = target_hwnd;
         let converted = unsafe { GetWindowRect(message_target, &mut window_rect) }.is_ok();
@@ -238,6 +250,8 @@ pub fn get_configurator_apply_support_cmd(
             requested_intent,
         );
         let parent = HWND(hwnd as *mut std::ffi::c_void);
+        let can_use_scintilla_fallback =
+            should_try_scintilla_fallback(false, quick_action_apply_policy);
 
         if !matches!(
             quick_action_apply_policy,
@@ -250,6 +264,7 @@ pub fn get_configurator_apply_support_cmd(
                     requested_action,
                     select_all,
                     original_content.as_deref(),
+                    None,
                 ) {
                     Ok(target) => target,
                     Err(error) => {
@@ -275,7 +290,7 @@ pub fn get_configurator_apply_support_cmd(
                 let reason = bridge_capability_reason(&ctx).unwrap_or_else(|| {
                 "Надежное прямое применение недоступно: bridge не поддерживает эту операцию, а Scintilla не найден.".to_string()
             });
-                if matches!(quick_action_apply_policy, QuickActionApplyPolicy::Default)
+                if can_use_scintilla_fallback
                     && crate::scintilla::find_scintilla_control(parent).is_some()
                 {
                     return Ok(direct_apply_available("scintilla", Some(target_name)));
@@ -315,6 +330,34 @@ pub fn get_configurator_apply_support_cmd(
             quick_action_apply_policy,
             QuickActionApplyPolicy::ForceSemantic
         ) {
+            if can_use_scintilla_fallback {
+                if let Some(sci) = crate::scintilla::find_scintilla_control(parent) {
+                    let inferred_intent = crate::semantic_bridge::infer_write_intent(
+                        requested_intent,
+                        requested_action,
+                        crate::semantic_bridge::ResolverContext {
+                            has_selection: crate::scintilla::sci_has_selection(sci),
+                            has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
+                                .ok()
+                                .flatten()
+                                .is_some(),
+                            prefer_full_module: select_all,
+                        },
+                    );
+
+                    return match inferred_intent {
+                        Some(intent) => Ok(direct_apply_available(
+                            "scintilla",
+                            Some(semantic_target_name(intent)),
+                        )),
+                        None => Ok(direct_apply_unavailable(
+                            "Р”Р»СЏ СЌС‚РѕРіРѕ РґРµР№СЃС‚РІРёСЏ Р·Р°РїРёСЃСЊ РІ СЂРµРґР°РєС‚РѕСЂ РЅРµ С‚СЂРµР±СѓРµС‚СЃСЏ.".to_string(),
+                            None,
+                        )),
+                    };
+                }
+            }
+
             let inferred_intent = crate::semantic_bridge::infer_write_intent(
                 requested_intent,
                 requested_action,
@@ -337,30 +380,32 @@ pub fn get_configurator_apply_support_cmd(
             };
         }
 
-        if let Some(sci) = crate::scintilla::find_scintilla_control(parent) {
-            let inferred_intent = crate::semantic_bridge::infer_write_intent(
-                requested_intent,
-                requested_action,
-                crate::semantic_bridge::ResolverContext {
-                    has_selection: crate::scintilla::sci_has_selection(sci),
-                    has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
-                        .ok()
-                        .flatten()
-                        .is_some(),
-                    prefer_full_module: select_all,
-                },
-            );
+        if can_use_scintilla_fallback {
+            if let Some(sci) = crate::scintilla::find_scintilla_control(parent) {
+                let inferred_intent = crate::semantic_bridge::infer_write_intent(
+                    requested_intent,
+                    requested_action,
+                    crate::semantic_bridge::ResolverContext {
+                        has_selection: crate::scintilla::sci_has_selection(sci),
+                        has_current_method: crate::scintilla::sci_get_active_fragment_info(sci)
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        prefer_full_module: select_all,
+                    },
+                );
 
-            return match inferred_intent {
-                Some(intent) => Ok(direct_apply_available(
-                    "scintilla",
-                    Some(semantic_target_name(intent)),
-                )),
-                None => Ok(direct_apply_unavailable(
-                    "Для этого действия запись в редактор не требуется.".to_string(),
-                    None,
-                )),
-            };
+                return match inferred_intent {
+                    Some(intent) => Ok(direct_apply_available(
+                        "scintilla",
+                        Some(semantic_target_name(intent)),
+                    )),
+                    None => Ok(direct_apply_unavailable(
+                        "Для этого действия запись в редактор не требуется.".to_string(),
+                        None,
+                    )),
+                };
+            }
         }
 
         let inferred_intent = crate::semantic_bridge::infer_write_intent(
@@ -461,6 +506,17 @@ fn resolve_quick_action_apply_policy(
     }
 }
 
+fn should_try_scintilla_fallback(
+    force_legacy_apply: bool,
+    quick_action_apply_policy: QuickActionApplyPolicy,
+) -> bool {
+    !force_legacy_apply
+        && !matches!(
+            quick_action_apply_policy,
+            QuickActionApplyPolicy::ForceLegacy
+        )
+}
+
 #[cfg(windows)]
 enum BridgePasteTarget<'a> {
     FullModule(&'a str),
@@ -478,12 +534,36 @@ fn editor_context_has_current_method(ctx: &crate::editor_bridge::EditorContext) 
 }
 
 #[cfg(windows)]
+fn captured_semantic_method_text<'a>(
+    intent: crate::semantic_bridge::SemanticWriteIntent,
+    original_content: Option<&'a str>,
+    hints: Option<&crate::editor_bridge::EditorMethodHints>,
+) -> Option<&'a str> {
+    if !matches!(
+        intent,
+        crate::semantic_bridge::SemanticWriteIntent::ReplaceCurrentMethod
+            | crate::semantic_bridge::SemanticWriteIntent::InsertBeforeCurrentMethod
+    ) {
+        return None;
+    }
+
+    let captured = original_content.filter(|value| !value.trim().is_empty())?;
+    let hints = hints?;
+    if hints_contain_semantic_method_identity(hints) {
+        Some(captured)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
 fn choose_bridge_paste_target<'a>(
     ctx: &'a crate::editor_bridge::EditorContext,
     requested_intent: Option<crate::semantic_bridge::SemanticWriteIntent>,
     requested_action: Option<crate::semantic_bridge::QuickActionKind>,
     select_all: bool,
     original_content: Option<&'a str>,
+    captured_method_hints: Option<&crate::editor_bridge::EditorMethodHints>,
 ) -> Result<BridgePasteTarget<'a>, String> {
     let resolved_intent = crate::semantic_bridge::infer_write_intent(
         requested_intent,
@@ -495,6 +575,8 @@ fn choose_bridge_paste_target<'a>(
         },
     )
     .ok_or_else(|| "Для этого действия запись в редактор не требуется.".to_string())?;
+    let captured_method_text =
+        captured_semantic_method_text(resolved_intent, original_content, captured_method_hints);
 
     let target = match resolved_intent {
         crate::semantic_bridge::SemanticWriteIntent::ReplaceSelection => {
@@ -508,9 +590,8 @@ fn choose_bridge_paste_target<'a>(
             }
         }
         crate::semantic_bridge::SemanticWriteIntent::ReplaceCurrentMethod => {
-            let method_text = ctx
-                .current_method_text
-                .as_deref()
+            let method_text = captured_method_text
+                .or(ctx.current_method_text.as_deref())
                 .or(original_content)
                 .ok_or_else(|| {
                     "Не удалось определить текущую процедуру или функцию.".to_string()
@@ -518,9 +599,8 @@ fn choose_bridge_paste_target<'a>(
             BridgePasteTarget::CurrentMethod(method_text)
         }
         crate::semantic_bridge::SemanticWriteIntent::InsertBeforeCurrentMethod => {
-            let method_text = ctx
-                .current_method_text
-                .as_deref()
+            let method_text = captured_method_text
+                .or(ctx.current_method_text.as_deref())
                 .or(original_content)
                 .ok_or_else(|| {
                     "Не удалось определить текущую процедуру для вставки описания.".to_string()
@@ -575,11 +655,48 @@ fn direct_apply_unavailable(reason: String, target_kind: Option<String>) -> Edit
 
 #[cfg(windows)]
 fn direct_apply_available(writer: &str, target_kind: Option<String>) -> EditorApplySupport {
+    if writer == "legacy_clipboard"
+        && matches!(
+            target_kind.as_deref(),
+            Some("replace_current_method" | "insert_before_current_method")
+        )
+    {
+        return direct_apply_unavailable(
+            "Legacy clipboard apply for method-scoped actions is disabled: without semantic writer it rewrites the whole module. Open the diff or enable EditorBridge.".to_string(),
+            target_kind,
+        );
+    }
+
     EditorApplySupport {
         can_apply_directly: true,
         preferred_writer: writer.to_string(),
         target_kind,
         reason: None,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(windows)]
+fn legacy_apply_support_for_intent(
+    intent: Option<crate::semantic_bridge::SemanticWriteIntent>,
+) -> EditorApplySupport {
+    match intent {
+        Some(
+            intent @ (
+                crate::semantic_bridge::SemanticWriteIntent::ReplaceCurrentMethod
+                | crate::semantic_bridge::SemanticWriteIntent::InsertBeforeCurrentMethod
+            ),
+        ) => direct_apply_unavailable(
+            "Legacy clipboard apply for method-scoped actions is disabled: without semantic writer it rewrites the whole module. Open the diff or enable EditorBridge.".to_string(),
+            Some(semantic_target_name(intent)),
+        ),
+        Some(intent) => {
+            direct_apply_available("legacy_clipboard", Some(semantic_target_name(intent)))
+        }
+        None => direct_apply_unavailable(
+            "Для этого действия запись в редактор не требуется.".to_string(),
+            None,
+        ),
     }
 }
 
@@ -691,6 +808,7 @@ fn execute_hint_based_bridge_semantic_write(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn build_legacy_semantic_clipboard_module(
     current_module: &str,
     code: &str,
@@ -734,6 +852,7 @@ fn build_legacy_semantic_clipboard_module(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn try_legacy_semantic_clipboard_rewrite(
     hwnd: isize,
     code: &str,
@@ -956,21 +1075,25 @@ pub fn get_code_from_configurator(
         let select_all = use_select_all.unwrap_or(false);
         let parent = HWND(hwnd as *mut std::ffi::c_void);
 
-        match if select_all {
-            crate::editor_bridge::get_text(hwnd)
-        } else {
-            match crate::editor_bridge::get_selection(hwnd) {
-                Ok((true, selection_text)) => Ok(selection_text),
-                Ok((false, _)) => crate::editor_bridge::get_text(hwnd),
-                Err(error) => Err(error),
+        match configurator::get_selected_code(hwnd, select_all).and_then(|result| {
+            if should_retry_clipboard_capture_as_full_module(select_all, &result) {
+                configurator::get_selected_code(hwnd, true)
+            } else {
+                Ok(result)
             }
-        } {
+        }) {
             Ok(result) => {
-                crate::app_log!("[1C] EditorBridge found - reading code via UIAutomation");
+                crate::app_log!(
+                    "[1C] Reading code via clipboard from the active editor (select_all: {})",
+                    select_all
+                );
+                if !skip_focus_restore.unwrap_or(false) {
+                    restore_focus_to_app(&app_handle);
+                }
                 return Ok(result);
             }
             Err(error) => {
-                crate::app_log!("[1C] EditorBridge unavailable - {}", error);
+                crate::app_log!("[1C] Clipboard capture unavailable - {}", error);
             }
         }
 
@@ -984,12 +1107,26 @@ pub fn get_code_from_configurator(
             return result;
         }
 
-        crate::app_log!("[1C] Scintilla not found - falling back to clipboard");
-        let result = configurator::get_selected_code(hwnd, select_all);
-        if !skip_focus_restore.unwrap_or(false) {
-            restore_focus_to_app(&app_handle);
+        match if select_all {
+            crate::editor_bridge::get_text(hwnd)
+        } else {
+            match crate::editor_bridge::get_selection(hwnd) {
+                Ok((true, selection_text)) => Ok(selection_text),
+                Ok((false, _)) => crate::editor_bridge::get_text(hwnd),
+                Err(error) => Err(error),
+            }
+        } {
+            Ok(result) => {
+                crate::app_log!(
+                    "[1C] Clipboard/Scintilla unavailable - reading code via EditorBridge"
+                );
+                return Ok(result);
+            }
+            Err(error) => {
+                crate::app_log!("[1C] EditorBridge unavailable - {}", error);
+            }
         }
-        result
+        Err("Не удалось прочитать код из Конфигуратора через clipboard, Scintilla или EditorBridge.".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -999,6 +1136,10 @@ pub fn get_code_from_configurator(
         let _ = skip_focus_restore;
         Err("Configurator integration is only available on Windows".to_string())
     }
+}
+
+fn should_retry_clipboard_capture_as_full_module(select_all: bool, captured_text: &str) -> bool {
+    !select_all && captured_text.trim().is_empty()
 }
 
 #[tauri::command]
@@ -1051,6 +1192,55 @@ pub fn get_active_fragment_cmd(
         }
 
         crate::app_log!("[1C] Scintilla not found - falling back to clipboard for active fragment");
+        let result = configurator::get_active_fragment(hwnd);
+        if !skip_focus_restore.unwrap_or(false) {
+            restore_focus_to_app(&app_handle);
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app_handle;
+        let _ = hwnd;
+        let _ = skip_focus_restore;
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn get_current_method_text_cmd(
+    app_handle: AppHandle,
+    hwnd: isize,
+    skip_focus_restore: Option<bool>,
+) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        use crate::configurator;
+        use windows::Win32::Foundation::HWND;
+
+        let parent = HWND(hwnd as *mut std::ffi::c_void);
+
+        match crate::editor_bridge::get_current_method(hwnd) {
+            Ok(method) => {
+                crate::app_log!("[1C] EditorBridge found - returning current method for describe");
+                return Ok(method.text);
+            }
+            Err(error) => {
+                crate::app_log!(
+                    "[1C] EditorBridge current method unavailable for describe - {}",
+                    error
+                );
+            }
+        }
+
+        if let Some(sci) = crate::scintilla::find_scintilla_control(parent) {
+            crate::app_log!("[1C] Scintilla found - reading current method for describe");
+            return crate::scintilla::sci_get_active_fragment(sci);
+        }
+
+        crate::app_log!(
+            "[1C] Scintilla not found - falling back to clipboard for current method describe capture"
+        );
         let result = configurator::get_active_fragment(hwnd);
         if !skip_focus_restore.unwrap_or(false) {
             restore_focus_to_app(&app_handle);
@@ -1162,6 +1352,7 @@ pub async fn paste_code_to_configurator<R: Runtime>(
                             requested_action,
                             select_all,
                             original_content.as_deref(),
+                            Some(&requested_hints),
                         )?;
                         let current_target = match &target {
                             BridgePasteTarget::FullModule(text)
@@ -1325,20 +1516,19 @@ pub async fn paste_code_to_configurator<R: Runtime>(
             // Bridge write failed — log and fall through to Scintilla/clipboard
             if let Err(ref e) = write_result {
                 crate::app_log!(
-                    "[1C] Bridge write failed, falling through to clipboard: {}",
+                    "[1C] Bridge write failed, falling through to Scintilla/clipboard: {}",
                     e
                 );
                 bridge_write_failure = Some(e.clone());
             }
         }
 
-        let scintilla = if !force_legacy_apply
-            && matches!(quick_action_apply_policy, QuickActionApplyPolicy::Default)
-        {
-            crate::scintilla::find_scintilla_control(parent).map(|sci| sci.0 as isize)
-        } else {
-            None
-        };
+        let scintilla =
+            if should_try_scintilla_fallback(force_legacy_apply, quick_action_apply_policy) {
+                crate::scintilla::find_scintilla_control(parent).map(|sci| sci.0 as isize)
+            } else {
+                None
+            };
 
         if bridge_write_failure.is_none()
             && scintilla.is_none()
@@ -1478,37 +1668,11 @@ pub async fn paste_code_to_configurator<R: Runtime>(
                     | crate::semantic_bridge::SemanticWriteIntent::InsertBeforeCurrentMethod
             ) {
                 crate::app_log!(
-                    "[1C] Trying legacy semantic clipboard fallback with reconstructed full-module rewrite"
+                    "[1C] Legacy semantic clipboard fallback is disabled for method-scoped writes"
                 );
-
-                match try_legacy_semantic_clipboard_rewrite(
-                    hwnd,
-                    &code,
-                    intent,
-                    original_content.as_deref(),
-                    &requested_hints,
-                ) {
-                    Ok(Some((snapshot_code, updated_module))) => {
-                        let paste_result = configurator::paste_code(hwnd, &updated_module, true);
-                        history_manager::save_snapshot(hwnd, snapshot_code).await;
-                        if paste_result.is_ok() {
-                            let _ = app_handle.emit("RESET_DIFF", code.clone());
-                        }
-                        return paste_result;
-                    }
-                    Ok(None) => {
-                        crate::app_log!(
-                            "[1C] Legacy semantic clipboard fallback skipped: insufficient method hints or captured method text"
-                        );
-                    }
-                    Err(error) => {
-                        crate::app_log!(
-                            "[1C] Legacy semantic clipboard fallback failed: {}",
-                            error
-                        );
-                        legacy_semantic_failure = Some(error);
-                    }
-                }
+                legacy_semantic_failure = Some(
+                    "Legacy clipboard fallback для действий по текущей процедуре отключён: он переписывает весь модуль и может оставить полное выделение. Используйте diff или восстановите semantic write через EditorBridge/Scintilla.".to_string(),
+                );
             }
         }
 
@@ -1665,6 +1829,7 @@ pub fn set_configurator_rdp_mode(enabled: bool) -> Result<(), String> {
     {
         use crate::configurator;
         configurator::set_rdp_mode(enabled);
+        crate::mouse_hook::set_rdp_mode(enabled);
         Ok(())
     }
     #[cfg(not(windows))]
@@ -1723,6 +1888,55 @@ pub async fn install_editor_bridge_cmd(app: tauri::AppHandle) -> Result<String, 
     crate::editor_bridge_installer::download_editor_bridge(app).await
 }
 
+/// Feature #6: Return BSL insertion context at the current cursor position.
+#[tauri::command]
+pub fn get_insertion_context_cmd(hwnd: isize) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::get_insertion_context(hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Feature #6: Insert text before the given line in the BSL module.
+#[tauri::command]
+pub fn insert_at_line_cmd(
+    hwnd: isize,
+    line: i64,
+    text: String,
+) -> Result<crate::editor_bridge::EditorWriteResult, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::insert_at_line(hwnd, line, &text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, line, text);
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
+/// Feature #6: Append text after the last КонецПроцедуры/КонецФункции in the BSL module.
+#[tauri::command]
+pub fn append_to_module_cmd(
+    hwnd: isize,
+    text: String,
+) -> Result<crate::editor_bridge::EditorWriteResult, String> {
+    #[cfg(windows)]
+    {
+        crate::editor_bridge::append_to_module(hwnd, &text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, text);
+        Err("Configurator integration is only available on Windows".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn send_hotkey_cmd(hwnd: isize, key: u16, modifiers: Vec<u16>) -> Result<(), String> {
     #[cfg(windows)]
@@ -1743,10 +1957,17 @@ pub fn send_hotkey_cmd(hwnd: isize, key: u16, modifiers: Vec<u16>) -> Result<(),
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::build_legacy_semantic_clipboard_module;
-    use super::{resolve_quick_action_apply_policy, QuickActionApplyPolicy};
+    use super::{
+        build_legacy_semantic_clipboard_module, choose_bridge_paste_target,
+        legacy_apply_support_for_intent, BridgePasteTarget,
+    };
     #[cfg(windows)]
-    use crate::editor_bridge::EditorMethodHints;
+    use super::{
+        resolve_quick_action_apply_policy, should_retry_clipboard_capture_as_full_module,
+        should_try_scintilla_fallback, QuickActionApplyPolicy,
+    };
+    #[cfg(windows)]
+    use crate::editor_bridge::{EditorContext, EditorMethodHints};
     use crate::semantic_bridge::{QuickActionKind, SemanticWriteIntent};
 
     #[test]
@@ -1779,6 +2000,101 @@ mod tests {
             resolve_quick_action_apply_policy(true, None, None),
             QuickActionApplyPolicy::Default
         );
+    }
+
+    #[test]
+    fn semantic_policy_still_allows_scintilla_fallback() {
+        assert!(should_try_scintilla_fallback(
+            false,
+            QuickActionApplyPolicy::ForceSemantic
+        ));
+    }
+
+    #[test]
+    fn force_legacy_policy_disables_scintilla_fallback() {
+        assert!(!should_try_scintilla_fallback(
+            false,
+            QuickActionApplyPolicy::ForceLegacy
+        ));
+        assert!(!should_try_scintilla_fallback(
+            true,
+            QuickActionApplyPolicy::Default
+        ));
+    }
+
+    #[test]
+    fn empty_selection_clipboard_capture_retries_as_full_module() {
+        assert!(should_retry_clipboard_capture_as_full_module(false, ""));
+        assert!(should_retry_clipboard_capture_as_full_module(
+            false,
+            "   \r\n\t"
+        ));
+        assert!(!should_retry_clipboard_capture_as_full_module(
+            false,
+            "Процедура Тест()\n"
+        ));
+        assert!(!should_retry_clipboard_capture_as_full_module(true, ""));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn legacy_direct_apply_is_blocked_for_insert_before_current_method() {
+        let support =
+            legacy_apply_support_for_intent(Some(SemanticWriteIntent::InsertBeforeCurrentMethod));
+
+        assert!(!support.can_apply_directly);
+        assert_eq!(support.preferred_writer, "diff_only");
+        assert_eq!(
+            support.target_kind.as_deref(),
+            Some(SemanticWriteIntent::InsertBeforeCurrentMethod.as_str())
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn bridge_target_prefers_captured_method_text_when_hints_preserve_method_identity() {
+        let captured_method =
+            "Функция СформироватьXML(УзелОбмена)\n    Возврат УзелОбмена;\nКонецФункции\n";
+        let live_method = "Функция СформироватьПакетОбмена(УзелОбмена)\n    Возврат СформироватьXML(УзелОбмена);\nКонецФункции\n";
+        let module_text = format!("{}\n{}", captured_method, live_method);
+        let ctx = EditorContext {
+            available: true,
+            conf_hwnd: 1,
+            window_title: "test".to_string(),
+            primary_runtime_id: Some("runtime-1".to_string()),
+            has_selection: false,
+            selection_text: String::new(),
+            caret_line: 4,
+            current_method_name: Some("СформироватьПакетОбмена".to_string()),
+            method_start_line: Some(4),
+            method_end_line: Some(6),
+            current_method_text: Some(live_method.to_string()),
+            module_text,
+            capabilities: None,
+        };
+        let hints = EditorMethodHints {
+            caret_line: Some(4),
+            method_start_line: Some(0),
+            method_name: Some("СформироватьXML".to_string()),
+            runtime_id: Some("runtime-1".to_string()),
+        };
+
+        let target = choose_bridge_paste_target(
+            &ctx,
+            Some(SemanticWriteIntent::InsertBeforeCurrentMethod),
+            Some(QuickActionKind::Describe),
+            false,
+            Some(captured_method),
+            Some(&hints),
+        )
+        .expect("captured method should remain the semantic write target");
+
+        match target {
+            BridgePasteTarget::InsertBeforeCurrentMethod(text) => {
+                assert_eq!(text, captured_method);
+            }
+            _ => panic!("expected insert_before_current_method target"),
+        }
     }
 
     #[test]

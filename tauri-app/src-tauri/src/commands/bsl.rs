@@ -321,10 +321,20 @@ pub async fn diagnose_bsl_ls_cmd() -> Vec<BslDiagnosticItem> {
             match client.get(&url).send().await {
                 Ok(resp) => {
                     let status = resp.status();
+                    let code = status.as_u16();
+                    // BSL LS is a WebSocket-only server; GET / returns 404 — that's expected.
+                    let (item_status, message) = if status.is_success() || code == 404 {
+                        ("ok", "Сервер запущен и отвечает.".to_string())
+                    } else {
+                        (
+                            "warn",
+                            format!("Сервер ответил с неожиданным статусом: {}.", code),
+                        )
+                    };
                     report.push(BslDiagnosticItem {
-                        status: "ok".to_string(),
+                        status: item_status.to_string(),
                         title: "HTTP ответ".to_string(),
-                        message: format!("Сервер ответил по HTTP (статус: {}).", status),
+                        message,
                         suggestion: None,
                     });
                 }

@@ -1,17 +1,60 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { PanelRight, ChevronDown, ChevronRight, BrainCircuit, Maximize2, Minimize2, X as CloseIcon, GitCompare } from 'lucide-react';
+import { PanelRight, ChevronRight, BrainCircuit, Maximize2, X as CloseIcon, GitCompare, Copy, Check } from 'lucide-react';
 import { BslEditor } from './ui/BslEditor';
 import { BslDiffEditor } from './ui/BslDiffEditor';
 import { normalizeBslIndent } from '../utils/diffViewer';
-import { useState, useMemo, memo } from 'react';
+import { decodeHtmlEntities } from '../utils/htmlEntities';
+import { useState, useMemo, memo, useCallback } from 'react';
+
+function useCopy(text: string) {
+    const [copied, setCopied] = useState(false);
+    const copy = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch { /* ignore */ }
+    }, [text]);
+    return { copied, copy };
+}
 
 interface MarkdownRendererProps {
     content: string;
     isStreaming?: boolean;
     onApplyCode?: (code: string) => void;
     originalCode?: string; // Original code for diff view
+}
+
+const LARGE_CODE_BLOCK_CHAR_LIMIT = 120_000;
+const LARGE_CODE_BLOCK_PREVIEW_LINES = 18;
+
+function countLines(text: string): number {
+    let count = 1;
+    for (let i = 0; i < text.length; i += 1) {
+        if (text.charCodeAt(i) === 10) count += 1;
+    }
+    return count;
+}
+
+function previewLines(text: string, limit = LARGE_CODE_BLOCK_PREVIEW_LINES): string {
+    const lines = text.split('\n');
+    if (lines.length <= limit) return text;
+    return `${lines.slice(0, limit).join('\n')}\n...`;
+}
+
+function extractLargeBslBlock(content: string): { before: string; code: string; after: string } | null {
+    const match = /```(?:bsl|1c|1с)[^\n\r]*\n([\s\S]*?)```/i.exec(content);
+    if (!match || match[1].length <= LARGE_CODE_BLOCK_CHAR_LIMIT) {
+        return null;
+    }
+
+    return {
+        before: content.slice(0, match.index).trim(),
+        code: match[1].replace(/\n$/, ''),
+        after: content.slice(match.index + match[0].length).trim(),
+    };
 }
 
 // Утилита для очистки diff-артефактов и технических фраз
@@ -102,6 +145,13 @@ export function cleanDiffArtifacts(content: string, originalCode?: string): stri
     const hasBlocks = /<{5,10} SEARCH/.test(content)
         || /<diff(?:\s+[^>]*)?>/.test(content)
         || /<search(?:\s+[^>]*)?>[\s\S]*?<\/search>\s*<replace(?:\s+[^>]*)?>/.test(content);
+
+    // Strip redundant BSL/1C code fences when diff blocks were present —
+    // the diff viewer owns the code display, so standalone code blocks are artifacts.
+    if (hasBlocks) {
+        cleaned = cleaned.replace(/```(?:bsl|1c|1с)[^\n]*\n[\s\S]*?```/gi, '');
+    }
+
     const result = cleaned.trim();
 
     if (!result && hasBlocks) {
@@ -145,6 +195,62 @@ interface CodeBlockProps {
     [key: string]: any;
 }
 
+interface LargeBslCodeBlockProps {
+    codeString: string;
+    onApplyCode?: (code: string) => void;
+}
+
+const LargeBslCodeBlock = memo(function LargeBslCodeBlock({ codeString, onApplyCode }: LargeBslCodeBlockProps) {
+    const { copied, copy } = useCopy(codeString);
+    const lineCount = useMemo(() => countLines(codeString), [codeString]);
+    const preview = useMemo(() => previewLines(codeString), [codeString]);
+
+    return (
+        <div className="relative my-4 group w-full">
+            <div className="flex flex-wrap items-center justify-between gap-y-1 px-3 py-1.5 bg-zinc-800/80 backdrop-blur-sm rounded-t-lg border-x border-t border-[#27272a]">
+                <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest whitespace-nowrap">BSL (1C:Enterprise)</span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-700/70 text-zinc-300 font-bold uppercase whitespace-nowrap">
+                        large preview
+                    </span>
+                    <span className="text-[10px] text-zinc-500 whitespace-nowrap">
+                        {lineCount.toLocaleString()} lines / {codeString.length.toLocaleString()} chars
+                    </span>
+                </div>
+                <div className="flex items-center gap-1.5 ml-auto">
+                    <button
+                        onClick={copy}
+                        className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
+                        title={copied ? 'Скопировано!' : 'Копировать код'}
+                    >
+                        {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copied ? 'OK' : 'Copy'}</span>
+                    </button>
+                    {onApplyCode && (
+                        <button
+                            onClick={() => onApplyCode(normalizeBslIndent(decodeHtmlEntities(codeString)))}
+                            className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-all hover:bg-blue-400/10 rounded-md whitespace-nowrap"
+                            title="Load into Side Panel"
+                        >
+                            <PanelRight className="w-3.5 h-3.5" />
+                            <span>Применить</span>
+                        </button>
+                    )}
+                </div>
+            </div>
+            <div className="bg-[#1e1e1e] border border-[#27272a] rounded-b-lg overflow-hidden border-t-0">
+                <div className="px-4 py-2 text-[11px] text-zinc-500 border-b border-zinc-800">
+                    Полный блок слишком большой для встроенной подсветки; показан краткий preview, полный код доступен через Copy/Применить.
+                </div>
+                <pre className="p-4 overflow-auto w-full text-zinc-300 text-[13px] font-mono whitespace-pre custom-scrollbar max-h-[360px]">
+                    {preview}
+                </pre>
+            </div>
+        </div>
+    );
+});
+
 const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode, originalCode, ...props }: CodeBlockProps) => {
     const match = /language-(\w+)/.exec(className || '');
     const language = match ? match[1] : '';
@@ -162,6 +268,10 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                 {children}
             </code>
         );
+    }
+
+    if (isBsl && codeString.length > LARGE_CODE_BLOCK_CHAR_LIMIT) {
+        return <LargeBslCodeBlock codeString={codeString} onApplyCode={onApplyCode} />;
     }
 
     if (isStreaming) {
@@ -186,6 +296,8 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
         const [isFullscreen, setIsFullscreen] = useState(false);
         const [showDiff, setShowDiff] = useState(false); // Default to Code View to avoid "Red Wall" confusion
         const hasDiff = originalCode && originalCode.trim().length > 0;
+        // eslint-disable-next-line react-hooks/rules-of-hooks
+        const { copied: bslCopied, copy: copyBsl } = useCopy(codeString);
 
         return (
             <>
@@ -215,6 +327,14 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                                 </button>
                             )}
                             <button
+                                onClick={copyBsl}
+                                className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
+                                title={bslCopied ? 'Скопировано!' : 'Копировать код'}
+                            >
+                                {bslCopied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                <span>{bslCopied ? 'OK' : 'Copy'}</span>
+                            </button>
+                            <button
                                 onClick={() => setIsFullscreen(true)}
                                 className="p-1 px-2 text-[11px] font-medium text-zinc-400 hover:text-white transition-all hover:bg-zinc-700/50 rounded-md flex items-center gap-1 whitespace-nowrap"
                                 title="Maximize"
@@ -224,7 +344,7 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                             </button>
                             {onApplyCode && (
                                 <button
-                                    onClick={() => onApplyCode(normalizeBslIndent(codeString))}
+                                    onClick={() => onApplyCode(normalizeBslIndent(decodeHtmlEntities(codeString)))}
                                     className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-all hover:bg-blue-400/10 rounded-md whitespace-nowrap"
                                     title="Load into Side Panel"
                                 >
@@ -268,7 +388,7 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
                                 {onApplyCode && (
                                     <button
                                         onClick={() => {
-                                            onApplyCode(normalizeBslIndent(codeString));
+                                            onApplyCode(normalizeBslIndent(decodeHtmlEntities(codeString)));
                                             setIsFullscreen(false);
                                         }}
                                         className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all text-xs font-semibold shadow-lg shadow-blue-900/20"
@@ -300,12 +420,23 @@ const CodeBlock = memo(({ inline, className, children, isStreaming, onApplyCode,
         );
     }
 
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const { copied: codeCopied, copy: copyCode } = useCopy(codeString);
+
     return (
         <div className="relative my-2 group w-full">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-800 rounded-t-lg border-x border-t border-[#27272a]">
                 <div className="flex items-center gap-2">
                     <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">{language || 'code'}</span>
                 </div>
+                <button
+                    onClick={copyCode}
+                    className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-zinc-400 hover:text-zinc-200 transition-all hover:bg-zinc-700/50 rounded-md"
+                    title={codeCopied ? 'Скопировано!' : 'Копировать код'}
+                >
+                    {codeCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{codeCopied ? 'Скопировано' : 'Копировать'}</span>
+                </button>
             </div>
             <pre className="bg-[#18181b] border border-[#27272a] rounded-b-lg p-4 overflow-x-auto border-t-0 text-zinc-300">
                 <code className={`text-[13px] font-mono leading-relaxed ${className || ''}`} {...props}>
@@ -385,9 +516,38 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, isStre
         },
     }), [isStreaming, onApplyCode, originalCode]);
 
-    const processedContent = isStreaming
-        ? fixStreamingMarkdown(cleanDiffArtifacts(content, originalCode))
-        : cleanDiffArtifacts(content, originalCode);
+    const processedContent = useMemo(() => (
+        isStreaming
+            ? fixStreamingMarkdown(cleanDiffArtifacts(content, originalCode))
+            : cleanDiffArtifacts(content, originalCode)
+    ), [content, isStreaming, originalCode]);
+    const largeBslBlock = useMemo(() => extractLargeBslBlock(processedContent), [processedContent]);
+
+    if (largeBslBlock) {
+        return (
+            <>
+                {largeBslBlock.before && (
+                    <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw]}
+                        components={components as any}
+                    >
+                        {largeBslBlock.before}
+                    </ReactMarkdown>
+                )}
+                <LargeBslCodeBlock codeString={largeBslBlock.code} onApplyCode={onApplyCode} />
+                {largeBslBlock.after && (
+                    <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw]}
+                        components={components as any}
+                    >
+                        {largeBslBlock.after}
+                    </ReactMarkdown>
+                )}
+            </>
+        );
+    }
 
     return (
         <ReactMarkdown

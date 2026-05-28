@@ -157,15 +157,17 @@ class OneCApiClient {
 
             if (toolCalls.length === 0) break;
 
-            // Send tool results back with accepted status
-            console.error(`[1C:Naparnik] Tool calls received (${toolCalls.length}), sending accepted round-trip`);
+            // Send tool results back: this MCP server doesn't execute tool calls locally,
+            // so we report "rejected" — code.1c.ai requires one of ok/rejected/error/timeout.
+            console.error(`[1C:Naparnik] Tool calls received (${toolCalls.length}), sending rejected round-trip`);
             payload = {
                 role: "tool",
                 parent_uuid: this.lastMessageId,
                 content: toolCalls.map((tc: any) => ({
-                    status: "accepted",
+                    status: "rejected",
                     tool_call_id: tc.id ?? "",
-                    content: null
+                    name: tc?.function?.name ?? tc?.name ?? "",
+                    content: "Tool execution is not available in this MCP server bridge."
                 }))
             };
         }

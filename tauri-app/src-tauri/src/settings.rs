@@ -11,12 +11,19 @@ fn default_true() -> bool {
     true
 }
 
+fn default_editor_bridge_enabled_for_deser() -> bool {
+    true
+}
+
 fn default_configurator_window_title_pattern() -> String {
-    "Конфигуратор".to_string()
+    "Конфигуратор|1C:Enterprise".to_string()
 }
 
 fn is_default_configurator_window_title_pattern(value: &String) -> bool {
-    value.trim().is_empty() || value == &default_configurator_window_title_pattern()
+    value.trim().is_empty()
+        || value == "Конфигуратор"
+        || value == "Конфигуратор|Configurator"
+        || value == &default_configurator_window_title_pattern()
 }
 
 fn default_addition_marker() -> String {
@@ -33,6 +40,27 @@ fn default_deletion_marker() -> String {
 
 fn default_max_iterations() -> Option<u32> {
     Some(7)
+}
+
+fn default_compress_strategy() -> String {
+    "summarize".to_string()
+}
+
+fn default_node_path() -> String {
+    "node".to_string()
+}
+
+fn is_default_node_path(value: &String) -> bool {
+    value.trim().is_empty() || value.trim() == default_node_path()
+}
+
+fn normalize_node_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default_node_path()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Быстрые команды (Slash Commands)
@@ -55,6 +83,15 @@ fn default_slash_commands() -> Vec<SlashCommand> {
             name: "Исправить".to_string(),
             description: "Исправить ошибки BSL и логические ошибки".to_string(),
             template: "Исправь ошибки в этом коде. Обрати внимание на следующие диагностики:\n{diagnostics}\n\nКод для исправления:\n```bsl\n{code}\n```".to_string(),
+            is_enabled: true,
+            is_system: true,
+        },
+        SlashCommand {
+            id: "elaborate".to_string(),
+            command: "доработай".to_string(),
+            name: "Доработай".to_string(),
+            description: "Доработать код по пользовательской задаче".to_string(),
+            template: "Доработай этот код по следующей задаче: {query}\n\nТребования:\n- вноси только изменения, которые нужны для выполнения задачи;\n- сохрани стиль и совместимость с 1С;\n- если меняешь код, верни результат в формате, пригодном для сравнения и применения.\n\nКод для доработки:\n```bsl\n{code}\n```".to_string(),
             is_enabled: true,
             is_system: true,
         },
@@ -142,6 +179,32 @@ fn default_slash_commands() -> Vec<SlashCommand> {
     ]
 }
 
+fn ensure_default_slash_commands(settings: &mut AppSettings) -> bool {
+    let defaults = default_slash_commands();
+
+    if settings.slash_commands.is_empty() {
+        settings.slash_commands = defaults;
+        return true;
+    }
+
+    let existing_ids: std::collections::HashSet<String> = settings
+        .slash_commands
+        .iter()
+        .map(|command| command.id.clone())
+        .collect();
+    let missing_system_commands: Vec<SlashCommand> = defaults
+        .into_iter()
+        .filter(|command| command.is_system && !existing_ids.contains(&command.id))
+        .collect();
+
+    if missing_system_commands.is_empty() {
+        return false;
+    }
+
+    settings.slash_commands.extend(missing_system_commands);
+    true
+}
+
 /// Settings for 1C Configurator integration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfiguratorSettings {
@@ -150,6 +213,9 @@ pub struct ConfiguratorSettings {
         skip_serializing_if = "is_default_configurator_window_title_pattern"
     )]
     pub window_title_pattern: String,
+    /// Extra user-defined window title patterns (in addition to the default ones)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_window_title_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_window_hwnd: Option<isize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,7 +226,7 @@ pub struct ConfiguratorSettings {
     pub selected_config_name: Option<String>,
     #[serde(default)]
     pub rdp_mode: bool,
-    #[serde(default)]
+    #[serde(default = "default_editor_bridge_enabled_for_deser")]
     pub editor_bridge_enabled: bool,
     #[serde(default)]
     pub editor_bridge_auto_apply: bool,
@@ -173,6 +239,7 @@ impl Default for ConfiguratorSettings {
     fn default() -> Self {
         Self {
             window_title_pattern: default_configurator_window_title_pattern(),
+            extra_window_title_patterns: Vec::new(),
             selected_window_hwnd: None,
             selected_window_pid: None,
             selected_window_title: None,
@@ -204,6 +271,82 @@ impl Default for BSLServerSettings {
             java_path: "java".to_string(),
             enabled: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    System,
+    Disabled,
+    Custom,
+}
+
+impl Default for ProxyMode {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyProtocol {
+    Http,
+    Socks5,
+}
+
+impl Default for ProxyProtocol {
+    fn default() -> Self {
+        Self::Http
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxySettings {
+    #[serde(default)]
+    pub mode: ProxyMode,
+    #[serde(default)]
+    pub protocol: ProxyProtocol,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            mode: ProxyMode::System,
+            protocol: ProxyProtocol::Http,
+            host: String::new(),
+            port: None,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProxySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxySettings")
+            .field("mode", &self.mode)
+            .field("protocol", &self.protocol)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &if self.password.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .finish()
     }
 }
 
@@ -256,6 +399,13 @@ impl Default for McpServerConfig {
 pub struct AppSettings {
     pub configurator: ConfiguratorSettings,
     pub bsl_server: BSLServerSettings,
+    #[serde(
+        default = "default_node_path",
+        skip_serializing_if = "is_default_node_path"
+    )]
+    pub node_path: String,
+    #[serde(default)]
+    pub proxy: ProxySettings,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     pub active_llm_profile: String,
@@ -283,10 +433,15 @@ pub struct AppSettings {
     pub theme: Option<String>,
 
     /// Стратегия сжатия контекста: "" / "sliding_window" / "summarize"
-    #[serde(default)]
+    #[serde(default = "default_compress_strategy")]
     pub context_compress_strategy: String,
 
-    /// Порог сжатия (кол-во сообщений диалога, default 40)
+    /// Порог сжатия в токенах (chars/4 эвристика, default 8000).
+    /// Заменяет max_context_messages — сжатие теперь по токенам, а не по числу сообщений.
+    #[serde(default)]
+    pub max_context_tokens: Option<u32>,
+
+    /// Устаревшее поле — сохранено для миграции старых конфигов.
     #[serde(default)]
     pub max_context_messages: Option<u32>,
 }
@@ -330,6 +485,7 @@ pub enum CodeGenerationMode {
 pub enum PromptBehaviorPreset {
     Project,
     Maintenance,
+    Cli,
 }
 
 impl Default for PromptBehaviorPreset {
@@ -451,6 +607,85 @@ pub fn clear_runtime_only_settings(settings: &mut AppSettings) -> bool {
     had_binding
 }
 
+fn is_builtin_node_mcp_server(server_id: &str) -> bool {
+    matches!(
+        server_id,
+        "builtin-1c-naparnik" | "builtin-1c-metadata" | "builtin-1c-help"
+    )
+}
+
+fn migrate_builtin_mcp_launchers(settings: &mut AppSettings) -> bool {
+    let mut modified = false;
+    let node_path = normalize_node_path(&settings.node_path);
+
+    if settings.node_path != node_path {
+        settings.node_path = node_path.clone();
+        modified = true;
+    }
+
+    for server in settings.mcp_servers.iter_mut() {
+        if is_builtin_node_mcp_server(&server.id) {
+            let current_cmd = server.command.as_deref().unwrap_or("");
+            if current_cmd != node_path {
+                crate::app_log!(
+                    "[SETTINGS] Migrating builtin server '{}' from '{}' to '{}' launcher",
+                    server.id,
+                    current_cmd,
+                    node_path
+                );
+                server.command = Some(node_path.clone());
+                modified = true;
+            }
+
+            if let Some(args) = &mut server.args {
+                let original_args = args.clone();
+                args.retain(|a| a != "tsx" && a != "--yes" && !a.contains("node_modules"));
+
+                for arg in args.iter_mut() {
+                    if arg.contains("mcp-servers") {
+                        *arg = arg
+                            .replace("src-tauri/", "")
+                            .replace("src/mcp-servers/", "mcp-servers/");
+                    }
+                    if arg.ends_with(".ts") || arg.ends_with(".js") {
+                        *arg = arg.replace(".ts", ".cjs").replace(".js", ".cjs");
+                    }
+                }
+                if args != &original_args {
+                    crate::app_log!(
+                        "[SETTINGS] Migrated builtin server '{}' args to: {:?}",
+                        server.id,
+                        args
+                    );
+                    modified = true;
+                }
+            }
+        } else if server.id == "builtin-1c-search" {
+            let current_cmd = server.command.as_deref().unwrap_or("");
+            if current_cmd != "mcp-1c-search.exe" && !current_cmd.ends_with("mcp-1c-search.exe") {
+                crate::app_log!(
+                    "[SETTINGS] Migrating builtin-1c-search command to 'mcp-1c-search.exe'"
+                );
+                server.command = Some("mcp-1c-search.exe".to_string());
+                server.args = None;
+                modified = true;
+            }
+        } else if let Some(cmd) = &server.command {
+            if cmd.contains("node_modules") {
+                crate::app_log!(
+                    "[DEBUG] Migrating stale command '{}' to 'npx' for MCP server '{}'",
+                    cmd,
+                    server.id
+                );
+                server.command = Some("npx".to_string());
+                modified = true;
+            }
+        }
+    }
+
+    modified
+}
+
 /// Get the settings directory path
 pub fn get_settings_dir() -> PathBuf {
     // Use data_local_dir instead of config_dir to avoid UNC paths on terminal servers
@@ -506,72 +741,21 @@ pub fn load_settings() -> AppSettings {
         }
     }
 
-    // Migration: Force high-performance node launcher for built-in MCP servers
-    for server in settings.mcp_servers.iter_mut() {
-        if server.id == "builtin-1c-naparnik"
-            || server.id == "builtin-1c-metadata"
-            || server.id == "builtin-1c-help"
-        {
-            let current_cmd = server.command.as_deref().unwrap_or("");
-            if current_cmd != "node" {
-                crate::app_log!(
-                    "[SETTINGS] Migrating builtin server '{}' from '{}' to 'node' launcher",
-                    server.id,
-                    current_cmd
-                );
-                server.command = Some("node".to_string());
-                modified = true;
-            }
+    if migrate_builtin_mcp_launchers(&mut settings) {
+        modified = true;
+    }
 
-            if let Some(args) = &mut server.args {
-                let original_args = args.clone();
-                // Filter out tsx/npx specific artifacts
-                args.retain(|a| a != "tsx" && a != "--yes" && !a.contains("node_modules"));
-
-                for arg in args.iter_mut() {
-                    // Fix paths: we want 'mcp-servers/name.cjs' relative to src-tauri
-                    if arg.contains("mcp-servers") {
-                        *arg = arg
-                            .replace("src-tauri/", "")
-                            .replace("src/mcp-servers/", "mcp-servers/");
-                    }
-                    if arg.ends_with(".ts") || arg.ends_with(".js") {
-                        *arg = arg.replace(".ts", ".cjs").replace(".js", ".cjs");
-                    }
-                }
-                if args != &original_args {
-                    crate::app_log!(
-                        "[SETTINGS] Migrated builtin server '{}' args to: {:?}",
-                        server.id,
-                        args
-                    );
-                    modified = true;
-                }
-            }
-        } else if server.id == "builtin-1c-search" {
-            // 1С:Поиск — Rust binary, command must stay as mcp-1c-search.exe (NOT node)
-            let current_cmd = server.command.as_deref().unwrap_or("");
-            if current_cmd != "mcp-1c-search.exe" && !current_cmd.ends_with("mcp-1c-search.exe") {
-                crate::app_log!(
-                    "[SETTINGS] Migrating builtin-1c-search command to 'mcp-1c-search.exe'"
-                );
-                server.command = Some("mcp-1c-search.exe".to_string());
-                server.args = None;
-                modified = true;
-            }
-        } else {
-            // Generic migration for other servers if they have node_modules in command
-            if let Some(cmd) = &server.command {
-                if cmd.contains("node_modules") {
-                    crate::app_log!(
-                        "[DEBUG] Migrating stale command '{}' to 'npx' for MCP server '{}'",
-                        cmd,
-                        server.id
-                    );
-                    server.command = Some("npx".to_string());
-                    modified = true;
-                }
-            }
+    // Migration: upgrade old window_title_pattern to include "1C:Enterprise" for English UI
+    {
+        let p = &settings.configurator.window_title_pattern;
+        if p == "Конфигуратор" || p == "Конфигуратор|Configurator" {
+            crate::app_log!(
+                "[SETTINGS] Migrating window_title_pattern '{}' to bilingual default",
+                p
+            );
+            settings.configurator.window_title_pattern =
+                default_configurator_window_title_pattern();
+            modified = true;
         }
     }
 
@@ -583,27 +767,8 @@ pub fn load_settings() -> AppSettings {
     }
 
     // Migration: ensure default slash commands exist
-    if settings.slash_commands.is_empty() {
-        settings.slash_commands = default_slash_commands();
+    if ensure_default_slash_commands(&mut settings) {
         modified = true;
-    } else {
-        // Inject new system commands that may be missing in existing settings
-        let new_system_ids = ["search-1c", "refs-1c", "struct-1c"];
-        let existing_ids: std::collections::HashSet<String> = settings
-            .slash_commands
-            .iter()
-            .map(|c| c.id.clone())
-            .collect();
-        let to_add: Vec<SlashCommand> = default_slash_commands()
-            .into_iter()
-            .filter(|cmd| {
-                new_system_ids.contains(&cmd.id.as_str()) && !existing_ids.contains(&cmd.id)
-            })
-            .collect();
-        if !to_add.is_empty() {
-            settings.slash_commands.extend(to_add);
-            modified = true;
-        }
     }
 
     let profile_store = crate::llm_profiles::load_profiles();
@@ -675,10 +840,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_configurator_settings_enable_bridge_when_flag_missing() {
+        let mut json = serde_json::to_value(AppSettings::default())
+            .expect("default settings should serialize to json");
+
+        let configurator = json["configurator"]
+            .as_object_mut()
+            .expect("configurator section should exist");
+        configurator.remove("editor_bridge_enabled");
+        configurator.remove("rdp_mode");
+
+        let settings: AppSettings =
+            serde_json::from_value(json).expect("legacy settings should deserialize");
+
+        assert!(settings.configurator.editor_bridge_enabled);
+        assert!(!settings.configurator.rdp_mode);
+    }
+
+    #[test]
     fn clear_runtime_only_settings_drops_configurator_binding() {
         let mut settings = AppSettings {
             configurator: ConfiguratorSettings {
                 window_title_pattern: "Конфигуратор".to_string(),
+                extra_window_title_patterns: Vec::new(),
                 selected_window_hwnd: Some(777),
                 selected_window_pid: Some(888),
                 selected_window_title: Some("Конфигуратор - DemoBase".to_string()),
@@ -716,5 +900,109 @@ mod tests {
         assert!(!serialized.contains("selected_window_title"));
         assert!(!serialized.contains("selected_config_name"));
         assert!(!serialized.contains("window_title_pattern"));
+    }
+
+    #[test]
+    fn legacy_settings_deserialize_node_path_to_default_node() {
+        let mut json = serde_json::to_value(AppSettings::default())
+            .expect("default settings should serialize to json");
+        json.as_object_mut()
+            .expect("settings should be an object")
+            .remove("node_path");
+
+        let settings: AppSettings =
+            serde_json::from_value(json).expect("legacy settings should deserialize");
+
+        assert_eq!(settings.node_path, "node");
+    }
+
+    #[test]
+    fn default_proxy_settings_use_system_mode() {
+        let proxy = ProxySettings::default();
+
+        assert_eq!(proxy.mode, ProxyMode::System);
+        assert_eq!(proxy.protocol, ProxyProtocol::Http);
+        assert_eq!(proxy.host, "");
+        assert_eq!(proxy.port, None);
+    }
+
+    #[test]
+    fn legacy_settings_deserialize_proxy_to_default_system() {
+        let mut json = serde_json::to_value(AppSettings::default())
+            .expect("default settings should serialize to json");
+        json.as_object_mut()
+            .expect("settings should be an object")
+            .remove("proxy");
+
+        let settings: AppSettings =
+            serde_json::from_value(json).expect("legacy settings should deserialize");
+
+        assert_eq!(settings.proxy.mode, ProxyMode::System);
+        assert_eq!(settings.proxy.protocol, ProxyProtocol::Http);
+    }
+
+    #[test]
+    fn proxy_settings_debug_does_not_expose_password() {
+        let proxy = ProxySettings {
+            mode: ProxyMode::Custom,
+            protocol: ProxyProtocol::Http,
+            host: "proxy.corp.local".to_string(),
+            port: Some(8080),
+            username: "user".to_string(),
+            password: "very-secret-proxy-password".to_string(),
+        };
+
+        let debug = format!("{:?}", proxy);
+
+        assert!(debug.contains("proxy.corp.local"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("very-secret-proxy-password"));
+    }
+
+    #[test]
+    fn builtin_mcp_node_migration_uses_custom_node_path() {
+        let custom_node = r"C:\portable\node\node.exe".to_string();
+        let mut settings = AppSettings {
+            node_path: custom_node.clone(),
+            mcp_servers: vec![McpServerConfig {
+                id: "builtin-1c-naparnik".to_string(),
+                name: "1C:Naparnik".to_string(),
+                enabled: false,
+                transport: McpTransport::Stdio,
+                url: None,
+                login: None,
+                password: None,
+                headers: None,
+                command: Some("node".to_string()),
+                args: Some(vec![
+                    "--yes".to_string(),
+                    "tsx".to_string(),
+                    "src/mcp-servers/1c-naparnik.ts".to_string(),
+                ]),
+                env: None,
+            }],
+            ..AppSettings::default()
+        };
+
+        assert!(migrate_builtin_mcp_launchers(&mut settings));
+        let server = &settings.mcp_servers[0];
+
+        assert_eq!(server.command.as_deref(), Some(custom_node.as_str()));
+        assert_eq!(
+            server.args,
+            Some(vec!["mcp-servers/1c-naparnik.cjs".to_string()])
+        );
+    }
+
+    #[test]
+    fn ensure_default_slash_commands_adds_missing_system_commands() {
+        let mut settings = AppSettings::default();
+        settings.slash_commands.retain(|cmd| cmd.id != "elaborate");
+
+        assert!(ensure_default_slash_commands(&mut settings));
+        assert!(settings
+            .slash_commands
+            .iter()
+            .any(|cmd| cmd.id == "elaborate"));
     }
 }

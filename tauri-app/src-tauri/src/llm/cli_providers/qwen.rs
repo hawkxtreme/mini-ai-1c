@@ -2,7 +2,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use keyring::Entry;
 use rand::RngCore;
-use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -50,7 +49,7 @@ impl QwenCliProvider {
     // ── Auth ─────────────────────────────────────────────────────────────────
 
     pub async fn auth_start() -> Result<CliAuthInitResponse, String> {
-        let client = Client::new();
+        let client = crate::http_client::build_http_client()?;
 
         let code_verifier = generate_code_verifier();
         let code_challenge = generate_code_challenge(&code_verifier);
@@ -104,7 +103,7 @@ impl QwenCliProvider {
         device_code: &str,
         code_verifier: Option<&str>,
     ) -> Result<CliAuthStatus, String> {
-        let client = Client::new();
+        let client = crate::http_client::build_http_client()?;
 
         let mut params = std::collections::HashMap::new();
         params.insert("client_id", CLIENT_ID);
@@ -217,7 +216,7 @@ impl QwenCliProvider {
     }
 
     pub async fn refresh_access_token(profile_id: &str, refresh_token: &str) -> Result<(), String> {
-        let client = Client::new();
+        let client = crate::http_client::build_http_client()?;
 
         let mut params = std::collections::HashMap::new();
         params.insert("client_id", CLIENT_ID);

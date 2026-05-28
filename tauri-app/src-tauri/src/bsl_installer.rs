@@ -45,7 +45,7 @@ pub async fn download_bsl_ls(app: AppHandle) -> Result<String, String> {
     );
 
     // Create HTTP client with redirect support and timeout
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::http_client_builder()?
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(600)) // 10 minutes timeout
         .build()

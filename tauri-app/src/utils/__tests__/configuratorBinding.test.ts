@@ -131,3 +131,50 @@ test('display title uses active window first and falls back to stored binding', 
     );
     assert.equal(getConfiguratorBindingDisplayTitle(binding, null), 'DemoBase');
 });
+
+// ─── English Configurator window title support (issue #110) ──────────────────
+
+test('EN: resolves window with English "Configurator" title', () => {
+    const selectedWindow = makeWindow({
+        title: 'Common module GlobalSearch: Module - Configurator - DemoBase',
+    });
+    const binding = bindConfiguratorWindow(selectedWindow);
+
+    const result = resolveConfiguratorBinding(binding, [selectedWindow]);
+
+    assert.equal(result.status, 'resolved');
+    assert.equal(result.matchedBy, 'hwnd');
+});
+
+test('EN: extracts config_name from English title format', () => {
+    const binding = bindConfiguratorWindow(makeWindow({
+        title: 'Document SalesOrder: Object Module - Configurator - DemoBase',
+    }));
+
+    assert.equal(getConfiguratorBindingDisplayTitle(binding, null), 'DemoBase');
+});
+
+test('EN: simple "Configurator - ConfigName" title', () => {
+    const binding = bindConfiguratorWindow(makeWindow({
+        title: 'Configurator - ProductionBase',
+    }));
+
+    assert.equal(getConfiguratorBindingDisplayTitle(binding, null), 'ProductionBase');
+});
+
+test('EN: rebinds by config_name when hwnd changes (English title)', () => {
+    const original = makeWindow({
+        hwnd: 1001,
+        process_id: 501,
+        title: 'Common module OldModule: Module - Configurator - DemoBase',
+    });
+    const binding = bindConfiguratorWindow(original);
+
+    // hwnd changed but same config — status is 'rebound'
+    const result = resolveConfiguratorBinding(binding, [
+        makeWindow({ hwnd: 9001, process_id: 502, title: 'Common module NewModule: Module - Configurator - DemoBase' }),
+    ]);
+
+    assert.equal(result.status, 'rebound');
+    assert.equal(result.nextBinding.selected_config_name, 'DemoBase');
+});

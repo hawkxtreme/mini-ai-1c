@@ -11,7 +11,7 @@ export interface ChatSession {
 
 const STORAGE_KEY = 'chat_sessions';
 const ACTIVE_KEY = 'active_session_id';
-const MAX_SESSIONS = 20;
+const MAX_SESSIONS = 50;
 
 function generateId(): string {
     return Date.now().toString(36) + Math.random().toString(36).slice(2);

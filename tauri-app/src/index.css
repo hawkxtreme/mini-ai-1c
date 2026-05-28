@@ -204,6 +204,13 @@ html.light .to-yellow-900\/10 { --tw-gradient-to: rgb(234 179 8 / 0.04) !importa
 html.light .bg-emerald-500\/10 { background-color: rgb(16 185 129 / 0.1) !important; }
 html.light .border-emerald-500\/20 { border-color: rgb(16 185 129 / 0.3) !important; }
 
+/* Qwen paid notice — readable amber on light background */
+html.light .qwen-paid-notice { background-color: #fffbeb !important; border-color: #f59e0b !important; }
+html.light .qwen-paid-notice p { color: #92400e !important; }
+html.light .qwen-paid-notice a { color: #b45309 !important; }
+html.light .qwen-paid-notice a:hover { color: #78350f !important; }
+html.light .qwen-paid-notice span { color: #d97706 !important; }
+
 /* Fix muted text that's too light in light theme */
 html.light .text-zinc-500 { color: #52525b !important; }
 html.light .text-zinc-600 { color: #3f3f46 !important; }
@@ -229,4 +236,19 @@ html.light .bg-emerald-500 .text-white,
 html.light [class*="bg-blue"] .text-white,
 html.light [class*="bg-red"] .text-white {
     color: #ffffff !important;
+}
+
+/* Disable Monaco word/occurrence highlight decorations in all editors */
+.monaco-editor .wordHighlight,
+.monaco-editor .wordHighlightStrong,
+.monaco-editor .wordHighlightText,
+.monaco-editor .selectionHighlight {
+    background-color: transparent !important;
+    border: none !important;
+    outline: none !important;
+}
+/* Also override focused state */
+.monaco-editor .focused .selectionHighlight {
+    background-color: transparent !important;
+    border: none !important;
 }

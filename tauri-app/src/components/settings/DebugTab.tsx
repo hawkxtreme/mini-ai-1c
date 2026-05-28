@@ -188,7 +188,7 @@ export function DebugTab({
                             <div>
                                 <div className="text-sm font-medium text-zinc-200">Системные логи</div>
                                 <div className="text-xs text-zinc-500">
-                                    Экспорт всех логов приложения и серверов в текстовый файл.
+                                    Экспорт логов приложения, MCP-серверов и frontend-метрик производительности.
                                 </div>
                             </div>
 

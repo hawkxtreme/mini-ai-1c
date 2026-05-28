@@ -19,4 +19,5 @@ export interface CodeSidePanelProps {
     onDiffRejected?: () => void;
     onCommitCode?: (code: string) => void;
     isFullWidth?: boolean;
+    onDiagnosticSelectionChange?: (selected: BslDiagnostic[]) => void;
 }

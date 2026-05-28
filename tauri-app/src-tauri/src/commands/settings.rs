@@ -62,6 +62,9 @@ fn sanitize_settings_for_export(mut safe_settings: AppSettings) -> AppSettings {
         provider.api_key = None;
     }
 
+    safe_settings.proxy.username.clear();
+    safe_settings.proxy.password.clear();
+
     safe_settings
 }
 
@@ -118,6 +121,9 @@ fn restore_sensitive_settings(mut imported: AppSettings, current: &AppSettings) 
             provider.api_key = None;
         }
     }
+
+    imported.proxy.username = current.proxy.username.clone();
+    imported.proxy.password = current.proxy.password.clone();
 
     imported
 }
@@ -179,6 +185,70 @@ fn parse_imported_settings(json_data: &str) -> Result<(AppSettings, ProfileStore
 fn read_import_settings_file(file_path: &str) -> Result<String, String> {
     fs::read_to_string(file_path)
         .map_err(|e| format!("Не удалось прочитать файл настроек '{}': {}", file_path, e))
+}
+
+fn default_chat_export_file_name() -> String {
+    format!("chat-{}.md", Local::now().format("%Y-%m-%d-%H%M"))
+}
+
+fn sanitize_chat_export_stem(raw_stem: &str) -> String {
+    let mut sanitized = String::with_capacity(raw_stem.len());
+    let mut previous_was_space = false;
+
+    for ch in raw_stem.chars() {
+        let is_invalid =
+            ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*');
+        if is_invalid || ch.is_whitespace() {
+            if !previous_was_space && !sanitized.is_empty() {
+                sanitized.push(' ');
+            }
+            previous_was_space = true;
+            continue;
+        }
+
+        sanitized.push(ch);
+        previous_was_space = false;
+    }
+
+    let trimmed = sanitized.trim_matches(|ch: char| ch == ' ' || ch == '.');
+    let truncated = trimmed.chars().take(80).collect::<String>();
+    truncated
+        .trim_matches(|ch: char| ch == ' ' || ch == '.')
+        .to_string()
+}
+
+fn build_chat_export_file_name(suggested_file_name: Option<String>) -> String {
+    let fallback_name = default_chat_export_file_name();
+    let Some(raw_name) = suggested_file_name else {
+        return fallback_name;
+    };
+
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty() {
+        return fallback_name;
+    }
+
+    let (raw_stem, extension) = match trimmed.rsplit_once('.') {
+        Some((stem, ext)) => {
+            let normalized_extension = ext.trim().to_ascii_lowercase();
+            if matches!(normalized_extension.as_str(), "md" | "txt") {
+                if stem.trim().is_empty() {
+                    return fallback_name;
+                }
+                (stem, normalized_extension)
+            } else {
+                (trimmed, "md".to_string())
+            }
+        }
+        _ => (trimmed, "md".to_string()),
+    };
+
+    let sanitized_stem = sanitize_chat_export_stem(raw_stem);
+    if sanitized_stem.is_empty() {
+        return fallback_name;
+    }
+
+    format!("{}.{}", sanitized_stem, extension)
 }
 
 /// Get application settings
@@ -244,6 +314,70 @@ pub fn check_node_version_cmd() -> Option<String> {
     }
 }
 
+fn first_non_empty_line(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn resolve_node_path_from_path() -> Option<String> {
+    use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    let output = Command::new("where.exe").arg("node.exe").output();
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("which").arg("node").output();
+
+    match output {
+        Ok(o) if o.status.success() => first_non_empty_line(&o.stdout),
+        _ => None,
+    }
+}
+
+fn normalize_node_command(node_path: &str) -> String {
+    let trimmed = node_path.trim();
+    if trimmed.is_empty() {
+        "node".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn check_node_path_version(node_path: &str) -> Result<String, String> {
+    use std::process::Command;
+
+    let command = normalize_node_command(node_path);
+    let output = Command::new(&command)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("Не удалось запустить Node.js '{}': {}", command, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("Node.js '{}' завершился с ошибкой", command)
+        } else {
+            stderr
+        });
+    }
+
+    first_non_empty_line(&output.stdout)
+        .ok_or_else(|| format!("Node.js '{}' запустился, но не вернул версию", command))
+}
+
+#[tauri::command]
+pub fn resolve_node_path_cmd() -> Option<String> {
+    resolve_node_path_from_path()
+}
+
+#[tauri::command]
+pub fn check_node_path_cmd(node_path: String) -> Result<String, String> {
+    check_node_path_version(&node_path)
+}
+
 /// Export settings to a user-selected JSON file without sensitive data.
 #[tauri::command]
 pub fn export_settings(app_handle: AppHandle) -> Result<ExportSettingsResult, String> {
@@ -266,6 +400,35 @@ pub fn export_settings(app_handle: AppHandle) -> Result<ExportSettingsResult, St
 
     fs::write(&path, json_data)
         .map_err(|e| format!("Не удалось сохранить экспорт настроек: {}", e))?;
+
+    Ok(ExportSettingsResult::saved(path.display().to_string()))
+}
+
+/// Export chat dialog to a user-selected Markdown file.
+#[tauri::command]
+pub fn export_chat(
+    app_handle: AppHandle,
+    content: String,
+    suggested_file_name: Option<String>,
+) -> Result<ExportSettingsResult, String> {
+    let file_name = build_chat_export_file_name(suggested_file_name);
+
+    let Some(file_path) = app_handle
+        .dialog()
+        .file()
+        .add_filter("Markdown", &["md"])
+        .add_filter("Text", &["txt"])
+        .set_file_name(&file_name)
+        .blocking_save_file()
+    else {
+        return Ok(ExportSettingsResult::cancelled());
+    };
+
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Не удалось определить путь сохранения: {}", e))?;
+
+    fs::write(&path, content).map_err(|e| format!("Не удалось сохранить диалог: {}", e))?;
 
     Ok(ExportSettingsResult::saved(path.display().to_string()))
 }
@@ -316,13 +479,15 @@ pub fn check_java_cmd() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_export_bundle, restore_profile_secrets, restore_sensitive_settings,
+        build_chat_export_file_name, build_export_bundle, first_non_empty_line,
+        normalize_node_command, restore_profile_secrets, restore_sensitive_settings,
         sanitize_profiles_for_export, sanitize_settings_for_export, SettingsExportBundle,
         SETTINGS_EXPORT_FORMAT_VERSION,
     };
     use crate::llm_profiles::{LLMProfile, LLMProvider, ProfileStore};
     use crate::settings::{
-        AppSettings, McpServerConfig, McpTransport, ModelSettings, ProviderSettings,
+        AppSettings, McpServerConfig, McpTransport, ModelSettings, ProviderSettings, ProxyMode,
+        ProxyProtocol, ProxySettings,
     };
     use std::collections::HashMap;
 
@@ -371,6 +536,14 @@ mod tests {
                 args: None,
                 env: Some(HashMap::from([("TOKEN".to_string(), "secret".to_string())])),
             }],
+            proxy: ProxySettings {
+                mode: ProxyMode::Custom,
+                protocol: ProxyProtocol::Http,
+                host: "proxy.corp.local".to_string(),
+                port: Some(8080),
+                username: "proxy-user".to_string(),
+                password: "proxy-secret".to_string(),
+            },
             ..AppSettings::default()
         }
     }
@@ -418,6 +591,26 @@ mod tests {
     }
 
     #[test]
+    fn node_path_resolution_uses_first_non_empty_line() {
+        let output = b"\r\nC:\\Program Files\\nodejs\\node.exe\r\nC:\\tools\\node.exe\r\n";
+
+        assert_eq!(
+            first_non_empty_line(output).as_deref(),
+            Some(r"C:\Program Files\nodejs\node.exe")
+        );
+    }
+
+    #[test]
+    fn node_path_check_normalizes_blank_to_default_launcher() {
+        assert_eq!(normalize_node_command(""), "node");
+        assert_eq!(normalize_node_command("   "), "node");
+        assert_eq!(
+            normalize_node_command(r" D:\portable\node\node.exe "),
+            r"D:\portable\node\node.exe"
+        );
+    }
+
+    #[test]
     fn export_sanitizer_removes_sensitive_data() {
         let sanitized = sanitize_settings_for_export(settings_with_sensitive_data());
         let server = &sanitized.mcp_servers[0];
@@ -429,6 +622,8 @@ mod tests {
         assert_eq!(server.headers, None);
         assert_eq!(server.env, None);
         assert_eq!(provider.api_key, None);
+        assert_eq!(sanitized.proxy.username, "");
+        assert_eq!(sanitized.proxy.password, "");
     }
 
     #[test]
@@ -503,6 +698,14 @@ mod tests {
                 models: HashMap::new(),
             },
         );
+        current.proxy = ProxySettings {
+            mode: ProxyMode::Custom,
+            protocol: ProxyProtocol::Http,
+            host: "proxy.corp.local".to_string(),
+            port: Some(8080),
+            username: "current-proxy-user".to_string(),
+            password: "current-proxy-secret".to_string(),
+        };
 
         let imported = restore_sensitive_settings(
             sanitize_settings_for_export(settings_with_sensitive_data()),
@@ -525,6 +728,8 @@ mod tests {
             server.env.as_ref().and_then(|env| env.get("TOKEN")),
             Some(&"current-secret".to_string())
         );
+        assert_eq!(imported.proxy.username, "current-proxy-user");
+        assert_eq!(imported.proxy.password, "current-proxy-secret");
         assert_eq!(provider.api_key.as_deref(), Some("current-api-key"));
     }
 
@@ -596,5 +801,29 @@ mod tests {
         assert!(!json.contains("selected_window_title"));
         assert!(!json.contains("selected_config_name"));
         assert!(!json.contains("window_title_pattern"));
+    }
+
+    #[test]
+    fn chat_export_file_name_uses_suggested_name_and_sanitizes_it() {
+        let file_name = build_chat_export_file_name(Some(
+            "  тест: связи / demo? 2026-04-09 12-30.md  ".to_string(),
+        ));
+
+        assert_eq!(file_name, "тест связи demo 2026-04-09 12-30.md");
+    }
+
+    #[test]
+    fn chat_export_file_name_adds_md_extension_when_missing() {
+        let file_name = build_chat_export_file_name(Some("Отчет по чату".to_string()));
+
+        assert_eq!(file_name, "Отчет по чату.md");
+    }
+
+    #[test]
+    fn chat_export_file_name_falls_back_to_default_for_empty_input() {
+        let file_name = build_chat_export_file_name(Some("   .md   ".to_string()));
+
+        assert!(file_name.starts_with("chat-"));
+        assert!(file_name.ends_with(".md"));
     }
 }

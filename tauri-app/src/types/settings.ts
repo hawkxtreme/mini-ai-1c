@@ -115,6 +115,18 @@ export interface McpServerConfig {
     env?: Record<string, string> | null;
 }
 
+export type ProxyMode = 'system' | 'disabled' | 'custom';
+export type ProxyProtocol = 'http' | 'socks5';
+
+export interface ProxySettings {
+    mode: ProxyMode;
+    protocol: ProxyProtocol;
+    host: string;
+    port?: number | null;
+    username: string;
+    password: string;
+}
+
 export interface SlashCommand {
     id: string;
     command: string;
@@ -128,6 +140,7 @@ export interface SlashCommand {
 export interface AppSettings {
     configurator: {
         window_title_pattern: string;
+        extra_window_title_patterns: string[];
         selected_window_hwnd: number | null;
         selected_window_pid: number | null;
         selected_window_title: string | null;
@@ -145,6 +158,8 @@ export interface AppSettings {
         auto_download: boolean;
     };
     mcp_servers: McpServerConfig[];
+    node_path: string;
+    proxy?: ProxySettings;
     active_llm_profile: string;
     debug_mode: boolean;
     onboarding_completed?: boolean;
@@ -154,6 +169,9 @@ export interface AppSettings {
     max_agent_iterations?: number | null;
     theme?: 'light' | 'dark';
     context_compress_strategy?: 'disabled' | 'sliding_window' | 'summarize';
+    /** @deprecated Порог задаётся автоматически (75% контекста модели) */
+    max_context_tokens?: number;
+    /** @deprecated Устарело */
     max_context_messages?: number;
 }
 
@@ -163,6 +181,15 @@ export interface BslDiagnosticItem {
     message: string;
     suggestion?: string;
 }
+
+export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
+    mode: 'system',
+    protocol: 'http',
+    host: '',
+    port: null,
+    username: '',
+    password: ''
+};
 
 // Значения по умолчанию для новых настроек
 export const DEFAULT_ADDITION_MARKER_TEMPLATE = "// Доработка START (Добавление) - {datetime}\n{newCode}\n// Доработка END";

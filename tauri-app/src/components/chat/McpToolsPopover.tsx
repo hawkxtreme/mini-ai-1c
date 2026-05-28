@@ -93,7 +93,7 @@ export default function McpToolsPopover({
     return (
         <div
             ref={popoverRef}
-            className="absolute bottom-full right-0 mb-2 w-80 bg-[#09090b] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50 animate-in slide-in-from-bottom-2 duration-200"
+            className="absolute bottom-full right-0 mb-2 w-[420px] bg-[#09090b] border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50 animate-in slide-in-from-bottom-2 duration-200"
         >
             <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
                 <div className="text-sm font-semibold text-zinc-200">MCP Tools</div>
@@ -123,9 +123,9 @@ export default function McpToolsPopover({
                                     className="flex items-center justify-between px-3 py-2 hover:bg-zinc-800/50 text-left transition-colors"
                                 >
                                     <div className="min-w-0 flex-1">
-                                        <div className="text-[12px] font-medium text-zinc-200 truncate">{t.tool_name}</div>
+                                        <div className="text-[12px] font-medium text-zinc-200">{t.tool_name}</div>
                                         {t.description && (
-                                            <div className="text-[10px] text-zinc-500 truncate">{t.description}</div>
+                                            <div className="text-[10px] text-zinc-500 line-clamp-2">{t.description}</div>
                                         )}
                                     </div>
                                     <div className="ml-2 flex items-center gap-1.5 flex-shrink-0">

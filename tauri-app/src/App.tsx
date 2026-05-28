@@ -5,6 +5,7 @@ import { SettingsProvider, ProfileProvider, ConfiguratorProvider, BslProvider, C
 import { MainLayout } from './components/layout/MainLayout';
 import { useSettings } from './contexts/SettingsContext';
 import { useQuickActions } from './hooks/useQuickActions';
+import { installPerformanceDiagnostics } from './utils/performanceDiagnostics';
 
 /** Mounts the quick-actions listener (needs Settings + Profiles context). */
 function QuickActionsMount() {
@@ -60,11 +61,13 @@ function ConfiguratorOverlayMount() {
 
 function App() {
   useEffect(() => {
+    installPerformanceDiagnostics();
+
     // Disable browser context menu inside the app
     const handleContextMenu = (e: MouseEvent) => { e.preventDefault(); };
     document.addEventListener('contextmenu', handleContextMenu);
 
-    return () => {
+return () => {
       document.removeEventListener('contextmenu', handleContextMenu);
     };
   }, []);

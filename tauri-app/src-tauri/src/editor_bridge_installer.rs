@@ -43,7 +43,7 @@ pub async fn download_editor_bridge(app: AppHandle) -> Result<String, String> {
         },
     );
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::http_client_builder()?
         .redirect(reqwest::redirect::Policy::limited(10))
         .timeout(std::time::Duration::from_secs(600))
         .build()

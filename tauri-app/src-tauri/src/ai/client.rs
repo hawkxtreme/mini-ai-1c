@@ -207,6 +207,18 @@ fn reduce_qwen_request_pressure(
     changed
 }
 
+fn sanitize_messages_for_ollama_cloud(messages: Vec<ApiMessage>) -> Vec<ApiMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if message.content.is_none() {
+                message.content = Some(String::new());
+            }
+            message
+        })
+        .collect()
+}
+
 fn build_qwen_rate_limit_message(ctx: &QwenRateLimitContext) -> String {
     let provider_message = ctx
         .message
@@ -247,6 +259,7 @@ fn provider_requires_api_key(provider: &LLMProvider) -> bool {
             | LLMProvider::Perplexity
             | LLMProvider::ZAI
             | LLMProvider::OneCNaparnik
+            | LLMProvider::OllamaCloud
     )
 }
 
@@ -279,19 +292,29 @@ pub async fn stream_chat_completion(
 
     let profile = get_active_profile().ok_or("No active LLM profile")?;
     let has_tool_heavy_context = qwen_has_tool_heavy_context(&messages);
-    // Build the same dynamic system prompt for all providers, including Codex CLI.
+    // Build system prompt: use lightweight variant for local providers (Ollama/LMStudio)
+    // to avoid smaller models rephrasing instead of responding.
     let tools_info = get_available_tools().await;
     let tools: Vec<Tool> = tools_info.iter().map(|i| i.tool.clone()).collect();
     let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
+    let system_prompt = if is_local_provider(Some(&profile.provider)) {
+        get_lightweight_system_prompt(&tools_info, &messages)
+    } else {
+        get_system_prompt(&tools_info, &messages)
+    };
+
     let mut api_messages = vec![ApiMessage {
         role: "system".to_string(),
-        content: Some(get_system_prompt(&tools_info, &messages)),
+        content: Some(system_prompt),
         tool_calls: None,
         tool_call_id: None,
         name: None,
     }];
     api_messages.extend(messages);
+    if matches!(profile.provider, LLMProvider::OllamaCloud) {
+        api_messages = sanitize_messages_for_ollama_cloud(api_messages);
+    }
 
     if matches!(profile.provider, LLMProvider::CodexCli) {
         return super::codex_client::stream_codex_completion(api_messages, app_handle).await;
@@ -354,7 +377,7 @@ pub async fn stream_chat_completion(
             let trimmed = raw_url.trim_end_matches('/');
             if matches!(
                 profile.provider,
-                LLMProvider::Ollama | LLMProvider::LMStudio
+                LLMProvider::Ollama | LLMProvider::OllamaCloud | LLMProvider::LMStudio
             ) && !trimmed.ends_with("/v1")
             {
                 format!("{}/v1", trimmed)
@@ -370,6 +393,10 @@ pub async fn stream_chat_completion(
     } else if matches!(profile.provider, LLMProvider::LMStudio) {
         // Qwen3 thinking models need large token budget to finish thinking before producing content
         profile.max_tokens.max(8192)
+    } else if matches!(profile.provider, LLMProvider::MiniMax) {
+        // Official docs (platform.minimax.io): context window 204,800; coding tools integration
+        // recommends max_tokens=64,000. Cap at 64k, but respect lower user-set values.
+        profile.max_tokens.min(64_000).max(4_096)
     } else if profile.max_tokens > 16384 {
         4096
     } else {
@@ -541,15 +568,19 @@ pub async fn stream_chat_completion(
         );
     }
 
-    // Local providers (Ollama, LMStudio) have no timeout — large contexts with thinking models
-    // can take several minutes. Cloud APIs keep 120s to detect hanging connections.
+    // Для стриминга НЕ ставим request-wide timeout: иначе он рубит долгие thinking-стримы
+    // (MiniMax M2/Qwen3 могут генерировать 3-5 минут). Зависший коннект ловим через
+    // tokio::time::timeout(stream.next()) ниже (per-chunk, по провайдеру).
+    // Ограничиваем только начальный connect и read-idle, чтобы выявлять мёртвые соединения.
     let is_local = matches!(
         profile.provider,
         LLMProvider::Ollama | LLMProvider::LMStudio
     );
-    let mut client_builder = reqwest::Client::builder();
+    let mut client_builder = crate::http_client::http_client_builder()?;
     if !is_local {
-        client_builder = client_builder.timeout(std::time::Duration::from_secs(120));
+        client_builder = client_builder
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(180));
     }
     let client = client_builder
         .build()
@@ -748,6 +779,17 @@ pub async fn stream_chat_completion(
                             .to_string(),
                     );
                 }
+                if matches!(profile.provider, LLMProvider::OllamaCloud)
+                    && status.as_u16() == 403
+                    && error_body.contains("requires a subscription")
+                {
+                    return Err(format!(
+                        "Модель '{}' требует платной подписки Ollama Cloud. \
+                        Оформите подписку на https://ollama.com/upgrade или выберите другую модель в профиле. \
+                        Бесплатно доступны: gpt-oss:20b/120b, qwen3-coder:480b, qwen3-next:80b, kimi-k2-thinking, glm-4.6, minimax-m2 и другие.",
+                        profile.model
+                    ));
+                }
                 return Err(format!("API error {}: {}", status, error_body));
             }
             Err(e) if attempt < max_retries => {
@@ -814,7 +856,23 @@ pub async fn stream_chat_completion(
             .next()
             .ok_or("Empty response from API")?;
         let content = choice.message.content.unwrap_or_default();
-        let tool_calls = choice.message.tool_calls.unwrap_or_default();
+        let raw_tool_calls = choice.message.tool_calls.unwrap_or_default();
+        // Convert NonStreamToolCall → ToolCall, normalising arguments to valid JSON string.
+        let tool_calls: Vec<ToolCall> = raw_tool_calls
+            .into_iter()
+            .map(|tc| ToolCall {
+                id: tc.id,
+                r#type: tc.r#type,
+                function: ToolCallFunction {
+                    name: tc.function.name,
+                    arguments: tc
+                        .function
+                        .arguments
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "{}".to_string()),
+                },
+            })
+            .collect();
         if !content.is_empty() {
             let _ = app_handle.emit("chat-status", "Выполнение...");
             let _ = app_handle.emit("chat-chunk", content.clone());
@@ -867,7 +925,17 @@ pub async fn stream_chat_completion(
             profile.provider,
             LLMProvider::Ollama | LLMProvider::LMStudio
         );
-        let default_timeout = if is_local { 300u32 } else { 30u32 };
+        let default_timeout = if is_local {
+            300u32
+        } else if matches!(profile.provider, LLMProvider::MiniMax) {
+            120u32
+        } else if matches!(profile.provider, LLMProvider::OllamaCloud) {
+            // Ollama Cloud hosts thinking-models (kimi-k2-thinking, qwen3.5, glm-5 etc.)
+            // that may stay silent for 60+ seconds before emitting first token.
+            120u32
+        } else {
+            30u32
+        };
         let chunk_timeout = profile.stream_timeout_secs.unwrap_or(default_timeout);
         let chunk_result = match tokio::time::timeout(
             std::time::Duration::from_secs(chunk_timeout as u64),
@@ -889,7 +957,32 @@ pub async fn stream_chat_completion(
             let ttft = start_gen_time.elapsed().as_millis();
             crate::app_log!("[AI][TIMER] TTFT (Time to First Token): {} ms", ttft);
         }
-        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| {
+            // Log full error chain for diagnostics (decode errors often hide in source())
+            use std::error::Error as _;
+            let mut details = format!("{}", e);
+            let mut src: Option<&(dyn std::error::Error + 'static)> = e.source();
+            while let Some(s) = src {
+                details.push_str(" → ");
+                details.push_str(&s.to_string());
+                src = s.source();
+            }
+            crate::app_log!(force: true, "[AI][STREAM-ERR] provider={:?} model={} details={}", profile.provider, profile.model, details);
+
+            // For Ollama Cloud, server-side glitches (chunked transfer reset, decode errors)
+            // happen on some models (e.g. glm-4.7). Surface a friendlier message.
+            if matches!(profile.provider, LLMProvider::OllamaCloud) {
+                format!(
+                    "Облако Ollama прервало поток для модели '{}' (server-side decode error). \
+                    Это временный сбой на стороне ollama.com — попробуйте повторить запрос или \
+                    выберите другую модель (qwen3-coder:480b, gpt-oss:120b, kimi-k2-thinking). \
+                    Подробности: {}",
+                    profile.model, details
+                )
+            } else {
+                format!("Stream error: {}", details)
+            }
+        })?;
         byte_buffer.extend_from_slice(&chunk);
 
         while let Some(pos) = byte_buffer.windows(2).position(|w| w == b"\n\n") {
@@ -897,7 +990,10 @@ pub async fn stream_chat_completion(
             let event_str = String::from_utf8_lossy(&event_bytes);
 
             for line in event_str.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
+                if let Some(data) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     if data == "[DONE]" {
                         if !content_search_temp.is_empty() {
                             if is_thinking {
@@ -956,6 +1052,18 @@ pub async fn stream_chat_completion(
                                 );
                             } else {
                                 crate::app_log!("[AI][RESP] ⚠️ HALLUCINATION DETECTED: text_only but mentions tools {:?} — no actual tool_calls!", hallucinated);
+                            }
+                        }
+                        // Ensure all accumulated arguments are valid JSON (provider safety).
+                        for tc in &mut accumulated_tool_calls {
+                            if serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                                .is_err()
+                            {
+                                crate::app_log!(
+                                    "[AI][WARN] tool_call {} has invalid JSON arguments, resetting to {{}}",
+                                    tc.id
+                                );
+                                tc.function.arguments = "{}".to_string();
                             }
                         }
                         return Ok(ApiMessage {
@@ -1401,7 +1509,7 @@ pub async fn fetch_models(
         let trimmed = raw_url.trim_end_matches('/');
         if matches!(
             profile.provider,
-            LLMProvider::Ollama | LLMProvider::LMStudio
+            LLMProvider::Ollama | LLMProvider::OllamaCloud | LLMProvider::LMStudio
         ) && !trimmed.ends_with("/v1")
             && !trimmed.ends_with("/chat/completions")
         {
@@ -1416,7 +1524,7 @@ pub async fn fetch_models(
         format!("{}/models", base_url.trim_end_matches('/'))
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::build_http_client()?;
     let mut builder = client.get(&url);
     builder = builder.header(CONTENT_TYPE, "application/json");
 
@@ -1528,6 +1636,53 @@ mod tests {
         };
 
         assert_eq!(qwen_retry_delay(1, &ctx), None);
+    }
+
+    #[test]
+    fn ollama_cloud_sanitizer_replaces_missing_content_with_empty_string() {
+        let messages = vec![
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: "search_code".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "tool".to_string(),
+                content: None,
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+                name: Some("search_code".to_string()),
+            },
+        ];
+
+        let sanitized = sanitize_messages_for_ollama_cloud(messages);
+
+        assert_eq!(sanitized[0].content.as_deref(), Some(""));
+        assert_eq!(sanitized[1].content.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn ollama_cloud_sanitizer_keeps_existing_content_unchanged() {
+        let messages = vec![ApiMessage {
+            role: "assistant".to_string(),
+            content: Some("ready".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let sanitized = sanitize_messages_for_ollama_cloud(messages.clone());
+
+        assert_eq!(sanitized[0].content, messages[0].content);
     }
 
     #[test]

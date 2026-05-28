@@ -1,9 +1,15 @@
 import React, { useState } from 'react';
 import { ToolCall } from '../../contexts/ChatContext';
-import { Play, CheckCircle, AlertCircle, XCircle, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { CheckCircle, AlertCircle, XCircle, Terminal, ChevronRight, Loader2, Clock } from 'lucide-react';
 
 interface ToolCallBlockProps {
     toolCall: ToolCall;
+}
+
+function formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms}мс`;
+    const s = ms / 1000;
+    return s < 60 ? `${s.toFixed(1)}с` : `${Math.floor(s / 60)}м ${Math.round(s % 60)}с`;
 }
 
 const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
@@ -32,8 +38,9 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
     const hasArgs = toolCall.arguments && toolCall.arguments.trim().length > 0;
     const hasResult = toolCall.result && toolCall.result.trim().length > 0;
     const hasContent = hasArgs || hasResult;
+    const isDone = toolCall.status === 'done' || toolCall.status === 'error' || toolCall.status === 'rejected';
 
-    // Design for Pending / Executing
+    // Pending / Executing
     if (toolCall.status === 'pending' || toolCall.status === 'executing') {
         return (
             <div className="flex items-center gap-2 py-1.5 px-3 mb-2 bg-zinc-800/30 rounded-lg w-fit border border-white/5 shadow-sm animate-pulse origin-left animate-in zoom-in-95 duration-200">
@@ -47,22 +54,38 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
 
     const statusLabel = toolCall.status === 'error' ? '(Ошибка)' : toolCall.status === 'rejected' ? '(Отклонено)' : '';
 
-    // Design for Done / Error / Rejected
+    // Done / Error / Rejected — с бейджем времени
     return (
         <div className="flex flex-col gap-0.5 mb-2 w-full animate-in fade-in duration-300">
-            <button
-                onClick={() => hasContent && setIsExpanded(!isExpanded)}
-                className={`flex items-center gap-2 py-1 px-2 w-fit rounded transition-colors group ${hasContent ? 'hover:bg-zinc-800/50 cursor-pointer' : 'cursor-default'}`}
-                title={toolCall.status}
-            >
-                {getStatusIcon()}
-                <span className={`text-[11px] font-mono group-hover:text-zinc-300 transition-colors ${toolCall.status === 'error' ? 'text-red-400/80' : 'text-zinc-500'}`}>
-                    {toolCall.name}{statusLabel && ` ${statusLabel}`}
-                </span>
-                {hasContent && (
-                    <ChevronRight size={14} className={`text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                    onClick={() => hasContent && setIsExpanded(!isExpanded)}
+                    className={`flex items-center gap-2 py-1 px-2 rounded transition-colors group ${hasContent ? 'hover:bg-zinc-800/50 cursor-pointer' : 'cursor-default'}`}
+                    title={toolCall.status}
+                >
+                    {getStatusIcon()}
+                    <span className={`text-[11px] font-mono group-hover:text-zinc-300 transition-colors ${toolCall.status === 'error' ? 'text-red-400/80' : 'text-zinc-500'}`}>
+                        {toolCall.name}{statusLabel && ` ${statusLabel}`}
+                    </span>
+                    {hasContent && (
+                        <ChevronRight size={14} className={`text-zinc-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    )}
+                </button>
+
+                {isDone && toolCall.duration != null && (
+                    <button
+                        onClick={() => hasContent && setIsExpanded(!isExpanded)}
+                        className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-mono tabular-nums transition-colors
+                            ${toolCall.status === 'error'
+                                ? 'border-red-500/20 bg-red-500/5 text-red-400/60 hover:bg-red-500/10'
+                                : 'border-zinc-700/50 bg-zinc-800/40 text-zinc-500 hover:bg-zinc-800/70 hover:text-zinc-400'
+                            } ${hasContent ? 'cursor-pointer' : 'cursor-default'}`}
+                    >
+                        <Clock size={10} className="opacity-60" />
+                        <span>{formatDuration(toolCall.duration)}</span>
+                    </button>
                 )}
-            </button>
+            </div>
 
             {isExpanded && hasContent && (
                 <div className="ml-6 mr-4 mt-1 flex flex-col gap-1.5">
@@ -89,4 +112,3 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolCall }) => {
 };
 
 export default ToolCallBlock;
-

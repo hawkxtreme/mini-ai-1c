@@ -11,7 +11,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use lazy_static::lazy_static;
 use rand::RngCore;
-use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
@@ -214,7 +213,7 @@ fn start_callback_server() {
 // ─── Token exchange ─────────────────────────────────────────────────────────
 
 async fn exchange_code(code: &str, code_verifier: &str) -> Result<CliAuthStatus, String> {
-    let client = Client::builder()
+    let client = crate::http_client::http_client_builder()?
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
@@ -627,7 +626,7 @@ impl CodexCliProvider {
         access_token: &str,
         account_id: &str,
     ) -> Result<(reqwest::StatusCode, String), String> {
-        let client = Client::builder()
+        let client = crate::http_client::http_client_builder()?
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
@@ -778,7 +777,7 @@ impl CodexCliProvider {
     }
 
     pub async fn refresh_access_token(profile_id: &str, refresh_token: &str) -> Result<(), String> {
-        let client = Client::builder()
+        let client = crate::http_client::http_client_builder()?
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;

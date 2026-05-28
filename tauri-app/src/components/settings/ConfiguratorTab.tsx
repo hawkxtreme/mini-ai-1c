@@ -5,7 +5,9 @@ import {
     CircleHelp,
     Download,
     Monitor,
+    Plus,
     RefreshCw,
+    X,
     XCircle
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
@@ -46,6 +48,7 @@ export function ConfiguratorTab({
 
     const bridgeEnabled = settings.configurator.editor_bridge_enabled ?? false;
     const autoApply = settings.configurator.editor_bridge_auto_apply ?? false;
+    const rdpMode = settings.configurator.rdp_mode ?? false;
 
     async function checkStatus() {
         setChecking(true);
@@ -225,8 +228,7 @@ export function ConfiguratorTab({
                     </div>
                 </section>
 
-                {bridgeEnabled && (
-                    <section>
+                <section>
                     <div className="space-y-3 rounded-xl border border-zinc-700 bg-zinc-800/50 p-4">
                         <div className="flex items-center justify-between gap-3">
                             <div className="text-xs font-semibold uppercase text-zinc-400">Параметры</div>
@@ -256,30 +258,39 @@ export function ConfiguratorTab({
                         </div>
 
                         <ToggleRow
+                            label="Включить быстрые действия в 1С Конфигураторе"
+                            description="Ctrl + ПКМ в редакторе открывает quick actions mini-ai."
+                            checked={bridgeEnabled}
+                            onChange={(value) => updateConf({ editor_bridge_enabled: value })}
+                        />
+
+                        <ToggleRow
+                            label="Режим RDP"
+                            description="Ждёт отпускания Ctrl перед overlay и безопаснее для RDP-сессий."
+                            checked={rdpMode}
+                            onChange={(value) => updateConf({ rdp_mode: value })}
+                        />
+
+                        <ToggleRow
                             label="Применять сразу без просмотра"
                             description="Сразу записывать безопасный результат без показа диф-редактора."
                             checked={autoApply}
                             onChange={(value) => updateConf({ editor_bridge_auto_apply: value })}
+                            disabled={!bridgeEnabled}
                         />
 
                     </div>
-                    </section>
-                )}
+                </section>
 
                 <section>
                     <div className="space-y-3 rounded-xl border border-zinc-700 bg-zinc-800/50 p-4">
                         <div className="text-xs font-semibold uppercase text-zinc-400">Обнаружение окна</div>
 
-                        <div>
-                            <label className="mb-1 block text-xs text-zinc-500">Шаблон заголовка</label>
-                            <input
-                                type="text"
-                                value={settings.configurator.window_title_pattern}
-                                onChange={(e) => updateConf({ window_title_pattern: e.target.value })}
-                                placeholder="Конфигуратор"
-                                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
+                        <WindowTitlePatternEditor
+                            basePattern={settings.configurator.window_title_pattern ?? 'Конфигуратор|1C:Enterprise'}
+                            extraPatterns={settings.configurator.extra_window_title_patterns ?? []}
+                            onChange={(extra) => updateConf({ extra_window_title_patterns: extra })}
+                        />
 
                         <div>
                             <div className="mb-1.5 flex items-center justify-between">
@@ -325,6 +336,105 @@ export function ConfiguratorTab({
                     </div>
                 </section>
             </div>
+        </div>
+    );
+}
+
+function WindowTitlePatternEditor({
+    basePattern,
+    extraPatterns,
+    onChange
+}: {
+    basePattern: string;
+    extraPatterns: string[];
+    onChange: (patterns: string[]) => void;
+}) {
+    const [inputValue, setInputValue] = useState('');
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    const defaultChips = basePattern.split('|').map(p => p.trim()).filter(Boolean);
+
+    function addPattern() {
+        const val = inputValue.trim();
+        if (!val) return;
+        if (extraPatterns.includes(val) || defaultChips.includes(val)) {
+            setInputValue('');
+            return;
+        }
+        onChange([...extraPatterns, val]);
+        setInputValue('');
+    }
+
+    function removePattern(pattern: string) {
+        onChange(extraPatterns.filter(p => p !== pattern));
+    }
+
+    function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            addPattern();
+        } else if (e.key === 'Backspace' && inputValue === '' && extraPatterns.length > 0) {
+            removePattern(extraPatterns[extraPatterns.length - 1]);
+        }
+    }
+
+    return (
+        <div>
+            <div className="mb-1.5 flex items-center gap-1">
+                <label className="text-xs text-zinc-500">Шаблоны заголовка окна</label>
+            </div>
+            <div
+                className="flex min-h-[38px] cursor-text flex-wrap items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500"
+                onClick={() => inputRef.current?.focus()}
+            >
+                {defaultChips.map(chip => (
+                    <span
+                        key={chip}
+                        className="flex items-center gap-1 rounded bg-zinc-700 px-2 py-0.5 text-xs text-zinc-400"
+                        title="Стандартный шаблон"
+                    >
+                        {chip}
+                    </span>
+                ))}
+                {extraPatterns.map(chip => (
+                    <span
+                        key={chip}
+                        className="flex items-center gap-1 rounded bg-blue-900/60 px-2 py-0.5 text-xs text-blue-300"
+                    >
+                        {chip}
+                        <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); removePattern(chip); }}
+                            className="ml-0.5 rounded text-blue-400 hover:text-blue-200"
+                            aria-label={`Удалить ${chip}`}
+                        >
+                            <X className="h-3 w-3" />
+                        </button>
+                    </span>
+                ))}
+                <input
+                    ref={inputRef}
+                    type="text"
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={extraPatterns.length === 0 ? 'Добавить шаблон...' : ''}
+                    className="min-w-[120px] flex-1 bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
+                />
+                {inputValue.trim() && (
+                    <button
+                        type="button"
+                        onClick={addPattern}
+                        className="flex items-center gap-0.5 rounded bg-blue-600 px-1.5 py-0.5 text-xs text-white hover:bg-blue-500"
+                    >
+                        <Plus className="h-3 w-3" />
+                        Добавить
+                    </button>
+                )}
+            </div>
+            <p className="mt-1 text-xs text-zinc-600">
+                Серые — стандартные (нередактируемые). Синие — ваши. Enter или кнопка для добавления.
+            </p>
         </div>
     );
 }

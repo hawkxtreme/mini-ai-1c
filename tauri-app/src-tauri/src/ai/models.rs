@@ -1,5 +1,19 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// Deserialize `arguments` field that may be either a JSON string or a JSON object/value.
+/// OpenAI sends it as a JSON-encoded string; some providers (e.g. MiniMax) send it as a raw object.
+fn deserialize_arguments_flexible<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<Value> = Option::deserialize(deserializer)?;
+    Ok(match v {
+        None => None,
+        Some(Value::String(s)) => Some(s),
+        Some(other) => Some(other.to_string()),
+    })
+}
 
 /// Chat message for API (OpenAI compatible)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +89,9 @@ pub struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct StreamDelta {
     pub content: Option<String>,
-    /// Qwen3 native thinking field (returned when enable_thinking=true)
+    /// Thinking field. Qwen3 uses `reasoning_content` (enable_thinking=true).
+    /// Some Ollama Cloud models (gpt-oss, minimax) emit `reasoning` — accepted via alias.
+    #[serde(alias = "reasoning")]
     pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -92,6 +108,7 @@ pub struct ToolCallDelta {
 #[derive(Debug, Deserialize)]
 pub struct ToolCallFunctionDelta {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_arguments_flexible")]
     pub arguments: Option<String>,
 }
 
@@ -109,7 +126,22 @@ pub struct NonStreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct NonStreamMessage {
     pub content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_calls: Option<Vec<NonStreamToolCall>>,
+}
+
+/// Tool call from non-streaming response — arguments may be string or object (provider-specific).
+#[derive(Debug, Deserialize)]
+pub struct NonStreamToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: NonStreamToolCallFunction,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NonStreamToolCallFunction {
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_arguments_flexible")]
+    pub arguments: Option<String>,
 }
 
 /// System prompt for 1C assistant

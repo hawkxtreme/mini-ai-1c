@@ -1,6 +1,6 @@
 [package]
 name = "mini-ai-1c"
-version = "1.2.1"
+version = "1.2.8"
 description = "AI-ассистент для разработки на 1С"
 authors = ["you"]
 edition = "2021"
@@ -21,7 +21,7 @@ tauri-plugin-mcp-bridge = "0.8.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "socks"] }
 futures = "0.3"
 urlencoding = "2.1"
 dirs = "5.0"

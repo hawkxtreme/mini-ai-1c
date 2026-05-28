@@ -9,6 +9,7 @@ import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useR
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { VoiceInputControl } from '../components/voice/VoiceInputControl';
+import { markInputLatency } from '../utils/performanceDiagnostics';
 
 type Phase = 'menu' | 'input' | 'loading' | 'result';
 type ResultType = 'comment' | 'diff' | 'explain_only';
@@ -692,7 +693,10 @@ export function OverlayWindow() {
                             ref={inputRef}
                             className="overlay-textarea"
                             value={inputText}
-                            onChange={(event) => setInputText(event.target.value)}
+                            onChange={(event) => {
+                                markInputLatency('overlay-input');
+                                setInputText(event.target.value);
+                            }}
                             placeholder="Например: добавь обработку ошибок и проверку параметров."
                             rows={4}
                             onKeyDown={(event) => {

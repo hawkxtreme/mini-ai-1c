@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Database, Link2, Key, ShieldCheck, Activity, CheckCircle2, AlertCircle, Plus, Trash2, Globe, Settings2, Terminal, Cpu, FileText, X, Sparkles, FolderOpen, ChevronDown, Code, Wrench } from 'lucide-react';
 import McpToolsView from '../CodeSidePanel/McpToolsView';
+import { isBuiltinNodeLauncher, normalizeNodePath } from '../../utils/mcpNodePath';
 
 // ── Benchmark Panel ───────────────────────────────────────────────────────────
 
@@ -170,6 +171,7 @@ export interface McpServerStatus {
 
 interface MCPSettingsProps {
     servers: McpServerConfig[];
+    nodePath: string;
     bslEnabled?: boolean;
     onUpdate: (servers: McpServerConfig[]) => void;
 }
@@ -179,8 +181,85 @@ const BUILTIN_1C_METADATA_ID = 'builtin-1c-metadata';
 const BUILTIN_BSL_LS_ID = 'bsl-ls';
 const BUILTIN_1C_HELP_ID = 'builtin-1c-help';
 const BUILTIN_1C_SEARCH_ID = 'builtin-1c-search';
+const SEARCH_PROFILES_ENV = 'ONEC_CONFIG_PROFILES_JSON';
+const SEARCH_ACTIVE_PROFILE_ENV = 'ONEC_CONFIG_ACTIVE_PROFILE_ID';
 
-export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps) {
+interface SearchExtensionProfile {
+    id: string;
+    name: string;
+    path: string;
+}
+
+interface SearchConfigProfile {
+    id: string;
+    name: string;
+    main_path: string;
+    extensions: SearchExtensionProfile[];
+}
+
+const makeProfileId = (prefix: string) =>
+    `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+const normalizeSearchProfiles = (server: McpServerConfig): { profiles: SearchConfigProfile[]; activeId: string } => {
+    const env = server.env || {};
+    const legacyPath = env['ONEC_CONFIG_PATH'] || '';
+    let profiles: SearchConfigProfile[] = [];
+
+    try {
+        const parsed = JSON.parse(env[SEARCH_PROFILES_ENV] || '[]');
+        if (Array.isArray(parsed)) {
+            profiles = parsed
+                .filter(p => p && typeof p === 'object')
+                .map((p, idx) => ({
+                    id: String(p.id || `profile-${idx + 1}`),
+                    name: typeof p.name === 'string' ? p.name : `Конфигурация ${idx + 1}`,
+                    main_path: String(p.main_path || ''),
+                    extensions: Array.isArray(p.extensions)
+                        ? p.extensions.map((e: any, extIdx: number) => ({
+                            id: String(e.id || `ext-${extIdx + 1}`),
+                            name: typeof e.name === 'string' ? e.name : `Расширение ${extIdx + 1}`,
+                            path: String(e.path || ''),
+                        }))
+                        : [],
+                }));
+        }
+    } catch {
+        profiles = [];
+    }
+
+    if (profiles.length === 0) {
+        const id = 'default';
+        profiles = [{
+            id,
+            name: 'Основная конфигурация',
+            main_path: legacyPath,
+            extensions: [],
+        }];
+    }
+
+    const activeFromEnv = env[SEARCH_ACTIVE_PROFILE_ENV];
+    const activeId = profiles.some(p => p.id === activeFromEnv)
+        ? String(activeFromEnv)
+        : profiles[0].id;
+
+    return { profiles, activeId };
+};
+
+const buildSearchEnv = (
+    server: McpServerConfig,
+    profiles: SearchConfigProfile[],
+    activeId: string,
+): Record<string, string> => {
+    const activeProfile = profiles.find(p => p.id === activeId) || profiles[0];
+    return {
+        ...(server.env || {}),
+        ONEC_CONFIG_PATH: activeProfile?.main_path || '',
+        [SEARCH_ACTIVE_PROFILE_ENV]: activeProfile?.id || activeId,
+        [SEARCH_PROFILES_ENV]: JSON.stringify(profiles),
+    };
+};
+
+export function MCPSettings({ servers, nodePath, bslEnabled, onUpdate }: MCPSettingsProps) {
     const [testingId, setTestingId] = useState<string | null>(null);
     const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
     const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
@@ -201,6 +280,7 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
     const [jsonImportError, setJsonImportError] = useState<string | null>(null);
     const [benchmarkResult, setBenchmarkResult] = useState<Record<string, any> | null>(null);
     const [isBenchmarking, setIsBenchmarking] = useState(false);
+    const effectiveNodePath = normalizeNodePath(nodePath);
 
     const addToSearchHistory = (path: string) => {
         if (!path.trim()) return;
@@ -220,9 +300,9 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
 
     // Ensure pre-installed servers exist
     useEffect(() => {
-        // Use npx --yes to auto-install tsx without prompting (cached after first run)
-        const naparnikArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-naparnik.ts'];
-        const metadataArgs = ['--yes', 'tsx', 'src/mcp-servers/1c-metadata.ts'];
+        const naparnikArgs = ['mcp-servers/1c-naparnik.cjs'];
+        const metadataArgs = ['mcp-servers/1c-metadata.cjs'];
+        const helpArgs = ['mcp-servers/1c-help.cjs'];
 
         let updatedServers = [...servers];
         let needsUpdate = false;
@@ -235,17 +315,16 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                 name: '1C:Напарник',
                 enabled: false,
                 transport: 'stdio',
-                command: 'npx',
+                command: effectiveNodePath,
                 args: naparnikArgs,
                 env: { 'ONEC_AI_TOKEN': '' }
             });
             needsUpdate = true;
         } else {
             const srv = updatedServers[naparnikIndex];
-            // Allow both npx and node (backend might migrate to node)
-            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
-            if (!isSupportedCmd) {
-                updatedServers[naparnikIndex] = { ...srv, command: 'npx', args: naparnikArgs };
+            const isSupportedCmd = isBuiltinNodeLauncher(srv.command, effectiveNodePath);
+            if (!isSupportedCmd || srv.command !== effectiveNodePath || JSON.stringify(srv.args ?? []) !== JSON.stringify(naparnikArgs)) {
+                updatedServers[naparnikIndex] = { ...srv, command: effectiveNodePath, args: naparnikArgs };
                 needsUpdate = true;
             }
         }
@@ -258,16 +337,16 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                 name: '1C:Метаданные',
                 enabled: false,
                 transport: 'stdio',
-                command: 'npx',
+                command: effectiveNodePath,
                 args: metadataArgs,
                 env: { 'ONEC_METADATA_URL': 'http://localhost/base/hs/mcp', 'ONEC_USERNAME': '', 'ONEC_PASSWORD': '' }
             });
             needsUpdate = true;
         } else {
             const srv = updatedServers[metadataIndex];
-            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
-            if (!isSupportedCmd) {
-                updatedServers[metadataIndex] = { ...srv, command: 'npx', args: metadataArgs };
+            const isSupportedCmd = isBuiltinNodeLauncher(srv.command, effectiveNodePath);
+            if (!isSupportedCmd || srv.command !== effectiveNodePath || JSON.stringify(srv.args ?? []) !== JSON.stringify(metadataArgs)) {
+                updatedServers[metadataIndex] = { ...srv, command: effectiveNodePath, args: metadataArgs };
                 needsUpdate = true;
             }
         }
@@ -292,16 +371,16 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                 name: '1С:Справка',
                 enabled: false,
                 transport: 'stdio',
-                command: 'npx',
-                args: ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'],
+                command: effectiveNodePath,
+                args: helpArgs,
                 env: { 'ONEC_HELP_PATH': '' },
             });
             needsUpdate = true;
         } else {
             const srv = updatedServers[helpIndex];
-            const isSupportedCmd = srv.command === 'npx' || srv.command === 'node';
-            if (!isSupportedCmd) {
-                updatedServers[helpIndex] = { ...srv, command: 'npx', args: ['--yes', 'tsx', 'src/mcp-servers/1c-help.ts'] };
+            const isSupportedCmd = isBuiltinNodeLauncher(srv.command, effectiveNodePath);
+            if (!isSupportedCmd || srv.command !== effectiveNodePath || JSON.stringify(srv.args ?? []) !== JSON.stringify(helpArgs)) {
+                updatedServers[helpIndex] = { ...srv, command: effectiveNodePath, args: helpArgs };
                 needsUpdate = true;
             }
         }
@@ -316,7 +395,16 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                 transport: 'stdio',
                 command: 'mcp-1c-search.exe',
                 args: null,
-                env: { 'ONEC_CONFIG_PATH': '' },
+                env: {
+                    'ONEC_CONFIG_PATH': '',
+                    [SEARCH_ACTIVE_PROFILE_ENV]: 'default',
+                    [SEARCH_PROFILES_ENV]: JSON.stringify([{
+                        id: 'default',
+                        name: 'Основная конфигурация',
+                        main_path: '',
+                        extensions: [],
+                    }]),
+                },
             });
             needsUpdate = true;
         } else {
@@ -352,7 +440,7 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
         if (needsUpdate) {
             onUpdate(updatedServers);
         }
-    }, [servers, onUpdate]);
+    }, [servers, onUpdate, effectiveNodePath]);
 
     const fetchStatuses = async () => {
         try {
@@ -561,7 +649,11 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                         const isHelp = server.id === BUILTIN_1C_HELP_ID;
                         const isSearch = server.id === BUILTIN_1C_SEARCH_ID;
                         const isBuiltin = server.id === BUILTIN_1C_SERVER_ID || isMetadata || isBslLs || isHelp || isSearch;
-                        const searchConfigPath = isSearch ? (server.env?.['ONEC_CONFIG_PATH']?.trim() || '') : '';
+                        const searchProfileState = isSearch ? normalizeSearchProfiles(server) : null;
+                        const searchActiveProfile = searchProfileState
+                            ? (searchProfileState.profiles.find(p => p.id === searchProfileState.activeId) || searchProfileState.profiles[0])
+                            : null;
+                        const searchConfigPath = isSearch ? (searchActiveProfile?.main_path?.trim() || server.env?.['ONEC_CONFIG_PATH']?.trim() || '') : '';
                         const searchHelpStatus = isSearch ? (status?.help_status || '') : '';
                         const isSearchUnavailable = isSearch && (!searchConfigPath || searchHelpStatus === 'unavailable');
                         const effectiveStatus = isSearchUnavailable ? 'error' : status?.status;
@@ -887,13 +979,45 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                             ) : isSearch ? (
                                                 (() => {
                                                     const searchSt = status?.help_status || '';
-                                                    const configPath = server.env?.['ONEC_CONFIG_PATH'] || '';
+                                                    const { profiles, activeId } = normalizeSearchProfiles(server);
+                                                    const activeProfile = profiles.find(p => p.id === activeId) || profiles[0];
+                                                    const configPath = activeProfile?.main_path || server.env?.['ONEC_CONFIG_PATH'] || '';
+                                                    const extensionPaths = activeProfile?.extensions.map(e => e.path).filter(Boolean) || [];
+                                                    const allIndexPaths = [configPath, ...extensionPaths].filter(Boolean);
+                                                    const busySearchStates = new Set([
+                                                        'bootstrapping',
+                                                        'schema_init',
+                                                        'metadata_indexing',
+                                                        'building_index',
+                                                        'syncing_index',
+                                                        'indexing',
+                                                        'syncing',
+                                                    ]);
+                                                    const busySearchLabel = searchSt === 'syncing' || searchSt === 'syncing_index'
+                                                        ? 'Синхронизация индекса...'
+                                                        : searchSt === 'metadata_indexing'
+                                                            ? 'Индексация метаданных...'
+                                                            : searchSt === 'schema_init'
+                                                                ? 'Подготовка базы индекса...'
+                                                                : searchSt === 'bootstrapping'
+                                                                    ? 'Запуск поиска...'
+                                                                    : 'Построение символьного индекса...';
+                                                    const commitProfiles = (nextProfiles: SearchConfigProfile[], nextActiveId = activeId) => {
+                                                        handleUpdateServer(server.id, {
+                                                            env: buildSearchEnv(server, nextProfiles, nextActiveId),
+                                                        });
+                                                    };
+                                                    const updateActiveProfile = (updates: Partial<SearchConfigProfile>) => {
+                                                        const nextProfiles = profiles.map(profile =>
+                                                            profile.id === activeId ? { ...profile, ...updates } : profile
+                                                        );
+                                                        commitProfiles(nextProfiles);
+                                                    };
                                                     const browseConfigDir = async () => {
                                                         try {
                                                             const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию выгрузки конфигурации 1С' });
                                                             if (dir && typeof dir === 'string') {
-                                                                const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': dir };
-                                                                handleUpdateServer(server.id, { env: newEnv });
+                                                                updateActiveProfile({ main_path: dir });
                                                                 addToSearchHistory(dir);
                                                             }
                                                         } catch (e) {
@@ -901,23 +1025,125 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                                         }
                                                     };
                                                     const selectFromHistory = (p: string) => {
-                                                        const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': p };
-                                                        handleUpdateServer(server.id, { env: newEnv });
+                                                        updateActiveProfile({ main_path: p });
                                                         setShowSearchHistory(false);
+                                                    };
+                                                    const addProfile = () => {
+                                                        const profile: SearchConfigProfile = {
+                                                            id: makeProfileId('profile'),
+                                                            name: `Конфигурация ${profiles.length + 1}`,
+                                                            main_path: '',
+                                                            extensions: [],
+                                                        };
+                                                        commitProfiles([...profiles, profile], profile.id);
+                                                    };
+                                                    const removeActiveProfile = () => {
+                                                        if (profiles.length <= 1) return;
+                                                        const nextProfiles = profiles.filter(profile => profile.id !== activeId);
+                                                        commitProfiles(nextProfiles, nextProfiles[0].id);
+                                                    };
+                                                    const addExtension = () => {
+                                                        if (!activeProfile) return;
+                                                        updateActiveProfile({
+                                                            extensions: [
+                                                                ...activeProfile.extensions,
+                                                                {
+                                                                    id: makeProfileId('ext'),
+                                                                    name: `Расширение ${activeProfile.extensions.length + 1}`,
+                                                                    path: '',
+                                                                },
+                                                            ],
+                                                        });
+                                                    };
+                                                    const updateExtension = (id: string, updates: Partial<SearchExtensionProfile>) => {
+                                                        if (!activeProfile) return;
+                                                        updateActiveProfile({
+                                                            extensions: activeProfile.extensions.map(ext =>
+                                                                ext.id === id ? { ...ext, ...updates } : ext
+                                                            ),
+                                                        });
+                                                    };
+                                                    const removeExtension = (id: string) => {
+                                                        if (!activeProfile) return;
+                                                        updateActiveProfile({
+                                                            extensions: activeProfile.extensions.filter(ext => ext.id !== id),
+                                                        });
+                                                    };
+                                                    const browseExtensionDir = async (id: string) => {
+                                                        try {
+                                                            const dir = await open({ directory: true, multiple: false, title: 'Выберите директорию выгрузки расширения 1С' });
+                                                            if (dir && typeof dir === 'string') {
+                                                                updateExtension(id, { path: dir });
+                                                                addToSearchHistory(dir);
+                                                            }
+                                                        } catch (e) {
+                                                            console.error('Failed to open extension directory dialog:', e);
+                                                        }
                                                     };
                                                     return (
                                                         <div className="space-y-3">
+                                                            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-2 items-end">
+                                                                <div>
+                                                                    <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
+                                                                        <Database className="w-3 h-3" /> Активная конфигурация
+                                                                    </label>
+                                                                    <select
+                                                                        value={activeId}
+                                                                        onChange={(e) => commitProfiles(profiles, e.target.value)}
+                                                                        className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                                                                    >
+                                                                        {profiles.map(profile => (
+                                                                            <option key={profile.id} value={profile.id}>{profile.name || 'Без названия'}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                </div>
+                                                                <div className="flex items-center gap-1">
+                                                                    <button
+                                                                        onClick={addProfile}
+                                                                        className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded-lg text-xs transition"
+                                                                        title="Добавить профиль конфигурации"
+                                                                    >
+                                                                        <Plus className="w-3.5 h-3.5" /> Профиль
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={removeActiveProfile}
+                                                                        disabled={profiles.length <= 1}
+                                                                        className="p-1.5 bg-zinc-700/60 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                        title="Удалить активный профиль"
+                                                                    >
+                                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
                                                             <div>
                                                                 <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
-                                                                    <Terminal className="w-3 h-3" /> Путь к выгрузке конфигурации 1С
+                                                                    <FileText className="w-3 h-3" /> Название профиля
+                                                                </label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={activeProfile?.name ?? ''}
+                                                                    onChange={(e) => updateActiveProfile({ name: e.target.value })}
+                                                                    className={`w-full bg-zinc-900 border rounded-lg px-3 py-1.5 text-sm focus:ring-1 focus:outline-none ${
+                                                                        !activeProfile?.name?.trim()
+                                                                            ? 'border-red-500/60 focus:ring-red-500'
+                                                                            : 'border-zinc-700 focus:ring-blue-500'
+                                                                    }`}
+                                                                    placeholder="Например: Бухгалтерия КОРП"
+                                                                />
+                                                                {!activeProfile?.name?.trim() && (
+                                                                    <p className="text-[10px] text-red-400 mt-1">Укажите название профиля</p>
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1 mb-1">
+                                                                    <Terminal className="w-3 h-3" /> Основная выгрузка конфигурации 1С
                                                                 </label>
                                                                 <div className="flex gap-2 relative">
                                                                     <input
                                                                         type="text"
                                                                         value={configPath}
                                                                         onChange={(e) => {
-                                                                            const newEnv = { ...(server.env || {}), 'ONEC_CONFIG_PATH': e.target.value };
-                                                                            handleUpdateServer(server.id, { env: newEnv });
+                                                                            updateActiveProfile({ main_path: e.target.value });
                                                                         }}
                                                                         onBlur={() => { if (configPath) addToSearchHistory(configPath); }}
                                                                         onKeyDown={(e) => { if (e.key === 'Enter' && configPath) addToSearchHistory(configPath); }}
@@ -970,7 +1196,79 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                                                         ))}
                                                                     </div>
                                                                 )}
-                                                                <p className="text-[10px] text-zinc-600 mt-1">Корневая директория выгруженной конфигурации (содержит папки CommonModules, Documents и т.д.)</p>
+                                                                <p className="text-[10px] text-zinc-600 mt-1">Корневая директория основной выгрузки (содержит CommonModules, Documents и т.д.)</p>
+                                                            </div>
+                                                            <div className="rounded-lg border border-zinc-700/50 bg-zinc-900/30 p-3 space-y-2">
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <label className="text-[10px] text-zinc-500 uppercase font-bold flex items-center gap-1">
+                                                                        <Wrench className="w-3 h-3" /> Расширения конфигурации
+                                                                    </label>
+                                                                    <button
+                                                                        onClick={addExtension}
+                                                                        className="flex items-center gap-1 px-2 py-1 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-zinc-100 rounded text-[10px] transition"
+                                                                        title="Добавить выгрузку расширения"
+                                                                    >
+                                                                        <Plus className="w-3 h-3" /> Добавить
+                                                                    </button>
+                                                                </div>
+                                                                {activeProfile?.extensions.length ? (
+                                                                    <div className="space-y-2">
+                                                                        {activeProfile.extensions.map((ext, idx) => {
+                                                                            const nameEmpty = !ext.name.trim();
+                                                                            return (
+                                                                            <div key={ext.id} className="space-y-1">
+                                                                                <div className="grid grid-cols-1 md:grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_auto] gap-2 items-center">
+                                                                                    <input
+                                                                                        type="text"
+                                                                                        value={ext.name}
+                                                                                        onChange={(e) => updateExtension(ext.id, { name: e.target.value })}
+                                                                                        className={`bg-zinc-950 border rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:outline-none ${
+                                                                                            nameEmpty
+                                                                                                ? 'border-red-500/60 focus:ring-red-500'
+                                                                                                : 'border-zinc-700 focus:ring-blue-500'
+                                                                                        }`}
+                                                                                        placeholder={`Расширение ${idx + 1}`}
+                                                                                    />
+                                                                                    <input
+                                                                                        type="text"
+                                                                                        value={ext.path}
+                                                                                        onChange={(e) => updateExtension(ext.id, { path: e.target.value })}
+                                                                                        onBlur={() => { if (ext.path) addToSearchHistory(ext.path); }}
+                                                                                        className="bg-zinc-950 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs font-mono focus:ring-1 focus:ring-blue-500 focus:outline-none min-w-0"
+                                                                                        placeholder="C:\1C\extensions\MyExtension"
+                                                                                    />
+                                                                                    <div className="flex items-center gap-1">
+                                                                                        <button
+                                                                                            onClick={() => browseExtensionDir(ext.id)}
+                                                                                            className="p-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded transition"
+                                                                                            title="Выбрать папку расширения"
+                                                                                        >
+                                                                                            <FolderOpen className="w-3.5 h-3.5" />
+                                                                                        </button>
+                                                                                        <button
+                                                                                            onClick={() => removeExtension(ext.id)}
+                                                                                            className="p-1.5 bg-zinc-700/60 hover:bg-red-500/20 text-zinc-500 hover:text-red-400 rounded transition"
+                                                                                            title="Удалить расширение"
+                                                                                        >
+                                                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </div>
+                                                                                {nameEmpty && (
+                                                                                    <p className="text-[10px] text-red-400">Укажите название расширения</p>
+                                                                                )}
+                                                                            </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                ) : (
+                                                                    <p className="text-[10px] text-zinc-600">Можно добавить выгрузки расширений, чтобы поиск видел доработанные объекты и реквизиты.</p>
+                                                                )}
+                                                                {allIndexPaths.length > 1 && (
+                                                                    <p className="text-[10px] text-zinc-500">
+                                                                        Будет индексироваться источников: {allIndexPaths.length}
+                                                                    </p>
+                                                                )}
                                                             </div>
                                                             {searchSt === 'unavailable' ? (
                                                                 <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3">
@@ -980,12 +1278,12 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                                                         <p className="text-[10px] text-zinc-500 mt-1">Укажите путь к директории выгрузки конфигурации 1С выше.</p>
                                                                     </div>
                                                                 </div>
-                                                            ) : (searchSt === 'indexing' || searchSt === 'syncing') ? (
+                                                            ) : busySearchStates.has(searchSt) ? (
                                                                 <div className="space-y-2">
                                                                     <div className="flex items-center justify-between text-[10px] text-zinc-400">
                                                                         <span className="flex items-center gap-1">
                                                                             <Activity className="w-3 h-3 animate-pulse text-blue-400" />
-                                                                            {searchSt === 'syncing' ? 'Синхронизация индекса...' : 'Построение символьного индекса...'}
+                                                                            {busySearchLabel}
                                                                         </span>
                                                                         <span className="font-mono text-blue-400">{status?.index_progress || 0}%</span>
                                                                     </div>
@@ -996,6 +1294,16 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                                                         />
                                                                     </div>
                                                                     {status?.index_message && <p className="text-[10px] text-zinc-500 truncate" title={status.index_message}>{status.index_message}</p>}
+                                                                </div>
+                                                            ) : searchSt === 'degraded' ? (
+                                                                <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3">
+                                                                    <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                                    <div className="min-w-0">
+                                                                        <p className="text-xs text-amber-300 font-medium">Поиск работает частично</p>
+                                                                        <p className="text-[10px] text-zinc-500 mt-1 truncate" title={status?.index_message}>
+                                                                            {status?.index_message || 'Один или несколько источников не удалось проиндексировать.'}
+                                                                        </p>
+                                                                    </div>
                                                                 </div>
                                                             ) : searchSt === 'ready' ? (
                                                                 <>
@@ -1035,9 +1343,11 @@ export function MCPSettings({ servers, bslEnabled, onUpdate }: MCPSettingsProps)
                                                                         </button>
                                                                         <button
                                                                             onClick={async () => {
-                                                                                if (!configPath) return;
+                                                                                if (allIndexPaths.length === 0) return;
                                                                                 try {
-                                                                                    await invoke('delete_search_index', { configPath });
+                                                                                    for (const path of allIndexPaths) {
+                                                                                        await invoke('delete_search_index', { configPath: path });
+                                                                                    }
                                                                                     setStatuses(prev => ({
                                                                                         ...prev,
                                                                                         [server.id]: {

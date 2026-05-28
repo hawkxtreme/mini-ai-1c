@@ -15,13 +15,15 @@ use windows::{
         PROCESS_VM_READ,
     },
     Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, SetFocus, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_A, VK_C, VK_CONTROL, VK_MENU, VK_SHIFT, VK_UP,
-        VK_V,
+        SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+        KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+        MOUSEINPUT, VK_A, VK_C, VK_CONTROL, VK_MENU, VK_SHIFT, VK_UP, VK_V,
     },
     Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-        IsWindowVisible, IsZoomed, MoveWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        EnumWindows, GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, IsZoomed, MoveWindow, SetForegroundWindow, ShowWindow,
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
     },
 };
 
@@ -40,6 +42,58 @@ pub fn calculate_content_hash(content: &str) -> String {
     let mut hasher = DefaultHasher::new();
     content.trim().hash(&mut hasher);
     format!("{:x}", hasher.finish())
+}
+
+pub fn send_left_click(screen_x: i32, screen_y: i32) {
+    unsafe {
+        let virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let virtual_width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+        let virtual_height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+
+        let absolute_x = ((screen_x - virtual_left) * 65_535 / virtual_width).clamp(0, 65_535);
+        let absolute_y = ((screen_y - virtual_top) * 65_535 / virtual_height).clamp(0, 65_535);
+        let move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+
+        let move_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: absolute_x,
+                    dy: absolute_y,
+                    dwFlags: move_flags,
+                    ..Default::default()
+                },
+            },
+        };
+        let down_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: absolute_x,
+                    dy: absolute_y,
+                    dwFlags: MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    ..Default::default()
+                },
+            },
+        };
+        let up_input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: absolute_x,
+                    dy: absolute_y,
+                    dwFlags: MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    ..Default::default()
+                },
+            },
+        };
+
+        SendInput(
+            &[move_input, down_input, up_input],
+            std::mem::size_of::<INPUT>() as i32,
+        );
+    }
 }
 
 fn send_ctrl_a() {
@@ -374,8 +428,12 @@ pub fn find_configurator_windows(pattern: &str) -> Vec<WindowInfo> {
         windows.clear();
     }
 
-    // Store pattern for callback
-    let pattern_lower = pattern.to_lowercase();
+    // Support "|"-separated patterns for multi-language matching (e.g. "Конфигуратор|Configurator")
+    let patterns: Vec<String> = pattern
+        .split('|')
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
+        .collect();
 
     unsafe {
         let _ = EnumWindows(
@@ -384,11 +442,14 @@ pub fn find_configurator_windows(pattern: &str) -> Vec<WindowInfo> {
         );
     }
 
-    // Filter by pattern
+    // Filter by any of the patterns
     if let Ok(windows) = FOUND_WINDOWS.lock() {
         windows
             .iter()
-            .filter(|w| w.title.to_lowercase().contains(&pattern_lower))
+            .filter(|w| {
+                let title_lower = w.title.to_lowercase();
+                patterns.iter().any(|p| title_lower.contains(p.as_str()))
+            })
             .cloned()
             .collect()
     } else {

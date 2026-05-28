@@ -26,10 +26,65 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Format a Unix timestamp as "ДД.ММ.ГГГГ ЧЧ:ММ" in UTC+3 (Moscow time).
+fn format_unix_msk(unix: u64) -> String {
+    if unix == 0 {
+        return String::new();
+    }
+    let msk = unix as i64 + 3 * 3600;
+    let days = msk / 86400;
+    let h = (msk % 86400) / 3600;
+    let m = (msk % 3600) / 60;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{:02}.{:02}.{} {:02}:{:02}", d, mo, y, h, m)
+}
+
 pub(crate) const BUILTIN_1C_SEARCH_SERVER_ID: &str = "builtin-1c-search";
+
+fn is_stdio_node_launcher_command(command: &str) -> bool {
+    let normalized = command
+        .trim()
+        .trim_matches('"')
+        .replace('\\', "/")
+        .to_lowercase();
+
+    normalized == "npx"
+        || normalized == "npx.cmd"
+        || normalized == "node"
+        || normalized == "node.exe"
+        || normalized.ends_with("/node")
+        || normalized.ends_with("/node.exe")
+        || normalized.contains("tsx")
+}
 
 pub(crate) fn builtin_search_unavailable_reason(config: &McpServerConfig) -> Option<String> {
     if config.id != BUILTIN_1C_SEARCH_SERVER_ID {
+        return None;
+    }
+
+    if let Some(profile_path) = active_search_profile_main_path(config) {
+        let path = std::path::Path::new(&profile_path);
+        if !path.exists() {
+            return Some(format!(
+                "Путь активной выгрузки конфигурации 1С не найден: {}",
+                profile_path
+            ));
+        }
+        if !path.is_dir() {
+            return Some(format!(
+                "Путь активной выгрузки конфигурации 1С должен указывать на директорию: {}",
+                profile_path
+            ));
+        }
         return None;
     }
 
@@ -60,6 +115,38 @@ pub(crate) fn builtin_search_unavailable_reason(config: &McpServerConfig) -> Opt
     }
 
     None
+}
+
+fn active_search_profile_main_path(config: &McpServerConfig) -> Option<String> {
+    let env = config.env.as_ref()?;
+    let json = env.get("ONEC_CONFIG_PROFILES_JSON")?.trim();
+    if json.is_empty() {
+        return None;
+    }
+    let profiles = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let profiles = profiles.as_array()?;
+    let active_id = env
+        .get("ONEC_CONFIG_ACTIVE_PROFILE_ID")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let selected = active_id
+        .and_then(|id| {
+            profiles
+                .iter()
+                .find(|profile| profile["id"].as_str() == Some(id))
+        })
+        .or_else(|| {
+            profiles.iter().find(|profile| {
+                profile["main_path"]
+                    .as_str()
+                    .map(|path| !path.trim().is_empty())
+                    .unwrap_or(false)
+            })
+        })?;
+    selected["main_path"]
+        .as_str()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
 }
 
 #[async_trait]
@@ -593,7 +680,11 @@ impl McpSession {
         Self {
             config: config.clone(),
             transport: TransportImpl::Http {
-                client: Client::builder()
+                client: crate::http_client::http_client_builder()
+                    .unwrap_or_else(|error| {
+                        crate::app_log!("[MCP] Proxy settings ignored for HTTP client: {}", error);
+                        Client::builder()
+                    })
                     .timeout(Duration::from_secs(30))
                     .build()
                     .unwrap_or_default(),
@@ -629,10 +720,23 @@ impl McpSession {
 
     fn normalize_spawn_path(path: &std::path::Path) -> String {
         let path_str = path.to_string_lossy().to_string();
-        path_str
-            .strip_prefix(r"\\?\")
-            .unwrap_or(&path_str)
-            .to_string()
+        Self::normalize_extended_path(&path_str)
+    }
+
+    /// Converts a Windows extended-length path (`\\?\…`) into a standard path
+    /// understandable by external processes (Node.js, child .exe).
+    ///
+    /// `std::fs::canonicalize` on Windows returns the extended form. Stripping
+    /// only `\\?\` is wrong for UNC paths: `\\?\UNC\srv\share\foo` becomes
+    /// `UNC\srv\share\foo`, which Node.js resolves relative to cwd (issue #165).
+    fn normalize_extended_path(s: &str) -> String {
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{}", rest)
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s.to_string()
+        }
     }
 
     #[cfg_attr(debug_assertions, allow(dead_code))]
@@ -981,10 +1085,7 @@ impl McpSession {
 
         if let Some(app_handle) = app_handle_opt.as_ref() {
             let cmd_lower = command.to_lowercase();
-            let is_stdio_node_launcher = cmd_lower == "npx"
-                || cmd_lower == "npx.cmd"
-                || cmd_lower == "node"
-                || cmd_lower.contains("tsx");
+            let is_stdio_node_launcher = is_stdio_node_launcher_command(&command);
 
             if is_stdio_node_launcher {
                 crate::app_log!(
@@ -1015,11 +1116,7 @@ impl McpSession {
                                 .resolve(&js_subpath, tauri::path::BaseDirectory::Resource)
                             {
                                 if path.exists() {
-                                    let path_str = path.to_string_lossy().to_string();
-                                    *arg = path_str
-                                        .strip_prefix(r"\\?\")
-                                        .unwrap_or(&path_str)
-                                        .to_string();
+                                    *arg = Self::normalize_spawn_path(&path);
                                     crate::app_log!("[MCP] Resolved to MSI resource: {}", arg);
                                     resolved = true;
                                 }
@@ -1062,11 +1159,7 @@ impl McpSession {
                                 .join(&js_filename);
                             if dev_path.exists() {
                                 if let Ok(abs) = std::fs::canonicalize(&dev_path) {
-                                    let path_str = abs.to_string_lossy().to_string();
-                                    *arg = path_str
-                                        .strip_prefix(r"\\?\")
-                                        .unwrap_or(&path_str)
-                                        .to_string();
+                                    *arg = Self::normalize_spawn_path(&abs);
                                     crate::app_log!(
                                         "[MCP] Resolved to Dev-relative resource: {}",
                                         arg
@@ -1078,11 +1171,7 @@ impl McpSession {
                                     std::path::PathBuf::from("mcp-servers").join(&js_filename);
                                 if dev_path2.exists() {
                                     if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
-                                        let path_str = abs.to_string_lossy().to_string();
-                                        *arg = path_str
-                                            .strip_prefix(r"\\?\")
-                                            .unwrap_or(&path_str)
-                                            .to_string();
+                                        *arg = Self::normalize_spawn_path(&abs);
                                         crate::app_log!(
                                             "[MCP] Resolved to Dev-relative resource: {}",
                                             arg
@@ -1118,11 +1207,7 @@ impl McpSession {
                         .resolve(&exe_subpath, tauri::path::BaseDirectory::Resource)
                     {
                         if path.exists() {
-                            let path_str = path.to_string_lossy().to_string();
-                            command = path_str
-                                .strip_prefix(r"\\?\")
-                                .unwrap_or(&path_str)
-                                .to_string();
+                            command = Self::normalize_spawn_path(&path);
                             crate::app_log!("[MCP] Resolved .exe to resource: {}", command);
                             exe_resolved = true;
                         }
@@ -1161,11 +1246,7 @@ impl McpSession {
                         std::path::PathBuf::from("src-tauri/mcp-servers").join(&exe_filename);
                     if dev_path.exists() {
                         if let Ok(abs) = std::fs::canonicalize(&dev_path) {
-                            let path_str = abs.to_string_lossy().to_string();
-                            command = path_str
-                                .strip_prefix(r"\\?\")
-                                .unwrap_or(&path_str)
-                                .to_string();
+                            command = Self::normalize_spawn_path(&abs);
                             crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
                             exe_resolved = true;
                         }
@@ -1174,11 +1255,7 @@ impl McpSession {
                         let dev_path2 = std::path::PathBuf::from("mcp-servers").join(&exe_filename);
                         if dev_path2.exists() {
                             if let Ok(abs) = std::fs::canonicalize(&dev_path2) {
-                                let path_str = abs.to_string_lossy().to_string();
-                                command = path_str
-                                    .strip_prefix(r"\\?\")
-                                    .unwrap_or(&path_str)
-                                    .to_string();
+                                command = Self::normalize_spawn_path(&abs);
                                 crate::app_log!("[MCP] Resolved .exe Dev-relative: {}", command);
                                 exe_resolved = true;
                             }
@@ -1396,8 +1473,38 @@ impl McpSession {
                                  }
                              }
                              // Парсим SEARCH_STATUS строки от 1С:Поиск (mcp-1c-search)
-                             // Format: SEARCH_STATUS:{state}:{sym_count}:{db_size_mb}:{built_at_unix}
-                             if is_search_server && line.starts_with("SEARCH_STATUS:") {
+                             // New JSON format (preferred): SEARCH_STATUS_JSON:{...}
+                             // Legacy colon format (fallback): SEARCH_STATUS:{state}:{sym_count}:{db_size_mb}:{built_at_unix}
+                             if is_search_server && line.starts_with("SEARCH_STATUS_JSON:") {
+                                 let json_str = line.trim_start_matches("SEARCH_STATUS_JSON:");
+                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                     let state = v["state"].as_str().unwrap_or("").to_string();
+                                     let progress = v["progress"].as_u64().unwrap_or(0) as u32;
+                                     let message = v["message"].as_str().unwrap_or("").to_string();
+                                     let sym_count = v["sym_count"].as_u64().unwrap_or(0);
+                                     let db_size_mb = v["db_size_mb"].as_f64().unwrap_or(0.0);
+                                     let built_at_unix = v["built_at_unix"].as_u64().unwrap_or(0);
+
+                                     *help_status_writer.lock().await = state.clone();
+                                     *help_progress_writer.lock().await = progress;
+
+                                     let display_msg = match state.as_str() {
+                                         "ready" if sym_count > 0 => {
+                                             let date_str = format_unix_msk(built_at_unix);
+                                             match (db_size_mb > 0.1, !date_str.is_empty()) {
+                                                 (true, true)  => format!("{} символов • {:.1} МБ • {}", sym_count, db_size_mb, date_str),
+                                                 (true, false) => format!("{} символов • {:.1} МБ", sym_count, db_size_mb),
+                                                 (false, true) => format!("{} символов • {}", sym_count, date_str),
+                                                 _             => format!("{} символов", sym_count),
+                                             }
+                                         }
+                                         "ready" => message.clone(),
+                                         _ => message.clone(),
+                                     };
+                                     *help_message_writer.lock().await = display_msg;
+                                 }
+                             } else if is_search_server && line.starts_with("SEARCH_STATUS:") {
+                                 // Legacy format fallback
                                  let parts: Vec<&str> = line.trim_start_matches("SEARCH_STATUS:").splitn(5, ':').collect();
                                  if !parts.is_empty() {
                                      let state = parts[0];
@@ -1408,27 +1515,7 @@ impl McpSession {
                                              let sym_count = parts.get(1).unwrap_or(&"").trim();
                                              let db_size   = parts.get(2).unwrap_or(&"").trim();
                                              let built_at_unix: u64 = parts.get(3).unwrap_or(&"0").trim().parse().unwrap_or(0);
-
-                                             // Format timestamp as ДД.ММ.ГГГГ ЧЧ:ММ (UTC+3 Moscow)
-                                             let date_str = if built_at_unix > 0 {
-                                                 let msk = built_at_unix as i64 + 3 * 3600;
-                                                 let days = msk / 86400;
-                                                 let h = (msk % 86400) / 3600;
-                                                 let m = (msk % 3600) / 60;
-                                                 let z = days + 719468;
-                                                 let era = if z >= 0 { z } else { z - 146096 } / 146097;
-                                                 let doe = z - era * 146097;
-                                                 let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-                                                 let y = yoe + era * 400;
-                                                 let doy = doe - (365*yoe + yoe/4 - yoe/100);
-                                                 let mp = (5*doy + 2) / 153;
-                                                 let d = doy - (153*mp + 2)/5 + 1;
-                                                 let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-                                                 let y = if mo <= 2 { y + 1 } else { y };
-                                                 format!("{:02}.{:02}.{} {:02}:{:02}", d, mo, y, h, m)
-                                             } else {
-                                                 String::new()
-                                             };
+                                             let date_str = format_unix_msk(built_at_unix);
 
                                              *help_message_writer.lock().await = match (sym_count, db_size, date_str.as_str()) {
                                                  ("", _, _) | ("0", _, _) => "Готово".to_string(),
@@ -1993,6 +2080,17 @@ mod tests {
     }
 
     #[test]
+    fn detects_portable_node_executable_as_node_launcher() {
+        assert!(is_stdio_node_launcher_command(r"C:\portable\node\node.exe"));
+        assert!(is_stdio_node_launcher_command("/opt/node/bin/node"));
+        assert!(is_stdio_node_launcher_command("node"));
+        assert!(is_stdio_node_launcher_command("npx.cmd"));
+        assert!(!is_stdio_node_launcher_command(
+            r"C:\tools\mcp-1c-search.exe"
+        ));
+    }
+
+    #[test]
     fn detects_initialize_requirement_from_http_body() {
         let response = HttpRpcResponse {
             status: reqwest::StatusCode::BAD_REQUEST,
@@ -2106,5 +2204,38 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn normalize_extended_path_preserves_unc_share() {
+        // \\?\UNC\server\share\dir\file.cjs must become \\server\share\dir\file.cjs,
+        // not the relative-looking UNC\server\share\... that Node.js misinterprets
+        // as cwd-relative (issue #165).
+        assert_eq!(
+            McpSession::normalize_extended_path(
+                r"\\?\UNC\server\share\mcp-servers\1c-naparnik.cjs"
+            ),
+            r"\\server\share\mcp-servers\1c-naparnik.cjs"
+        );
+    }
+
+    #[test]
+    fn normalize_extended_path_strips_local_extended_prefix() {
+        assert_eq!(
+            McpSession::normalize_extended_path(r"\\?\C:\Users\foo\bar.cjs"),
+            r"C:\Users\foo\bar.cjs"
+        );
+    }
+
+    #[test]
+    fn normalize_extended_path_passes_through_regular_paths() {
+        assert_eq!(
+            McpSession::normalize_extended_path(r"C:\Users\foo\bar.cjs"),
+            r"C:\Users\foo\bar.cjs"
+        );
+        assert_eq!(
+            McpSession::normalize_extended_path(r"\\server\share\foo.cjs"),
+            r"\\server\share\foo.cjs"
+        );
     }
 }

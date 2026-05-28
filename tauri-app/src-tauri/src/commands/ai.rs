@@ -142,6 +142,41 @@ fn estimate_tokens(messages: &[ApiMessage]) -> usize {
         .sum()
 }
 
+/// Payload emitted as `context-usage` Tauri event to update the UI indicator.
+#[derive(Serialize, Clone)]
+struct ContextUsagePayload {
+    estimated_tokens: usize,
+    context_window: usize,
+    percent: f32,
+    warning_level: &'static str,
+}
+
+/// Emits `context-usage` event with current token estimate and fill percentage.
+fn emit_context_usage(app: &AppHandle, messages: &[ApiMessage], context_window: usize) {
+    let tokens = estimate_tokens(messages);
+    let percent = if context_window > 0 {
+        (tokens as f32 / context_window as f32 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let warning_level: &'static str = if percent >= 85.0 {
+        "critical"
+    } else if percent >= 70.0 {
+        "warning"
+    } else {
+        "ok"
+    };
+    let _ = app.emit(
+        "context-usage",
+        ContextUsagePayload {
+            estimated_tokens: tokens,
+            context_window,
+            percent,
+            warning_level,
+        },
+    );
+}
+
 /// Prunes old tool-call rounds from the context to keep it under `max_tokens`.
 ///
 /// A "round" = one assistant message with tool_calls + all following tool messages.
@@ -205,6 +240,17 @@ fn prune_tool_context(messages: &mut Vec<ApiMessage>, max_tokens: usize) {
 }
 
 /// Clear 1С:Напарник session (called on chat clear when provider == OneCNaparnik)
+fn assistant_message_has_meaningful_payload(message: &ApiMessage) -> bool {
+    message
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.is_empty())
+        || message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tool_calls| !tool_calls.is_empty())
+}
+
 #[tauri::command]
 pub async fn clear_naparnik_session() -> Result<(), String> {
     if let Some(profile) = crate::llm_profiles::get_active_profile() {
@@ -337,6 +383,11 @@ pub async fn stream_chat(
         })
         .collect();
 
+    // Resolve effective context window for UI indicator (override → profile default → 128k fallback)
+    let effective_context_window = crate::llm_profiles::get_active_profile()
+        .and_then(|p| p.context_window_override)
+        .unwrap_or(128_000) as usize;
+
     // Spawn the work into a cancellable task
     let task_app_handle = app_handle.clone();
 
@@ -365,6 +416,7 @@ pub async fn stream_chat(
 
             // Prune old tool rounds to keep context under threshold
             prune_tool_context(&mut api_messages, CONTEXT_PRUNE_THRESHOLD);
+            emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
 
             // Stream chat completion
             let response_msg =
@@ -394,7 +446,14 @@ pub async fn stream_chat(
                 }
                 m
             };
-            api_messages.push(assistant_msg_to_push);
+            if assistant_message_has_meaningful_payload(&assistant_msg_to_push) {
+                api_messages.push(assistant_msg_to_push);
+                emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
+            } else {
+                crate::app_log!(
+                    "[AI][LOOP] Skipping empty assistant response in history before retry"
+                );
+            }
 
             // 1. Check for tool calls (use original to get full count for UI)
             if let Some(tool_calls) = &assistant_msg.tool_calls {
@@ -845,17 +904,23 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
         },
     ];
 
-    // Only standard OpenAI-compatible providers are supported for summarization
+    // Only standard OpenAI-compatible HTTP providers support summarization.
+    // CodexCli / QwenCli use CLI tools, not HTTP; OneCNaparnik uses proprietary API.
     if matches!(
         profile.provider,
-        crate::llm_profiles::LLMProvider::QwenCli | crate::llm_profiles::LLMProvider::OneCNaparnik
+        crate::llm_profiles::LLMProvider::CodexCli
+            | crate::llm_profiles::LLMProvider::QwenCli
+            | crate::llm_profiles::LLMProvider::OneCNaparnik
     ) {
-        return Err("Суммаризация не поддерживается для этого провайдера (QwenCli / 1С:Напарник). Используйте стратегию 'sliding_window'.".to_string());
+        return Err(format!(
+            "Суммаризация не поддерживается для провайдера {:?}. Используйте стратегию 'sliding_window'.",
+            profile.provider
+        ));
     }
 
     let api_key = crate::ai::client::resolve_profile_api_key(&profile)?;
     let raw_url = profile.get_base_url();
-    let client = reqwest::Client::new();
+    let client = crate::http_client::build_http_client()?;
 
     if matches!(profile.provider, crate::llm_profiles::LLMProvider::Ollama) {
         let trimmed = raw_url.trim_end_matches('/');
@@ -928,7 +993,7 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
         "max_tokens": 1024,
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::build_http_client()?;
     let response = client
         .post(&base_url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -962,6 +1027,7 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::models::ToolCallFunction;
 
     #[test]
     fn cache_key_is_stable_for_equivalent_json_arguments() {
@@ -1009,5 +1075,38 @@ mod tests {
             cache_key,
             "builtin-1c-metadata::get_metadata_structure::{invalid json}"
         );
+    }
+
+    #[test]
+    fn empty_assistant_message_is_not_meaningful_for_history() {
+        let message = ApiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        };
+
+        assert!(!assistant_message_has_meaningful_payload(&message));
+    }
+
+    #[test]
+    fn assistant_tool_call_message_is_meaningful_for_history_even_without_content() {
+        let message = ApiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![crate::ai::models::ToolCall {
+                id: "call_1".to_string(),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "search_code".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        };
+
+        assert!(assistant_message_has_meaningful_payload(&message));
     }
 }

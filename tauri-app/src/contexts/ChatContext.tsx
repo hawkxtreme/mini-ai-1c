@@ -1,10 +1,13 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as api from '../api';
 import { ConfiguratorTitleContext, formatConfiguratorContextForLLM } from '../utils/configurator';
 import { messageQueueService, QueuedMessage } from '../services/MessageQueueService';
 import { useSettings } from './SettingsContext';
+import { useProfiles } from './ProfileContext';
 import { useChatSessions, ChatSession } from '../hooks/useChatSessions';
+import { clampPayloadToBudget } from '../utils/contextPayload';
 
 export type { ChatSession };
 
@@ -14,6 +17,8 @@ export interface ToolCall {
     arguments: string;
     status: 'pending' | 'executing' | 'done' | 'error' | 'rejected';
     result?: string;
+    startedAt?: number;
+    duration?: number;
 }
 
 export interface BSLDiagnostic {
@@ -40,6 +45,7 @@ export interface ChatMessage {
     parts?: MessagePart[];
     diagnostics?: BSLDiagnostic[];
     timestamp: number;
+    responseTime?: number;
     variant?: 'warning' | 'info' | 'compression';
     includeInPayload?: boolean;
 }
@@ -63,20 +69,89 @@ function stripCompressionMessages(msgs: ChatMessage[]): ChatMessage[] {
     return msgs.filter(msg => !isCompressionMessage(msg));
 }
 
-/** Sliding window for payload: keep first message + last (maxMessages - 1), without UI markers */
+function getExportableMessages(msgs: ChatMessage[]): ChatMessage[] {
+    return msgs.filter(
+        (msg) => (msg.role === 'user' || msg.role === 'assistant') && msg.variant == null
+    );
+}
+
+function buildChatExportBaseName(title: string | null | undefined): string {
+    const normalized = (title ?? '')
+        .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[. ]+$/g, '');
+
+    if (!normalized) {
+        return 'chat';
+    }
+
+    return normalized.slice(0, 80).trim() || 'chat';
+}
+
+function buildSuggestedChatFileName(title: string | null | undefined, exportedAt: number): string {
+    const baseName = buildChatExportBaseName(title);
+    const stamp = new Date(exportedAt)
+        .toLocaleString('sv-SE', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        })
+        .replace(',', '')
+        .replace(/:/g, '-');
+
+    return `${baseName} - ${stamp}.md`;
+}
+
+function buildChatExportMarkdown(msgs: ChatMessage[], exportedAt: number): string | null {
+    const visibleMessages = getExportableMessages(msgs);
+    if (visibleMessages.length === 0) return null;
+
+    const date = new Date(exportedAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+    const lines: string[] = [`# Диалог от ${date}`, ''];
+
+    for (const msg of visibleMessages) {
+        const label = msg.role === 'user' ? '## Пользователь' : '## Ассистент';
+        lines.push(label);
+        lines.push('');
+        const text = (msg.displayContent ?? msg.content ?? '').trim();
+        lines.push(text);
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+    }
+
+    return lines.join('\n');
+}
+
+/** Estimates token count for a list of messages (chars / 4, matching Rust backend heuristic). */
+function estimateMsgTokens(msgs: ChatMessage[]): number {
+    return msgs.reduce((sum, m) => sum + Math.ceil((m.content?.length ?? 0) / 4), 0);
+}
+
+/**
+ * Sliding window for payload: keep first dialog message + as many trailing messages as fit
+ * within maxTokens. Drops messages from the middle (after first) until under threshold.
+ */
 function slidingWindowCompress(
     msgs: ChatMessage[],
-    maxMessages: number
+    maxTokens: number
 ): { compressed: ChatMessage[]; removedCount: number } {
     const systemMsgs = msgs.filter(m => m.role === 'system');
     const dialogMsgs = msgs.filter(m => m.role !== 'system');
-    if (dialogMsgs.length <= maxMessages) {
+    if (estimateMsgTokens(dialogMsgs) <= maxTokens) {
         return { compressed: msgs, removedCount: 0 };
     }
-    // Keep first message + last (maxMessages - 1) messages
+    // Keep first message; drop from position 1 forward until under threshold
     const first = dialogMsgs[0];
-    const tail = dialogMsgs.slice(-(maxMessages - 1));
-    const removedCount = dialogMsgs.length - maxMessages;
+    let tail = dialogMsgs.slice(1);
+    let removedCount = 0;
+    while (tail.length > 0 && estimateMsgTokens([first, ...tail]) > maxTokens) {
+        tail = tail.slice(1);
+        removedCount++;
+    }
     return { compressed: [...systemMsgs, first, ...tail], removedCount };
 }
 
@@ -93,10 +168,20 @@ function buildPayloadMessages(
                 : (m.payloadContent ?? m.content ?? '');
 
             if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+                const completedToolCalls = m.toolCalls.filter(tc =>
+                    tc.id && tc.result !== undefined && (tc.status === 'done' || tc.status === 'error')
+                );
+
+                if (completedToolCalls.length === 0) {
+                    return content.trim()
+                        ? [{ role: m.role as api.ChatMessage['role'], content }]
+                        : [];
+                }
+
                 const msg: api.ChatMessage = {
                     role: 'assistant',
                     content,
-                    tool_calls: m.toolCalls.map(tc => ({
+                    tool_calls: completedToolCalls.map(tc => ({
                         id: tc.id,
                         type: 'function',
                         function: {
@@ -105,8 +190,7 @@ function buildPayloadMessages(
                         }
                     }))
                 };
-                const toolResults: api.ChatMessage[] = m.toolCalls
-                    .filter(tc => tc.result !== undefined && tc.id)
+                const toolResults: api.ChatMessage[] = completedToolCalls
                     .map(tc => ({
                         role: 'tool' as const,
                         content: tc.result || '',
@@ -127,6 +211,7 @@ interface ChatContextType {
     messages: ChatMessage[];
     compressionIndicator: CompressionIndicator | null;
     isLoading: boolean;
+    streamStartTime: number | null;
     chatStatus: string;
     currentIteration: number;
     messageQueue: QueuedMessage[];
@@ -145,12 +230,15 @@ interface ChatContextType {
     removeQueuedMessage: (id: string) => void;
     updateQueuedMessage: (id: string, content: string) => void;
     clearQueue: () => void;
+    exportChat: () => Promise<void>;
+    exportSession: (session: ChatSession) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
     const { settings } = useSettings();
+    const { activeProfile } = useProfiles();
     const {
         sessions,
         activeId: activeSessionId,
@@ -167,6 +255,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     });
     const [compressionIndicator, setCompressionIndicator] = useState<CompressionIndicator | null>(null);
     const [isLoading, setIsLoading] = useState(false);
+    const [streamStartTime, setStreamStartTime] = useState<number | null>(null);
+    const streamStartTimeRef = useRef<number | null>(null);
     const [chatStatus, setChatStatus] = useState('');
     const [currentIteration, setCurrentIteration] = useState(0);
     const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -334,7 +424,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                 id: event.payload.id,
                                 name: event.payload.name,
                                 arguments: '',
-                                status: 'pending' as const
+                                status: 'pending' as const,
+                                startedAt: Date.now()
                             };
 
                             // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
@@ -421,10 +512,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
                             const last = prev[targetIdx];
                             let matched = false;
+                            const now = Date.now();
                             const toolCalls = last.toolCalls!.map(tc => {
                                 if (tc.id === event.payload.id) {
                                     matched = true;
-                                    return { ...tc, status: event.payload.status, result: event.payload.result };
+                                    return { ...tc, status: event.payload.status, result: event.payload.result, duration: tc.startedAt ? now - tc.startedAt : undefined };
                                 }
                                 return tc;
                             });
@@ -436,7 +528,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                     { ...last, toolCalls: last.toolCalls!.map(tc => {
                                         if (!found && (tc.status === 'pending' || tc.status === 'executing')) {
                                             found = true;
-                                            return { ...tc, id: event.payload.id, status: event.payload.status, result: event.payload.result };
+                                            return { ...tc, id: event.payload.id, status: event.payload.status, result: event.payload.result, duration: tc.startedAt ? now - tc.startedAt : undefined };
                                         }
                                         return tc;
                                     })},
@@ -483,6 +575,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
                     listen('chat-done', () => {
                         flushNow();
+                        const elapsed = streamStartTimeRef.current ? Date.now() - streamStartTimeRef.current : null;
+                        streamStartTimeRef.current = null;
+                        setStreamStartTime(null);
                         setIsLoading(false);
                         setChatStatus('');
                         setCurrentIteration(0);
@@ -503,6 +598,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                 !filtered[filtered.length - 1].toolCalls?.length
                             ) {
                                 filtered.pop();
+                            }
+                            // Attach responseTime to last assistant message
+                            if (elapsed && filtered.length > 0) {
+                                const lastIdx = filtered.length - 1;
+                                if (filtered[lastIdx].role === 'assistant') {
+                                    filtered[lastIdx] = { ...filtered[lastIdx], responseTime: elapsed };
+                                }
                             }
                             return filtered;
                         });
@@ -545,17 +647,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         let payloadSourceMessages = historyMessages;
         let indicator: CompressionIndicator | null = null;
 
-        const strategy = settings?.context_compress_strategy;
-        const maxMsgs = settings?.max_context_messages ?? 40;
+        const strategy = settings?.context_compress_strategy || 'summarize';
+        // Threshold = 75% of the active model's context window.
+        // Falls back to 32k if context_window_override is not set.
+        const contextWindow: number = activeProfile?.context_window_override ?? 32000;
+        const maxTokens: number = Math.round(contextWindow * 0.75);
 
         if (strategy === 'sliding_window') {
-            const { compressed } = slidingWindowCompress(historyMessages, maxMsgs);
+            const { compressed } = slidingWindowCompress(historyMessages, maxTokens);
             payloadSourceMessages = compressed;
         } else if (strategy === 'summarize') {
             const previousMessages = historyMessages.slice(0, -1);
             const dialogMsgs = previousMessages.filter(m => m.role !== 'system');
 
-            if (dialogMsgs.length > maxMsgs) {
+            if (estimateMsgTokens(dialogMsgs) > maxTokens) {
                 try {
                     const toSummarize: api.ChatMessage[] = dialogMsgs.map(m => ({
                         role: m.role as api.ChatMessage['role'],
@@ -588,13 +693,33 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         label: 'Контекст сжат',
                     };
                 } catch (error) {
-                    console.warn('[ChatContext] Summarization failed, continuing without compression:', error);
+                    // Summarization unavailable for this provider (CodexCli / QwenCli / Naparnik)
+                    // or other failure — fall back to sliding_window so context is still trimmed.
+                    console.warn('[ChatContext] Summarization failed, falling back to sliding_window:', error);
+                    const { compressed } = slidingWindowCompress(historyMessages, maxTokens);
+                    payloadSourceMessages = compressed;
+                }
+            }
+        }
+
+        let payloadMessages = buildPayloadMessages(payloadSourceMessages, userMessage.id, contextPayload);
+
+        if (strategy !== 'disabled') {
+            const currentPayloadMessage = payloadMessages[payloadMessages.length - 1];
+            if (currentPayloadMessage?.role === 'user') {
+                const clamped = clampPayloadToBudget(payloadMessages, currentPayloadMessage, maxTokens);
+                payloadMessages = clamped.messages;
+                if (clamped.wasClamped && !indicator) {
+                    indicator = {
+                        anchorMessageId: userMessage.id,
+                        label: 'Контекст сжат',
+                    };
                 }
             }
         }
 
         return {
-            payloadMessages: buildPayloadMessages(payloadSourceMessages, userMessage.id, contextPayload),
+            payloadMessages,
             indicator,
         };
     }, [settings]);
@@ -644,6 +769,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        streamStartTimeRef.current = Date.now();
+        setStreamStartTime(streamStartTimeRef.current);
 
         // 2. Backend: Prepare payload
         let contextPayload = content;
@@ -745,6 +872,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         api.clearNaparnikSession().catch(() => {/* non-critical */});
     }, [startDraft]);
 
+    const exportChat = useCallback(async () => {
+        const visibleMessages = messages.filter(
+            m => (m.role === 'user' || m.role === 'assistant') && m.variant == null
+        );
+        if (visibleMessages.length === 0) return;
+
+        const date = new Date().toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+        const lines: string[] = [`# Диалог от ${date}`, ''];
+
+        for (const msg of visibleMessages) {
+            const label = msg.role === 'user' ? '## Пользователь' : '## Ассистент';
+            lines.push(label);
+            lines.push('');
+            const text = (msg.displayContent ?? msg.content ?? '').trim();
+            lines.push(text);
+            lines.push('');
+            lines.push('---');
+            lines.push('');
+        }
+
+        const content = lines.join('\n');
+        const suggestedFileName = buildSuggestedChatFileName(activeSession?.title, Date.now());
+        await invoke('export_chat', { content, suggestedFileName });
+    }, [activeSession?.title, messages]);
+
+    const exportSession = useCallback(async (session: ChatSession) => {
+        const content = buildChatExportMarkdown(session.messages, session.updatedAt);
+        if (!content) return;
+        const suggestedFileName = buildSuggestedChatFileName(session.title, session.updatedAt);
+        await invoke('export_chat', { content, suggestedFileName });
+    }, []);
+
     const addSystemMessage = useCallback((content: string, variant?: 'warning' | 'info' | 'compression') => {
         setMessages(prev => [
             ...prev,
@@ -784,6 +943,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        streamStartTimeRef.current = Date.now();
+        setStreamStartTime(streamStartTimeRef.current);
 
         // 4. Prepare payload
         let contextPayload = newContent;
@@ -853,6 +1014,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             messages,
             compressionIndicator,
             isLoading,
+            streamStartTime,
             chatStatus,
             currentIteration,
             messageQueue,
@@ -871,6 +1033,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             removeQueuedMessage,
             updateQueuedMessage,
             clearQueue,
+            exportChat,
+            exportSession,
         }}>
             {children}
         </ChatContext.Provider>

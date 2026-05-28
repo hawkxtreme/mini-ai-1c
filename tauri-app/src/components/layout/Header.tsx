@@ -1,5 +1,6 @@
-import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, Sparkles, History } from 'lucide-react';
+import { Settings, Maximize2, Minimize2, Pin, MessageSquare, Columns, Code2, AlertTriangle, Bell, X, Info, Sun, Moon, History, Download, MessageSquarePlus } from 'lucide-react';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+import { getVersion } from '@tauri-apps/api/app';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useProfiles } from '../../contexts/ProfileContext';
@@ -36,6 +37,7 @@ interface HeaderProps {
     viewMode: 'assistant' | 'split' | 'code';
     onViewModeChange: (mode: 'assistant' | 'split' | 'code') => void;
     onNewChat: () => void;
+    onExportChat: () => void;
     onOpenSettings: (tab?: string) => void;
 }
 
@@ -45,6 +47,7 @@ export function Header({
     viewMode,
     onViewModeChange,
     onNewChat,
+    onExportChat,
     onOpenSettings,
 }: HeaderProps) {
     const [isCompact, setIsCompact] = useState(false);
@@ -52,10 +55,9 @@ export function Header({
     const { settings, updateSettings } = useSettings();
     const { activeProfile } = useProfiles();
     const {
-        isLoading,
-        chatStatus,
         sessions,
         activeSessionId,
+        exportSession,
         switchChat,
         deleteChat,
     } = useChat();
@@ -66,6 +68,29 @@ export function Header({
     const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
     const chatHistoryRef = useRef<HTMLDivElement>(null);
     const [dismissed, setDismissed] = useState<Record<string, boolean>>({});
+    const [updateNotif, setUpdateNotif] = useState<{ version: string; url: string } | null>(null);
+
+    useEffect(() => {
+        const UPDATE_NOTIF_KEY = 'update_notif_dismissed_v';
+        getVersion().then(async (current) => {
+            try {
+                const res = await fetch('https://api.github.com/repos/hawkxtreme/mini-ai-1c/releases/latest', {
+                    headers: { Accept: 'application/vnd.github+json' },
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                const latest = (data.tag_name as string).replace(/^v/, '');
+                if (latest !== current.replace(/^v/, '')) {
+                    // Не показывать если уже закрыли это уведомление для этой версии
+                    if (localStorage.getItem(`${UPDATE_NOTIF_KEY}${latest}`) !== 'true') {
+                        setUpdateNotif({ version: latest, url: data.html_url });
+                    }
+                }
+            } catch {
+                // сетевая ошибка — тихо игнорируем
+            }
+        }).catch(() => {});
+    }, []);
 
     useEffect(() => {
         const updateCompactStatus = () => {
@@ -169,29 +194,65 @@ export function Header({
     return (
         <div className="flex items-center justify-between px-4 py-2 border-b border-[#27272a] bg-[#09090b]">
             <div className="flex items-center gap-3">
-                {/* MCP notifications shutter */}
-                {notifications.length > 0 && (
+                {/* Notifications shutter (MCP + updates) */}
+                {(notifications.length > 0 || updateNotif) && (
                     <div ref={notifRef} className="relative">
                         <button
                             onClick={() => setNotifOpen(v => !v)}
                             className="relative p-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
-                            title="Доступны новые MCP-инструменты"
+                            title="Уведомления"
                         >
                             <Bell className="w-3.5 h-3.5 text-blue-400" />
                             <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-blue-500 rounded-full text-[8px] font-bold text-white flex items-center justify-center leading-none">
-                                {notifications.length}
+                                {notifications.length + (updateNotif ? 1 : 0)}
                             </span>
                         </button>
 
                         {notifOpen && (
                             <div className="absolute left-0 top-full mt-2 z-50 w-[280px] bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-150">
                                 <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800">
-                                    <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Доступные инструменты</span>
+                                    <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Уведомления</span>
                                     <button onClick={() => setNotifOpen(false)} className="text-zinc-500 hover:text-zinc-300 transition-colors">
                                         <X className="w-3.5 h-3.5" />
                                     </button>
                                 </div>
                                 <div className="flex flex-col divide-y divide-zinc-800/60">
+                                    {/* Update notification */}
+                                    {updateNotif && (
+                                        <div className="px-3 py-3">
+                                            <div className="flex items-start gap-2">
+                                                <Download className="w-3.5 h-3.5 text-yellow-400 shrink-0 mt-0.5" />
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center justify-between gap-1 mb-1">
+                                                        <span className="text-[12px] font-semibold text-zinc-200">Доступно обновление</span>
+                                                        <button
+                                                            onClick={() => {
+                                                                localStorage.setItem(`update_notif_dismissed_v${updateNotif.version}`, 'true');
+                                                                setUpdateNotif(null);
+                                                            }}
+                                                            className="text-zinc-600 hover:text-zinc-400 transition-colors shrink-0"
+                                                            title="Не показывать снова"
+                                                        >
+                                                            <X className="w-3 h-3" />
+                                                        </button>
+                                                    </div>
+                                                    <p className="text-[11px] text-zinc-500 leading-relaxed mb-2">
+                                                        Версия <span className="text-yellow-400 font-medium">{updateNotif.version}</span> уже доступна для скачивания.
+                                                    </p>
+                                                    <a
+                                                        href={updateNotif.url}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        onClick={() => setNotifOpen(false)}
+                                                        className="inline-block text-[11px] font-medium px-2.5 py-1 rounded-md bg-amber-500 hover:bg-amber-400 text-white transition-colors"
+                                                    >
+                                                        Скачать →
+                                                    </a>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {/* MCP notifications */}
                                     {notifications.map(n => (
                                         <div key={n.id} className="px-3 py-3">
                                             <div className="flex items-start gap-2 mb-2">
@@ -219,14 +280,16 @@ export function Header({
                                         </div>
                                     ))}
                                 </div>
-                                <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-900/50">
-                                    <button
-                                        onClick={() => { onOpenSettings('mcp'); setNotifOpen(false); }}
-                                        className="text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
-                                    >
-                                        Открыть настройки MCP →
-                                    </button>
-                                </div>
+                                {notifications.length > 0 && (
+                                    <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-900/50">
+                                        <button
+                                            onClick={() => { onOpenSettings('mcp'); setNotifOpen(false); }}
+                                            className="text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                                        >
+                                            Открыть настройки MCP →
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -251,23 +314,19 @@ export function Header({
                         </div>
                     </div>
                 )}
-                <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-zinc-900/50 border border-zinc-800/50">
+                <div
+                    data-testid="bsl-status"
+                    className="flex items-center gap-2 px-2 py-1 rounded-md bg-zinc-900/50 border border-zinc-800/50"
+                >
                     <div className={`w-1.5 h-1.5 rounded-full ${!bslStatus ? 'bg-zinc-600 animate-pulse' : bslStatus.connected ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.4)]'}`} />
                     <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest hidden md:inline">BSL LS</span>
-                    <span className="text-[10px] text-zinc-600 font-medium hidden md:inline">
+                    <span
+                        data-testid="bsl-status-text"
+                        className="text-[10px] text-zinc-600 font-medium hidden md:inline"
+                    >
                         {!bslStatus ? 'Initializing...' : bslStatus.connected ? 'Connected' : 'Offline'}
                     </span>
                 </div>
-
-                {/* AI Generation Indicator */}
-                {isLoading && (
-                    <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-blue-500/10 border border-blue-500/20 animate-in fade-in zoom-in-95 duration-300">
-                        <Sparkles className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
-                        <span className="text-[10px] font-bold text-blue-400/80 uppercase tracking-wider hidden sm:inline">
-                            {chatStatus || 'Thinking...'}
-                        </span>
-                    </div>
-                )}
             </div>
 
             {/* View Mode Switcher (Three-position Slider) */}
@@ -330,6 +389,22 @@ export function Header({
                     {isCompact ? <Maximize2 className="w-4 h-4" /> : <Minimize2 className="w-4 h-4" />}
                 </button>
                 <div className="w-px h-4 bg-[#27272a] mx-1" />
+                {false && (
+                    <button
+                        onClick={onExportChat}
+                        className="p-2 rounded-lg transition-colors text-zinc-400 hover:bg-[#27272a] hover:text-zinc-200"
+                        title="Экспорт диалога в файл"
+                    >
+                        <Download className="w-4 h-4" />
+                    </button>
+                )}
+                <button
+                    onClick={onNewChat}
+                    className="p-2 hover:bg-[#27272a] rounded-lg transition-colors text-zinc-400 hover:text-zinc-200"
+                    title="Новый чат"
+                >
+                    <MessageSquarePlus className="w-4 h-4" />
+                </button>
                 <div ref={chatHistoryRef} className="relative">
                     <button
                         data-testid="chat-history-trigger"
@@ -352,6 +427,7 @@ export function Header({
                         onSwitch={switchChat}
                         onNew={onNewChat}
                         onDelete={deleteChat}
+                        onExportSession={exportSession}
                     />
                 </div>
                 <button
@@ -362,6 +438,7 @@ export function Header({
                     {settings?.theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
                 </button>
                 <button
+                    data-testid="settings-button"
                     onClick={() => onOpenSettings()}
                     className="p-2 hover:bg-[#27272a] rounded-lg transition-colors"
                     title="Settings"
