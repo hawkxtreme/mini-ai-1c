@@ -178,6 +178,38 @@ pub async fn get_available_tools() -> Vec<ToolInfo> {
         *cache = Some((std::time::Instant::now(), all_tools.clone()));
     }
 
+    // Append You.com search tool if API key is configured
+    if let Ok(api_key) = std::env::var("YOUCOM_API_KEY") {
+        if !api_key.trim().is_empty() {
+            crate::app_log!("[MCP][TOOLS]   + Registered (internal): youcom_search");
+            all_tools.push(ToolInfo {
+                server_id: "builtin-youcom".to_string(),
+                tool: Tool {
+                    r#type: "function".to_string(),
+                    function: ToolFunction {
+                        name: "youcom_search".to_string(),
+                        description: "Search the web using You.com. Use this when you need current information, documentation lookups, error explanations, or any question that requires live internet data. Input: query (search string, max ~50 words).".to_string(),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query (what to search for)"
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Maximum number of results (1-20, default 10)",
+                                    "default": 10
+                                }
+                            },
+                            "required": ["query"]
+                        }),
+                    },
+                },
+            });
+        }
+    }
+
     all_tools
 }
 

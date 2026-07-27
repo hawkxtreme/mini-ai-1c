@@ -558,6 +558,24 @@ pub fn get_system_prompt(available_tools: &[ToolInfo], messages: &[ApiMessage]) 
         }
     }
 
+    // Add You.com search tool hint if available
+    if available_tools
+        .iter()
+        .any(|t| t.server_id == "builtin-youcom")
+    {
+        prompt.push_str(r#"
+
+=== ВЕБ-ПОИСК (youcom_search) ===
+Используй `youcom_search` для вопросов, требующих актуальной информации из интернета:
+- Поиск документации 1С в интернете
+- Ошибки 1С и их решения (сообщения из интернета)
+- Актуальные версии платформы, конфигураций
+- Любые вопросы выходящие за рамки локальной конфигурации
+
+Вызов: youcom_search(query="ваш вопрос", max_results=10)
+"#);
+    }
+
     prompt
 }
 

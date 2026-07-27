@@ -712,6 +712,51 @@ pub async fn stream_chat(
                     );
 
                     let mut tool_result = "Error: Tool not found".to_string();
+
+                    // Handle youcom_search directly (internal tool, not via MCP)
+                    if tool_name == "youcom_search" {
+                        let query = arguments
+                            .get("query")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let max_results = arguments
+                            .get("max_results")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(10) as usize;
+
+                        if query.is_empty() {
+                            tool_result = "Error: query parameter is required".to_string();
+                        } else {
+                            crate::app_log!("[AI][TOOL][Youcom] Searching for: {}", query);
+                            match crate::ai::youcom_search::youcom_search(query, max_results).await {
+                                Ok(results) => {
+                                    tool_result = crate::ai::youcom_search::format_search_results(results);
+                                }
+                                Err(e) => {
+                                    crate::app_log!("[AI][TOOL][Youcom] Search error: {}", e);
+                                    tool_result = format!("You.com search error: {}", e);
+                                }
+                            }
+                        }
+
+                        let _ = task_app_handle.emit(
+                            "tool-call-completed",
+                            serde_json::json!({
+                                "id": tool_call.id,
+                                "status": if tool_result.starts_with("Error") || tool_result.starts_with("You.com") { "error" } else { "done" },
+                                "result": tool_result
+                            }),
+                        );
+                        api_messages.push(ApiMessage {
+                            role: "tool".to_string(),
+                            content: Some(tool_result),
+                            tool_call_id: Some(tool_call.id.clone()),
+                            tool_calls: None,
+                            name: Some(tool_name.clone()),
+                        });
+                        continue;
+                    }
+
                     let mut all_configs = settings.mcp_servers.clone();
 
                     if !all_configs.iter().any(|c| c.id == "bsl-ls") {
