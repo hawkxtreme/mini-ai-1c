@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import * as api from '../api';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 
 export interface BslStatus {
     installed: boolean;
@@ -27,12 +27,14 @@ const BslContext = createContext<BslContextType | undefined>(undefined);
 export function BslProvider({ children }: { children: React.ReactNode }) {
     const [status, setStatus] = useState<BslStatus | null>(null);
 
+    const statusRef = React.useRef<BslStatus | null>(null);
+    statusRef.current = status;
     const lastCheckTimeRef = React.useRef(0);
 
-    const checkStatus = async () => {
+    const checkStatus = useCallback(async () => {
         const now = Date.now();
         // Пропускаем проверку если уже подключены и прошло меньше 10с
-        if (status?.connected && now - lastCheckTimeRef.current < 10000) {
+        if (statusRef.current?.connected && now - lastCheckTimeRef.current < 10000) {
             return;
         }
         try {
@@ -44,13 +46,24 @@ export function BslProvider({ children }: { children: React.ReactNode }) {
             // При ошибке сбрасываем статус
             setStatus(prev => prev ? { ...prev, connected: false } : null);
         }
-    };
+    }, []);
 
     useEffect(() => {
         checkStatus();
         const interval = setInterval(checkStatus, 15000); // Polling every 15s instead of 5s
-        return () => clearInterval(interval);
-    }, []);
+
+        // Reactive: listen for backend state change events
+        const unlistenPromise = listen<string>('bsl-ls-state', () => {
+            // Reset throttle so the next checkStatus actually fires
+            lastCheckTimeRef.current = 0;
+            checkStatus();
+        });
+
+        return () => {
+            clearInterval(interval);
+            unlistenPromise.then(fn => fn());
+        };
+    }, [checkStatus]);
 
     const analyzeCode = useCallback(async (code: string) => {
         return await api.analyzeBsl(code);
@@ -69,8 +82,8 @@ export function BslProvider({ children }: { children: React.ReactNode }) {
         checkStatus,
         analyzeCode,
         formatCode,
-        resetDiffBase
-    }), [status, analyzeCode, formatCode, resetDiffBase]);
+        resetDiffBase,
+    }), [status, checkStatus, analyzeCode, formatCode, resetDiffBase]);
 
     return (
         <BslContext.Provider value={contextValue}>

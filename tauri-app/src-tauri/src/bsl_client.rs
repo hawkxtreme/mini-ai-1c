@@ -6,17 +6,19 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::process::{Child, Command as AsyncCommand};
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
 use crate::mcp_client::{InternalMcpHandler, McpClient, McpTool};
 use crate::settings::load_settings;
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::HashMap;
+use tokio::sync::{oneshot, mpsc};
+use tauri::{AppHandle, Emitter};
 
 fn native_server_args(port: u16) -> Vec<String> {
     vec![
@@ -32,19 +34,6 @@ fn request_timeout_for(method: &str) -> Duration {
     } else {
         Duration::from_secs(15)
     }
-}
-
-fn should_invalidate_connection(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    error.contains("timeout waiting for bsl ls response")
-        || error.contains("connection closed")
-        || error.contains("websocket error")
-        || error.contains("reset by peer")
-        || error.contains("not connected")
-}
-
-fn should_retry_analysis(attempt: usize, error: &str) -> bool {
-    attempt == 0 && should_invalidate_connection(error)
 }
 
 fn should_reuse_existing_listener(mcp_required: bool) -> bool {
@@ -174,6 +163,22 @@ struct JsonRpcError {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextDocumentContentChangeEvent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<Range>,
+    #[serde(rename = "rangeLength", skip_serializing_if = "Option::is_none")]
+    pub range_length: Option<u32>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentState {
+    pub uri: String,
+    pub text: String,
+    pub version: i32,
+}
+
 /// LSP Diagnostic
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
@@ -202,27 +207,79 @@ pub struct Location {
     pub range: Range,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientState {
+    Disconnected,
+    Connecting,
+    Ready,
+}
+
 /// BSL Language Server client
 pub struct BSLClient {
-    ws: Option<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
+    ws_tx: Option<mpsc::Sender<String>>,
     server_process: Option<Child>,
     request_id: AtomicI32,
     capabilities: Option<serde_json::Value>,
     workspace_root: Option<String>,
     actual_port: Option<u16>,
     mcp_enabled: bool,
+    
+    app_handle: Option<AppHandle>,
+    documents: Arc<StdMutex<HashMap<String, DocumentState>>>,
+    pending_requests: Arc<StdMutex<HashMap<i32, oneshot::Sender<JsonRpcResponse>>>>,
+    pending_diagnostics: Arc<StdMutex<HashMap<String, oneshot::Sender<Vec<Diagnostic>>>>>,
+
+    state_tx: tokio::sync::watch::Sender<ClientState>,
+    state_rx: tokio::sync::watch::Receiver<ClientState>,
 }
 
 impl BSLClient {
     pub fn new() -> Self {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(ClientState::Disconnected);
         Self {
-            ws: None,
+            ws_tx: None,
             server_process: None,
             request_id: AtomicI32::new(1),
             capabilities: None,
             workspace_root: None,
             actual_port: None,
             mcp_enabled: false,
+            app_handle: None,
+            documents: Arc::new(StdMutex::new(HashMap::new())),
+            pending_requests: Arc::new(StdMutex::new(HashMap::new())),
+            pending_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
+            state_tx,
+            state_rx,
+        }
+    }
+
+    /// Ensure BSL LS is Ready
+    pub async fn ensure_ready(&self) -> Result<(), String> {
+        let mut rx = self.state_rx.clone();
+        let timeout = tokio::time::Duration::from_secs(10);
+        
+        let result = tokio::time::timeout(timeout, async {
+            while *rx.borrow_and_update() != ClientState::Ready {
+                rx.changed().await.unwrap();
+            }
+        }).await;
+        
+        result.map_err(|_| "Timeout waiting for BSL LS to become Ready".to_string())
+    }
+
+    pub fn set_app_handle(&mut self, app_handle: AppHandle) {
+        self.app_handle = Some(app_handle);
+    }
+
+    fn set_state(&self, new_state: ClientState) {
+        let _ = self.state_tx.send(new_state);
+        if let Some(app) = &self.app_handle {
+            let payload = match new_state {
+                ClientState::Disconnected => "disconnected",
+                ClientState::Connecting => "connecting",
+                ClientState::Ready => "ready",
+            };
+            let _ = app.emit("bsl-ls-state", payload);
         }
     }
 
@@ -250,7 +307,7 @@ impl BSLClient {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.ws.is_some()
+        self.ws_tx.is_some()
     }
 
     fn official_mcp_port(&self) -> Option<u16> {
@@ -270,20 +327,6 @@ impl BSLClient {
 
     pub fn active_port(&self) -> Option<u16> {
         self.actual_port
-    }
-
-    pub fn temporary_document_uri(&self, prefix: &str) -> String {
-        let fallback_workspace = crate::settings::get_settings_dir().join("bsl-workspace");
-        let workspace = self
-            .workspace_root
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or(fallback_workspace);
-        let sequence = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        temporary_document_uri(&workspace, prefix, sequence)
     }
 
     /// Start the BSL Language Server
@@ -371,12 +414,24 @@ impl BSLClient {
         });
 
         self.server_process = Some(child);
+        
+        // Wait for server to actually start listening
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if Self::is_port_listening(port) {
+                crate::app_log!("[BSL LS] Port {} is now listening", port);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         crate::app_log!("BSL LS process spawned");
         Ok(())
     }
 
     /// Connect to the BSL Language Server
     pub async fn connect(&mut self) -> Result<(), String> {
+        self.set_state(ClientState::Connecting);
         let port = self
             .actual_port
             .unwrap_or_else(|| load_settings().bsl_server.websocket_port);
@@ -396,7 +451,84 @@ impl BSLClient {
             match connect_timeout {
                 Ok(Ok((ws_stream, _))) => {
                     crate::app_log!("[BSL LS] WebSocket connected successfully to {}", url);
-                    self.ws = Some(Mutex::new(ws_stream));
+                    
+                    let (mut write, mut read) = ws_stream.split();
+                    let (tx, mut rx) = mpsc::channel::<String>(100);
+                    self.ws_tx = Some(tx.clone());
+
+                    let pending_reqs = self.pending_requests.clone();
+                    let pending_diags = self.pending_diagnostics.clone();
+                    let app_handle = self.app_handle.clone();
+
+                    tokio::spawn(async move {
+                        while let Some(msg) = rx.recv().await {
+                            if write.send(Message::Text(msg)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    let loop_tx = tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(Ok(Message::Text(text))) = read.next().await {
+                            if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
+                                if response.id.is_some() && response.method.is_none() {
+                                    let id = response.id.unwrap();
+                                    let req_tx = {
+                                        let mut reqs = pending_reqs.lock().unwrap();
+                                        reqs.remove(&id)
+                                    };
+                                    if let Some(req_tx) = req_tx {
+                                        let _ = req_tx.send(response);
+                                    }
+                                } else if let Some(method) = &response.method {
+                                    if method == "textDocument/publishDiagnostics" {
+                                        if let Some(params) = response.params {
+                                            if let Some(uri) = params.get("uri").and_then(|u| u.as_str()) {
+                                                let items = params.get("diagnostics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                                                let diagnostics: Vec<Diagnostic> = items.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+                                                
+                                                let diag_tx = {
+                                                    let mut diags = pending_diags.lock().unwrap();
+                                                    diags.remove(uri)
+                                                };
+                                                
+                                                if let Some(diag_tx) = diag_tx {
+                                                    let _ = diag_tx.send(diagnostics);
+                                                } else if let Some(app) = &app_handle {
+                                                    let flat: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+                                                        serde_json::json!({
+                                                            "line": d.range.start.line,
+                                                            "character": d.range.start.character,
+                                                            "message": d.message,
+                                                            "severity": match d.severity {
+                                                                Some(1) => "error",
+                                                                Some(2) => "warning",
+                                                                Some(3) => "info",
+                                                                _ => "hint",
+                                                            }
+                                                        })
+                                                    }).collect();
+                                                    let payload = serde_json::json!({
+                                                        "uri": uri,
+                                                        "diagnostics": flat
+                                                    });
+                                                    let _ = app.emit("bsl-diagnostics", payload);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        if let Some(id) = response.id {
+                                            let _ = Self::handle_server_request_async(&loop_tx, method, id, &response.params).await;
+                                        } else if method == "window/logMessage" {
+                                            let _ = Self::handle_server_request_async(&loop_tx, method, 0, &response.params).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+
                     break;
                 }
                 Ok(Err(e)) => {
@@ -450,9 +582,9 @@ impl BSLClient {
             "textDocument": {
                 "synchronization": {
                     "dynamicRegistration": true,
-                    "willSave": true,
+                    "willSave": false,
                     "willSaveWaitUntil": false,
-                    "didSave": true
+                    "didSave": false
                 },
                 "diagnostic": { "dynamicRegistration": true },
                 "formatting": { "dynamicRegistration": true },
@@ -550,50 +682,18 @@ impl BSLClient {
             self.capabilities.as_ref().map(|c| c.to_string())
         );
 
-        // Notify initialized and pump server messages for 1 second
-        {
-            let ws_ref = self.ws.as_ref().ok_or("Not connected")?;
-            let mut ws = ws_ref.lock().await;
+        // Send initialized notification
+        let _ = self.send_notification("initialized", serde_json::json!({})).await;
 
-            let init_notif = JsonRpcRequest {
-                jsonrpc: "2.0".to_string(),
-                id: None,
-                method: "initialized".to_string(),
-                params: serde_json::json!({}),
-            };
-            if let Ok(msg) = serde_json::to_string(&init_notif) {
-                ws.send(Message::Text(msg))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                crate::app_log!("[BSL LS] Sent 'initialized' notification");
-            }
+        self.set_state(ClientState::Ready);
 
-            // Quick drain for server-initiated requests (configuration, etc.)
-            let drain_duration = tokio::time::Duration::from_millis(800);
-            let drain_timeout = tokio::time::sleep(drain_duration);
-            tokio::pin!(drain_timeout);
-            loop {
-                tokio::select! {
-                    msg = ws.next() => {
-                        match msg {
-                            Some(Ok(Message::Text(text))) => {
-                                crate::app_log!("[BSL LS] <<< Initial drain msg: {}", text);
-                                if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&text) {
-                                    if resp.method.is_some() && resp.id.is_some() {
-                                        let method = resp.method.as_ref().unwrap();
-                                        let id = resp.id.unwrap();
-                                        crate::app_log!("[BSL LS] Handling server request during drain: {} id={}", method, id);
-                                        Self::handle_server_request(&mut ws, method, id, &resp.params).await;
-                                        continue;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ = &mut drain_timeout => break,
-                }
-            }
+        // Automatically open all documents from cache
+        let docs = {
+            let docs_guard = self.documents.lock().unwrap();
+            docs_guard.values().cloned().collect::<Vec<_>>()
+        };
+        for doc in docs {
+            let _ = self.bsl_did_open(doc.uri, doc.text, doc.version).await;
         }
 
         Ok(())
@@ -601,7 +701,7 @@ impl BSLClient {
 
     /// Send a JSON-RPC response to a server-initiated request
     async fn send_response_raw(
-        ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+        tx: &mpsc::Sender<String>,
         id: i32,
         result: serde_json::Value,
     ) -> Result<(), String> {
@@ -612,12 +712,12 @@ impl BSLClient {
         });
         let msg = serde_json::to_string(&response).map_err(|e| e.to_string())?;
         crate::app_log!("[BSL LS] >>> Sending response for id={}: {}", id, msg);
-        ws.send(Message::Text(msg)).await.map_err(|e| e.to_string())
+        tx.send(msg).await.map_err(|e| e.to_string())
     }
 
     /// Handle server-initiated requests
-    async fn handle_server_request(
-        ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    async fn handle_server_request_async(
+        tx: &mpsc::Sender<String>,
         method: &str,
         id: i32,
         _params: &Option<serde_json::Value>,
@@ -636,10 +736,10 @@ impl BSLClient {
                         }
                     }
                 }]);
-                let _ = Self::send_response_raw(ws, id, config).await;
+                let _ = Self::send_response_raw(tx, id, config).await;
             }
             "client/registerCapability" => {
-                let _ = Self::send_response_raw(ws, id, serde_json::json!({})).await;
+                let _ = Self::send_response_raw(tx, id, serde_json::json!({})).await;
             }
             "window/logMessage" => {
                 if let Some(params) = _params {
@@ -663,13 +763,13 @@ impl BSLClient {
                     } else {
                         serde_json::json!("Да")
                     };
-                    let _ = Self::send_response_raw(ws, id, serde_json::json!({ "title": result }))
+                    let _ = Self::send_response_raw(tx, id, serde_json::json!({ "title": result }))
                         .await;
                 }
             }
             _ => {
                 crate::app_log!("[BSL LS] Warning: Unhandled server request: {}", method);
-                let _ = Self::send_response_raw(ws, id, serde_json::Value::Null).await;
+                let _ = Self::send_response_raw(tx, id, serde_json::Value::Null).await;
             }
         }
     }
@@ -680,8 +780,7 @@ impl BSLClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let ws = self.ws.as_ref().ok_or("Not connected")?;
-        let mut ws = ws.lock().await;
+        let tx = self.ws_tx.as_ref().ok_or("Not connected")?;
 
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let request = JsonRpcRequest {
@@ -692,69 +791,43 @@ impl BSLClient {
         };
 
         let msg = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+        
+        let (resp_tx, resp_rx) = oneshot::channel();
+        {
+            let mut reqs = self.pending_requests.lock().unwrap();
+            reqs.insert(id, resp_tx);
+        }
+
         crate::app_log!("[BSL LS] >>> Request {}: {}", method, msg);
-        ws.send(Message::Text(msg))
-            .await
-            .map_err(|e| format!("WebSocket error: {e}"))?;
+        tx.send(msg)
+        .await
+        .map_err(|e| format!("WebSocket error: {e}"))?;
 
         // Wait for response with overall timeout
         let request_timeout = request_timeout_for(method);
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < request_timeout {
-            let next_msg_timeout = tokio::time::timeout(Duration::from_secs(5), ws.next());
-
-            match next_msg_timeout.await {
-                Ok(Some(Ok(Message::Text(text)))) => {
-                    crate::app_log!("[BSL LS] <<< Message: {}", text);
-                    if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
-                        // Server request
-                        if response.method.is_some() && response.id.is_some() {
-                            let method = response.method.as_ref().unwrap();
-                            let srv_id = response.id.unwrap();
-                            Self::handle_server_request(&mut ws, method, srv_id, &response.params)
-                                .await;
-                            continue;
-                        }
-
-                        // Response for our request
-                        if response.id == Some(id) {
-                            if let Some(error) = response.error {
-                                crate::app_log!("[BSL LS] LSP error response: {:?}", error);
-                                return Err(format!("LSP error {}: {}", error.code, error.message));
-                            }
-                            return Ok(response.result.unwrap_or(serde_json::Value::Null));
-                        }
-                    }
+        match tokio::time::timeout(request_timeout, resp_rx).await {
+            Ok(Ok(response)) => {
+                if let Some(error) = response.error {
+                    crate::app_log!("[BSL LS] LSP error response: {:?}", error);
+                    return Err(format!("LSP error {}: {}", error.code, error.message));
                 }
-                Ok(Some(Err(e))) => {
-                    crate::app_log!("[BSL LS] WebSocket error: {}", e);
-                    return Err(format!("WebSocket error: {e}"));
-                }
-                Ok(None) => {
-                    crate::app_log!("[BSL LS] WebSocket closed while waiting for response");
-                    return Err("Connection closed".to_string());
-                }
-                Err(_) => {
-                    // next_msg_timeout triggered
-                    crate::app_log!(
-                        "[BSL LS] No message for 5s (total elapsed: {:?})",
-                        start.elapsed()
-                    );
-                }
-                _ => {}
+                Ok(response.result.unwrap_or(serde_json::Value::Null))
+            }
+            Ok(Err(_)) => Err("Response channel closed".to_string()),
+            Err(_) => {
+                let mut reqs = self.pending_requests.lock().unwrap();
+                reqs.remove(&id);
+                crate::app_log!(
+                    "[BSL LS] TIMEOUT ({:?}) waiting for response to '{}' request",
+                    request_timeout,
+                    method,
+                );
+                Err(format!(
+                    "Timeout waiting for BSL LS response to '{}'",
+                     method
+                ))
             }
         }
-
-        crate::app_log!(
-            "[BSL LS] TIMEOUT ({:?}) waiting for response to '{}' request",
-            request_timeout,
-            method,
-        );
-        Err(format!(
-            "Timeout waiting for BSL LS response to '{}'",
-            method
-        ))
     }
 
     /// Send JSON-RPC notification
@@ -763,8 +836,7 @@ impl BSLClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<(), String> {
-        let ws = self.ws.as_ref().ok_or("Not connected")?;
-        let mut ws = ws.lock().await;
+        let tx = self.ws_tx.as_ref().ok_or("Not connected")?;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -774,214 +846,254 @@ impl BSLClient {
         };
 
         let msg = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        ws.send(Message::Text(msg))
-            .await
-            .map_err(|e| format!("WebSocket error: {e}"))?;
+        crate::app_log!("[BSL LS] >>> Notification {}: {}", method, msg);
+        tx.send(msg)
+        .await
+        .map_err(|e| format!("WebSocket error: {e}"))?;
 
         Ok(())
     }
 
-    /// Analyze code and return diagnostics
-    pub async fn analyze_code(&mut self, code: &str, uri: &str) -> Result<Vec<Diagnostic>, String> {
-        for attempt in 0..=1 {
-            match self.analyze_code_once(code, uri).await {
-                Ok(diagnostics) => return Ok(diagnostics),
-                Err(error) if should_retry_analysis(attempt, &error) => {
-                    crate::app_log!(
-                        force: true,
-                        "[BSL LS] Analysis transport failed; reconnecting before one retry: {}",
-                        error
-                    );
-                    self.recover_connection().await?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err("BSL Language Server analysis retry exhausted".to_string())
-    }
-
-    async fn analyze_code_once(&self, code: &str, uri: &str) -> Result<Vec<Diagnostic>, String> {
-        crate::app_log!("[BSL LS] Starting analysis for URI: {}", uri);
-
-        // Send didOpen notification
-        self.send_notification(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": "bsl",
-                    "version": 1,
-                    "text": code
-                }
-            }),
-        )
-        .await?;
-
-        // Try Pull-Model Diagnostics (LSP 3.17+)
+    async fn fetch_pull_diagnostics(&self, uri: &str) {
         let supports_pull_diagnostics = self
             .capabilities
             .as_ref()
             .and_then(|c| c.get("diagnosticProvider"))
             .is_some();
 
-        if supports_pull_diagnostics {
-            crate::app_log!("[BSL LS] Using pull-model diagnostics");
-            let result = self
-                .send_request(
-                    "textDocument/diagnostic",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri
-                        }
-                    }),
-                )
-                .await;
-
-            // Always close the temporary document, including request timeout/error paths.
-            let close_result = self
-                .send_notification(
-                    "textDocument/didClose",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri
-                        }
-                    }),
-                )
-                .await;
-
-            let result = match (result, close_result) {
-                (Ok(result), Ok(())) => result,
-                (Err(error), _) => return Err(error),
-                (Ok(_), Err(error)) => return Err(error),
-            };
-
-            if let Some(items) = result.get("items").and_then(|v| v.as_array()) {
-                crate::app_log!("[BSL LS] Pull diagnostics raw: {:?}", items);
-                let diagnostics: Vec<Diagnostic> = items
-                    .iter()
-                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                    .collect();
-                crate::app_log!("[BSL LS] Parsed diagnostics count: {}", diagnostics.len());
-                return Ok(diagnostics);
-            } else {
-                crate::app_log!("[BSL LS] Pull diagnostics 'items' field missing or not array");
-            }
+        if !supports_pull_diagnostics {
+            return;
         }
 
-        // Fallback or parallel: Listen for publishDiagnostics
-        crate::app_log!("[BSL LS] Falling back to publishDiagnostics listener");
-        let ws = self.ws.as_ref().ok_or("Not connected")?;
-        let mut ws = ws.lock().await;
-
-        // Wait up to 5 seconds for diagnostics (increased from 2s)
-        let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(5));
-        tokio::pin!(timeout);
-
-        loop {
-            tokio::select! {
-                msg = ws.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&text) {
-                                // Server request
-                                if response.method.is_some() && response.id.is_some() {
-                                    let method = response.method.as_ref().unwrap();
-                                    let srv_id = response.id.unwrap();
-                                    Self::handle_server_request(&mut ws, method, srv_id, &response.params).await;
-                                    continue;
-                                }
-
-                                // Check if it is publishDiagnostics
-                                if let Some(method) = &response.method {
-                                    if method == "textDocument/publishDiagnostics" {
-                                        crate::app_log!("[BSL LS] Received publishDiagnostics");
-                                        if let Some(params) = response.params {
-                                            // Ensure it's for our URI
-                                            if let Some(diag_uri) = params.get("uri").and_then(|u| u.as_str()) {
-                                                crate::app_log!("[BSL LS] Diagnostics URI: {}, Expected: {}", diag_uri, uri);
-
-                                                // Normalize check: BSL LS might add drive letter
-                                                let filename = uri.split('/').last().unwrap_or(uri);
-
-                                                if diag_uri == uri || diag_uri.ends_with(filename) {
-                                                    let items = params.get("diagnostics")
-                                                        .and_then(|v| v.as_array())
-                                                        .cloned()
-                                                        .unwrap_or_default();
-
-                                                    crate::app_log!("[BSL LS] Found {} diagnostics", items.len());
-
-                                                    let diagnostics: Vec<Diagnostic> = items
-                                                        .into_iter()
-                                                        .filter_map(|v| serde_json::from_value(v).ok())
-                                                        .collect();
-
-                                                    // Close document
-                                                    let close_req = JsonRpcRequest {
-                                                        jsonrpc: "2.0".to_string(),
-                                                        id: None,
-                                                        method: "textDocument/didClose".to_string(),
-                                                        params: serde_json::json!({
-                                                            "textDocument": { "uri": uri }
-                                                        }),
-                                                    };
-                                                    if let Ok(msg) = serde_json::to_string(&close_req) {
-                                                         let _ = ws.send(Message::Text(msg)).await;
-                                                         crate::app_log!("[BSL LS] Sent didClose (manual)");
-                                                    }
-
-                                                    return Ok(diagnostics);
-                                                }
-                                            }
-                                        }
-                                    } else if method == "window/logMessage" {
-                                        if let Some(params) = &response.params {
-                                            let msg_text = params.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                                            crate::app_log!("[BSL LS][server] {}", msg_text);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Some(Err(e)) => {
-                            crate::app_log!("[BSL LS] Error reading message: {}", e);
-                            return Err(format!("WebSocket error: {e}"));
-                        }
-                        None => {
-                            crate::app_log!("[BSL LS] Connection closed by server");
-                            return Err("Connection closed".to_string());
-                        }
-                        _ => {
-                            // Ignore other messages (Ping/Pong/Binary)
-                        }
+        crate::app_log!("[BSL LS] Using pull-model diagnostics");
+        let result = self
+            .send_request(
+                "textDocument/diagnostic",
+                serde_json::json!({
+                    "textDocument": {
+                        "uri": uri
                     }
+                }),
+            )
+            .await;
+
+        match result {
+            Ok(result) => {
+                let diagnostics: Vec<Diagnostic> = result
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                crate::app_log!("[BSL LS] Returned {} diagnostics for {}", diagnostics.len(), uri);
+
+                let diag_tx = {
+                    let mut diags = self.pending_diagnostics.lock().unwrap();
+                    diags.remove(uri)
+                };
+
+                if let Some(diag_tx) = diag_tx {
+                    let _ = diag_tx.send(diagnostics);
+                } else if let Some(app) = &self.app_handle {
+                    let flat: Vec<serde_json::Value> = diagnostics
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "line": d.range.start.line,
+                                "character": d.range.start.character,
+                                "message": d.message,
+                                "severity": match d.severity {
+                                    Some(1) => "error",
+                                    Some(2) => "warning",
+                                    Some(3) => "info",
+                                    _ => "hint",
+                                }
+                            })
+                        })
+                        .collect();
+
+                    let payload = serde_json::json!({
+                        "uri": uri,
+                        "diagnostics": flat
+                    });
+
+                    let _ = app.emit("bsl-diagnostics", payload);
                 }
-                _ = &mut timeout => {
-                    crate::app_log!("[BSL LS] Timeout waiting for diagnostics");
-                    // Close document even on timeout (manual send)
-                    let close_req = JsonRpcRequest {
-                        jsonrpc: "2.0".to_string(),
-                        id: None,
-                        method: "textDocument/didClose".to_string(),
-                        params: serde_json::json!({
-                            "textDocument": {
-                                "uri": uri
-                            }
-                        }),
-                    };
-                    if let Ok(msg) = serde_json::to_string(&close_req) {
-                            let _ = ws.send(Message::Text(msg)).await;
-                    }
-
-                    return Ok(Vec::new());
+            }
+            Err(e) => {
+                crate::app_log!("[BSL LS] Error fetching pull diagnostics for {}: {}", uri, e);
+                let diag_tx = {
+                    let mut diags = self.pending_diagnostics.lock().unwrap();
+                    diags.remove(uri)
+                };
+                if let Some(diag_tx) = diag_tx {
+                    let _ = diag_tx.send(vec![]);
                 }
             }
         }
     }
 
+    pub async fn bsl_did_open(&self, uri: String, text: String, version: i32) -> Result<(), String> {
+        self.ensure_ready().await?;
+        {
+            let mut docs = self.documents.lock().unwrap();
+            docs.insert(uri.clone(), DocumentState {
+                uri: uri.clone(),
+                text: text.clone(),
+                version,
+            });
+        }
+        self.send_notification(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": &uri,
+                    "languageId": "bsl",
+                    "version": version,
+                    "text": text
+                }
+            }),
+        )
+        .await?;
+
+        self.fetch_pull_diagnostics(&uri).await;
+        Ok(())
+    }
+
+    pub fn update_document_text(doc: &mut DocumentState, text: String) -> i32 {
+        doc.version += 1;
+        doc.text = text;
+        doc.version
+    }
+
+    pub async fn bsl_did_change(&self, uri: String, text: String, _frontend_version: i32) -> Result<(), String> {
+        self.ensure_ready().await?;
+
+        let new_version = {
+            let mut docs = self.documents.lock().unwrap();
+            if let Some(doc) = docs.get_mut(&uri) {
+                Self::update_document_text(doc, text.clone())
+            } else {
+                docs.insert(uri.clone(), DocumentState {
+                    uri: uri.clone(),
+                    text: text.clone(),
+                    version: _frontend_version,
+                });
+                _frontend_version
+            }
+        };
+
+        // Full-sync: send a single change event with only the full text (no range).
+        let change = TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text,
+        };
+
+        self.send_notification(
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": &uri,
+                    "version": new_version
+                },
+                "contentChanges": [change]
+            }),
+        )
+        .await?;
+
+        self.fetch_pull_diagnostics(&uri).await;
+        Ok(())
+    }
+
+    pub async fn bsl_did_close(&self, uri: String) -> Result<(), String> {
+        {
+            let mut docs = self.documents.lock().unwrap();
+            docs.remove(&uri);
+        }
+        self.send_notification(
+            "textDocument/didClose",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri
+                }
+            }),
+        )
+        .await
+    }
+
+    /// Analyze code and return diagnostics
+    pub async fn analyze_code(&self, code: &str, suffix: &str) -> Result<Vec<Diagnostic>, String> {
+        self.ensure_ready().await?;
+        let fallback_workspace = crate::settings::get_settings_dir().join("bsl-workspace");
+        let workspace = self
+            .workspace_root
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or(&fallback_workspace);
+        let sequence = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let uri = temporary_document_uri(workspace, suffix, sequence as u128);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut diags = self.pending_diagnostics.lock().unwrap();
+            diags.insert(uri.clone(), tx);
+        }
+
+        crate::app_log!("[BSL LS] Starting analysis for URI: {}", uri);
+
+        // Send didOpen notification
+        if let Err(e) = self.send_notification(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": &uri,
+                    "languageId": "bsl",
+                    "version": 1,
+                    "text": code
+                }
+            }),
+        )
+        .await {
+            let mut diags = self.pending_diagnostics.lock().unwrap();
+            diags.remove(&uri);
+            return Err(e);
+        }
+
+        self.fetch_pull_diagnostics(&uri).await;
+
+        let result = match tokio::time::timeout(tokio::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(diags)) => Ok(diags),
+            _ => {
+                let mut diags = self.pending_diagnostics.lock().unwrap();
+                diags.remove(&uri);
+                Ok(vec![])
+            }
+        };
+
+        // Always close the temporary document, including request timeout/error paths.
+        let _ = self.send_notification(
+            "textDocument/didClose",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": &uri
+                }
+            }),
+        ).await;
+
+        result
+    }
+
     /// Format code
-    pub async fn format_code(&self, code: &str, uri: &str) -> Result<String, String> {
+    pub async fn format_code(&self, code: &str, suffix: &str) -> Result<String, String> {
         // Guard check
         let can_format = self
             .capabilities
@@ -994,12 +1106,25 @@ impl BSLClient {
             return Err("BSL LS does not support formatting for this document".to_string());
         }
 
+        self.ensure_ready().await?;
+        let fallback_workspace = crate::settings::get_settings_dir().join("bsl-workspace");
+        let workspace = self
+            .workspace_root
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or(&fallback_workspace);
+        let sequence = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let uri = temporary_document_uri(workspace, suffix, sequence as u128);
+
         // Open document
         self.send_notification(
             "textDocument/didOpen",
             serde_json::json!({
                 "textDocument": {
-                    "uri": uri,
+                    "uri": &uri,
                     "languageId": "bsl",
                     "version": 1,
                     "text": code
@@ -1007,14 +1132,14 @@ impl BSLClient {
             }),
         )
         .await?;
-
+        
         // Request formatting
         let result = self
             .send_request(
                 "textDocument/formatting",
                 serde_json::json!({
                     "textDocument": {
-                        "uri": uri
+                        "uri": &uri
                     },
                     "options": {
                         "tabSize": 4,
@@ -1023,12 +1148,13 @@ impl BSLClient {
                 }),
             )
             .await?;
+
         // Close document
         self.send_notification(
             "textDocument/didClose",
             serde_json::json!({
                 "textDocument": {
-                    "uri": uri
+                    "uri": &uri
                 }
             }),
         )
@@ -1042,7 +1168,7 @@ impl BSLClient {
                 }
             }
         }
-
+        
         // No edits, return original
         Ok(code.to_string())
     }
@@ -1201,63 +1327,25 @@ impl BSLClient {
     }
 
     fn invalidate_connection(&mut self) {
-        self.ws = None;
+        self.ws_tx = None;
         self.capabilities = None;
         self.workspace_root = None;
-    }
-
-    async fn recover_connection(&mut self) -> Result<(), String> {
-        self.invalidate_connection();
-
-        if let Some(child) = self.server_process.as_mut() {
-            if child
-                .try_wait()
-                .map_err(|error| format!("Failed to inspect BSL LS process: {error}"))?
-                .is_some()
-            {
-                self.server_process = None;
-            }
-        }
-
-        let port = self
-            .actual_port
-            .unwrap_or_else(|| load_settings().bsl_server.websocket_port);
-        if self.server_process.is_none() && !Self::is_port_listening(port) {
-            self.start_server()?;
-        }
-
-        match self.connect().await {
-            Ok(()) => Ok(()),
-            Err(first_error) => {
-                crate::app_log!(
-                    force: true,
-                    "[BSL LS] Reconnect failed; restarting owned server: {}",
-                    first_error
-                );
-                self.stop();
-                self.start_server()?;
-                self.connect().await.map_err(|second_error| {
-                    format!(
-                        "Failed to recover BSL Language Server connection: {first_error}; restart error: {second_error}"
-                    )
-                })
-            }
-        }
+        self.set_state(ClientState::Disconnected);
     }
 
     /// Stop the server and clear LSP session state.
     pub fn stop(&mut self) {
         let owns_process = self.server_process.is_some();
-        let ws = self.ws.take();
+        let ws_tx = self.ws_tx.take();
         self.capabilities = None;
         self.workspace_root = None;
         self.actual_port = None;
         self.mcp_enabled = false;
+        self.set_state(ClientState::Disconnected);
 
         if owns_process {
-            if let Some(ws_mutex) = ws {
+            if let Some(tx) = ws_tx {
                 tokio::spawn(async move {
-                    let mut ws = ws_mutex.lock().await;
                     let exit_notif = JsonRpcRequest {
                         jsonrpc: "2.0".to_string(),
                         id: None,
@@ -1265,7 +1353,7 @@ impl BSLClient {
                         params: serde_json::json!({}),
                     };
                     if let Ok(msg) = serde_json::to_string(&exit_notif) {
-                        let _ = ws.send(Message::Text(msg)).await;
+                        let _ = tx.send(msg).await;
                     }
                 });
             }
@@ -1517,27 +1605,27 @@ impl InternalMcpHandler for BSLMcpHandler {
                 let mut client = self.client.lock().await;
 
                 // Ensure server is started and connected
-                if !client.is_connected() {
-                    // Try to connect if server is likely running
-                    if let Err(e) = client.connect().await {
-                        // If connection fails, check if server needs to be started
-                        if client.server_process.is_none() {
-                            client.start_server()?;
+                ensure_bsl_connected(&mut client).await?;
+                
+                let diagnostics = client.analyze_code(code, "mcp-check-syntax").await?;
+                
+                let flat: Vec<serde_json::Value> = diagnostics.iter().map(|d| {
+                    serde_json::json!({
+                        "line": d.range.start.line,
+                        "character": d.range.start.character,
+                        "message": d.message,
+                        "severity": match d.severity {
+                            Some(1) => "error",
+                            Some(2) => "warning",
+                            Some(3) => "info",
+                            _ => "hint",
                         }
-                        client.connect().await.map_err(|e2| {
-                            format!(
-                                "BSL LS не запущен или недоступен: {}\nДоп. ошибка: {}",
-                                e, e2
-                            )
-                        })?;
-                    }
-                }
-
-                let uri = client.temporary_document_uri("mcp-check-syntax");
-                let diagnostics = client.analyze_code(code, &uri).await?;
+                    })
+                }).collect();
 
                 Ok(json!({
-                    "diagnostics": diagnostics,
+                    "success": flat.is_empty(),
+                    "diagnostics": flat,
                     "count": diagnostics.len()
                 }))
             }
@@ -1735,32 +1823,6 @@ mod tests {
     }
 
     #[test]
-    fn transport_failures_invalidate_lsp_connection() {
-        assert!(should_invalidate_connection(
-            "Timeout waiting for BSL LS response to 'textDocument/diagnostic'"
-        ));
-        assert!(should_invalidate_connection("Connection closed"));
-        assert!(should_invalidate_connection(
-            "WebSocket error: reset by peer"
-        ));
-        assert!(!should_invalidate_connection(
-            "LSP error -32602: invalid parameters"
-        ));
-    }
-
-    #[test]
-    fn analysis_retries_transport_failure_only_once() {
-        let timeout = "Timeout waiting for BSL LS response to 'textDocument/diagnostic'";
-
-        assert!(should_retry_analysis(0, timeout));
-        assert!(!should_retry_analysis(1, timeout));
-        assert!(!should_retry_analysis(
-            0,
-            "LSP error -32602: invalid parameters"
-        ));
-    }
-
-    #[test]
     fn official_mcp_uses_combined_server_endpoint() {
         assert_eq!(official_mcp_endpoint(8025), "http://127.0.0.1:8025/mcp");
     }
@@ -1879,5 +1941,52 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].description, "internal");
         assert_eq!(tools[1].name, "analyze_file");
+    }
+
+    #[test]
+    fn document_update_sets_text_and_increments_version() {
+        let mut doc = DocumentState {
+            uri: "test".to_string(),
+            version: 1,
+            text: "old text".to_string(),
+        };
+
+        BSLClient::update_document_text(&mut doc, "new text".to_string());
+        assert_eq!(doc.version, 2);
+        assert_eq!(doc.text, "new text");
+    }
+
+    #[tokio::test]
+    async fn pending_diagnostics_sender_is_fulfilled_when_channel_resolves() {
+        let client = BSLClient::new();
+        let uri = "file:///workspace/test.bsl";
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = client.pending_diagnostics.lock().unwrap();
+            pending.insert(uri.to_string(), tx);
+        }
+
+        let test_diag = Diagnostic {
+            range: Range {
+                start: Position { line: 5, character: 2 },
+                end: Position { line: 5, character: 10 },
+            },
+            severity: Some(1),
+            message: "Syntax error test".to_string(),
+            source: Some("bsl-language-server".to_string()),
+        };
+
+        // Simulate resolution
+        let diag_tx = {
+            let mut pending = client.pending_diagnostics.lock().unwrap();
+            pending.remove(uri)
+        };
+        assert!(diag_tx.is_some());
+        diag_tx.unwrap().send(vec![test_diag.clone()]).unwrap();
+
+        let received = rx.await.expect("channel should resolve");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].message, "Syntax error test");
+        assert_eq!(received[0].range.start.line, 5);
     }
 }

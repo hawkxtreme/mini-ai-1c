@@ -10,6 +10,7 @@ export interface CodeSidePanelProps {
     originalCode: string;
     modifiedCode: string;
     onModifiedCodeChange: (code: string) => void;
+    onDocumentChange?: (version: number, text: string) => void;
     diagnostics: BslDiagnostic[];
     onApply: () => void;
     isApplying: boolean;
