@@ -447,12 +447,16 @@ pub async fn fetch_models_from_api(
 
     // OpenAI/OpenRouter: { "data": [ { "id": "..." } ] }
     // Some proxies may include context_window or max_tokens.
+    // OpenRouter specifically reports it as `context_length` (top-level, per model) —
+    // see https://openrouter.ai/docs — without this field every OpenRouter model fell
+    // back to the 4096 default regardless of its real context size (#202).
     // LM Studio's /v1/models does NOT include context info — handled below via /api/v0/models.
     #[derive(Deserialize)]
     struct OpenAiModel {
         id: String,
         context_window: Option<u32>,
         max_tokens: Option<u32>,
+        context_length: Option<u32>,
     }
     #[derive(Deserialize)]
     struct OpenAiResponse {
@@ -468,7 +472,11 @@ pub async fn fetch_models_from_api(
         .data
         .into_iter()
         .map(|m| {
-            let cw = m.context_window.or(m.max_tokens).unwrap_or(4096);
+            let cw = m
+                .context_window
+                .or(m.max_tokens)
+                .or(m.context_length)
+                .unwrap_or(4096);
             Model {
                 id: m.id.clone(),
                 name: m.id.clone(),
