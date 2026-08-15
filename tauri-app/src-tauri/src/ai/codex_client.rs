@@ -465,6 +465,7 @@ pub async fn quick_codex_invoke(prompt: String) -> Result<String, String> {
     let (access_token, account_id) = resolve_codex_access_token(&profile.id).await?;
     let stream_timeout_secs = resolve_codex_stream_timeout_secs(profile.stream_timeout_secs);
     let messages = vec![ApiMessage {
+        reasoning_content: None,
         role: "user".to_string(),
         content: Some(prompt),
         tool_calls: None,
@@ -967,6 +968,7 @@ pub async fn stream_codex_completion(
     );
 
     Ok(ApiMessage {
+        reasoning_content: None,
         role: "assistant".to_string(),
         content: if full_content.is_empty() {
             None
@@ -1001,6 +1003,7 @@ mod tests {
     fn messages_to_codex_payload_promotes_system_messages_to_instructions() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "system".to_string(),
                 content: Some("system instructions".to_string()),
                 tool_calls: None,
@@ -1008,6 +1011,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "developer".to_string(),
                 content: Some("developer instructions".to_string()),
                 tool_calls: None,
@@ -1015,6 +1019,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "user".to_string(),
                 content: Some("user request".to_string()),
                 tool_calls: None,
@@ -1039,6 +1044,7 @@ mod tests {
     #[test]
     fn messages_to_codex_payload_uses_default_instructions_without_system_messages() {
         let messages = vec![ApiMessage {
+            reasoning_content: None,
             role: "user".to_string(),
             content: Some("hello".to_string()),
             tool_calls: None,
@@ -1057,6 +1063,7 @@ mod tests {
     fn messages_to_codex_payload_skips_orphan_assistant_tool_calls() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "user".to_string(),
                 content: Some("fix it".to_string()),
                 tool_calls: None,
@@ -1064,6 +1071,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: Some(vec![ToolCall {
@@ -1090,6 +1098,7 @@ mod tests {
     fn messages_to_codex_payload_keeps_matched_tool_call_pairs() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: Some(vec![ToolCall {
@@ -1105,6 +1114,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "tool".to_string(),
                 content: Some("{\"ok\":true}".to_string()),
                 tool_calls: None,
@@ -1158,6 +1168,7 @@ mod tests {
         profile.model = "codex-mini-latest".to_string();
 
         let messages = vec![ApiMessage {
+            reasoning_content: None,
             role: "user".to_string(),
             content: Some("describe this method".to_string()),
             tool_calls: None,

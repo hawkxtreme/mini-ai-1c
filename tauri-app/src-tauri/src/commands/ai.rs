@@ -479,6 +479,7 @@ pub async fn stream_chat(
                 tool_calls,
                 tool_call_id: m.tool_call_id,
                 name: m.name,
+                reasoning_content: None,
             }
         })
         .collect();
@@ -521,6 +522,7 @@ pub async fn stream_chat(
                     let tool_name = "check_bsl_syntax";
 
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "assistant".to_string(),
                         content: None,
                         tool_calls: Some(vec![tool_call]),
@@ -609,6 +611,7 @@ pub async fn stream_chat(
                     );
 
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "tool".to_string(),
                         content: Some(tool_result),
                         tool_call_id: Some(tool_call_id),
@@ -692,6 +695,7 @@ pub async fn stream_chat(
                     crate::app_log!("[AI][LOOP] Tool calls rejected by user");
                     for tool_call in &tool_calls_limited {
                         api_messages.push(ApiMessage {
+                            reasoning_content: None,
                             role: "tool".to_string(),
                             content: Some("Error: Action rejected by user".to_string()),
                             tool_call_id: Some(tool_call.id.clone()),
@@ -833,6 +837,7 @@ pub async fn stream_chat(
                         );
                     }
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "tool".to_string(),
                         content: Some(tool_result),
                         tool_call_id: Some(tool_call.id.clone()),
@@ -850,6 +855,7 @@ pub async fn stream_chat(
                         interrupt_msg
                     );
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "user".to_string(),
                         content: Some(wrapped),
                         tool_calls: None,
@@ -869,6 +875,7 @@ pub async fn stream_chat(
                     asked_for_text_response = true;
                     let _ = task_app_handle.emit("chat-status", "Запрашиваю текстовый ответ...");
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "user".to_string(),
                         content: Some("Напиши свой ответ текстом.".to_string()),
                         tool_calls: None,
@@ -877,11 +884,13 @@ pub async fn stream_chat(
                     });
                     continue;
                 } else {
-                    // Model returned empty response twice — likely context too large
-                    crate::app_log!("[AI] Model returned empty response twice (context ~{}t). Emitting fallback.",
-                        api_messages.iter().map(|m| m.content.as_deref().unwrap_or("").len() / 4).sum::<usize>());
+                    // Model returned no content and no usable reasoning twice in a row.
+                    crate::app_log!(
+                        "[AI] Model returned empty response twice (history ~{}t). Emitting fallback.",
+                        estimate_tokens(&api_messages)
+                    );
                     let _ = task_app_handle.emit("chat-chunk",
-                        "\n\n> **[Система]** Модель не смогла сформировать ответ (вероятно, контекст диалога слишком велик). Попробуйте начать новый чат или сократить историю.");
+                        "\n\n> **[Система]** Модель вернула пустой ответ дважды подряд (без текста и без размышлений). Попробуйте повторить запрос, сменить модель или начать новый чат.");
                     break;
                 }
             }
@@ -897,6 +906,7 @@ pub async fn stream_chat(
                         interrupt_msg
                     );
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "user".to_string(),
                         content: Some(wrapped),
                         tool_calls: None,
@@ -1006,6 +1016,7 @@ pub async fn stream_chat(
                         interrupt_msg
                     );
                     api_messages.push(ApiMessage {
+                        reasoning_content: None,
                         role: "user".to_string(),
                         content: Some(wrapped),
                         tool_calls: None,
@@ -1025,6 +1036,7 @@ pub async fn stream_chat(
                     interrupt_msg
                 );
                 api_messages.push(ApiMessage {
+                    reasoning_content: None,
                     role: "user".to_string(),
                     content: Some(wrapped),
                     tool_calls: None,
@@ -1106,6 +1118,7 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
 
     let summarize_messages = vec![
         ApiMessage {
+            reasoning_content: None,
             role: "system".to_string(),
             content: Some(system_prompt.to_string()),
             tool_calls: None,
@@ -1113,6 +1126,7 @@ pub async fn compact_context(messages_json: String) -> Result<String, String> {
             name: None,
         },
         ApiMessage {
+            reasoning_content: None,
             role: "user".to_string(),
             content: Some(format!(
                 "Сожми следующий диалог в краткий конспект:\n\n{}",
@@ -1300,6 +1314,7 @@ mod tests {
     #[test]
     fn empty_assistant_message_is_not_meaningful_for_history() {
         let message = ApiMessage {
+            reasoning_content: None,
             role: "assistant".to_string(),
             content: None,
             tool_calls: None,
@@ -1313,6 +1328,7 @@ mod tests {
     #[test]
     fn assistant_tool_call_message_is_meaningful_for_history_even_without_content() {
         let message = ApiMessage {
+            reasoning_content: None,
             role: "assistant".to_string(),
             content: None,
             tool_calls: Some(vec![crate::ai::models::ToolCall {
@@ -1388,6 +1404,7 @@ mod tests {
     fn issue_186_extracts_bsl_blocks_from_latest_user_message() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "user".to_string(),
                 content: Some("```bsl\nПроцедура СтарыйКод()\nКонецПроцедуры\n```".to_string()),
                 tool_calls: None,
@@ -1395,6 +1412,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "assistant".to_string(),
                 content: Some("ответ".to_string()),
                 tool_calls: None,
@@ -1402,6 +1420,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "user".to_string(),
                 content: Some("```bsl\nПроцедура НовыйКод()\nКонецПроцедуры\n```".to_string()),
                 tool_calls: None,
