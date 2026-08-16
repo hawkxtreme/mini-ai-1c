@@ -28,6 +28,24 @@ fn native_server_args(port: u16) -> Vec<String> {
     ]
 }
 
+const BSL_TOMCAT_BUFFER_SIZE_JVM_OPT: &str =
+    "-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576";
+
+fn native_server_envs() -> Vec<(String, String)> {
+    let java_tool_options = match std::env::var("JAVA_TOOL_OPTIONS") {
+        Ok(existing) if !existing.trim().is_empty() => {
+            if existing.contains("org.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE") {
+                existing
+            } else {
+                format!("{existing} {BSL_TOMCAT_BUFFER_SIZE_JVM_OPT}")
+            }
+        }
+        _ => BSL_TOMCAT_BUFFER_SIZE_JVM_OPT.to_string(),
+    };
+
+    vec![("JAVA_TOOL_OPTIONS".to_string(), java_tool_options)]
+}
+
 fn request_timeout_for(method: &str) -> Duration {
     if method == "textDocument/diagnostic" {
         Duration::from_secs(60)
@@ -50,6 +68,7 @@ const BSL_UPSTREAM_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1200);
 struct ServerLaunchSpec {
     program: String,
     args: Vec<String>,
+    envs: Vec<(String, String)>,
     mcp_enabled: bool,
 }
 
@@ -61,6 +80,7 @@ fn server_launch_spec(
         return Ok(ServerLaunchSpec {
             program: settings.executable_path.clone(),
             args: native_server_args(port),
+            envs: native_server_envs(),
             mcp_enabled: true,
         });
     }
@@ -75,7 +95,7 @@ fn server_launch_spec(
     Ok(ServerLaunchSpec {
         program: settings.java_path.clone(),
         args: vec![
-            "-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576".to_string(),
+            BSL_TOMCAT_BUFFER_SIZE_JVM_OPT.to_string(),
             "-Xmx256m".to_string(),
             "-XX:+UseSerialGC".to_string(),
             "-jar".to_string(),
@@ -83,6 +103,7 @@ fn server_launch_spec(
             "websocket".to_string(),
             format!("--server.port={port}"),
         ],
+        envs: Vec::new(),
         mcp_enabled: false,
     })
 }
@@ -379,6 +400,7 @@ impl BSLClient {
         self.mcp_enabled = launch.mcp_enabled;
         let mut cmd = AsyncCommand::new(&launch.program);
         cmd.args(&launch.args)
+            .envs(launch.envs.clone())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd.kill_on_drop(true);
@@ -1805,6 +1827,19 @@ mod tests {
     }
 
     #[test]
+    fn native_server_envs_configures_tomcat_buffer_size() {
+        let envs = native_server_envs();
+        let java_tool_opts = envs
+            .iter()
+            .find(|(k, _)| k == "JAVA_TOOL_OPTIONS")
+            .map(|(_, v)| v.as_str());
+        assert!(java_tool_opts.is_some());
+        assert!(java_tool_opts
+            .unwrap()
+            .contains("-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576"));
+    }
+
+    #[test]
     fn native_runtime_does_not_reuse_unknown_listener_without_mcp() {
         assert!(!should_reuse_existing_listener(true));
         assert!(should_reuse_existing_listener(false));
@@ -1840,6 +1875,8 @@ mod tests {
 
         assert_eq!(spec.program, settings.executable_path);
         assert_eq!(spec.args, native_server_args(8123));
+        assert!(spec.envs.iter().any(|(k, v)| k == "JAVA_TOOL_OPTIONS"
+            && v.contains("-Dorg.apache.tomcat.websocket.DEFAULT_BUFFER_SIZE=1048576")));
         assert!(spec.mcp_enabled);
     }
 
