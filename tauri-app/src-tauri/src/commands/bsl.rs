@@ -26,7 +26,11 @@ pub struct BslStatus {
     pub mcp_available: bool,
 }
 
-/// Notify BSL Language Server that a document was opened
+/// Notify BSL Language Server that a document was opened.
+///
+/// This is the editor's entry point into the LSP session, so it is also the place
+/// where a dropped session gets healed — didChange/didClose stay non-blocking on
+/// purpose (they fire per keystroke) and rely on the document cache replay instead.
 #[tauri::command]
 pub async fn bsl_did_open(
     uri: String,
@@ -34,7 +38,8 @@ pub async fn bsl_did_open(
     version: i32,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
 ) -> Result<(), String> {
-    let client = state.inner().lock().await;
+    let mut client = state.inner().lock().await;
+    crate::bsl_client::ensure_bsl_connected(&mut client).await?;
     client.bsl_did_open(uri, text, version).await
 }
 
@@ -217,11 +222,14 @@ pub async fn diagnose_bsl_ls_cmd(
 ) -> Result<Vec<BslDiagnosticItem>, String> {
     let settings = settings::load_settings();
     let mut report = Vec::new();
-    let active_port = {
+    let (active_port, session_alive) = {
         let client = state.inner().lock().await;
-        client
-            .active_port()
-            .unwrap_or(settings.bsl_server.websocket_port)
+        (
+            client
+                .active_port()
+                .unwrap_or(settings.bsl_server.websocket_port),
+            client.is_connected(),
+        )
     };
 
     let native_path = std::path::Path::new(&settings.bsl_server.executable_path);
@@ -274,6 +282,32 @@ pub async fn diagnose_bsl_ls_cmd(
             title: "Runtime".to_string(),
             message: "Используется встроенный runtime официального Windows-пакета; внешняя Java не требуется.".to_string(),
             suggestion: None,
+        });
+
+        // Пробный сокет ниже проверяет только доступность порта. Без этой строки
+        // отчёт показывал «всё в порядке», пока сессия приложения была мертва,
+        // а диагностика в редакторе молчала.
+        report.push(if session_alive {
+            BslDiagnosticItem {
+                status: "ok".to_string(),
+                title: "Сессия LSP приложения".to_string(),
+                message: "Приложение подключено к BSL LS, диагностика редактора активна."
+                    .to_string(),
+                suggestion: None,
+            }
+        } else {
+            BslDiagnosticItem {
+                status: "error".to_string(),
+                title: "Нет активной сессии LSP".to_string(),
+                message:
+                    "Порт может отвечать, но у приложения нет живой сессии с BSL LS — \
+                     проверка синтаксиса в редакторе работать не будет."
+                        .to_string(),
+                suggestion: Some(
+                    "Нажмите Reconnect либо переоткройте панель кода — сессия поднимется заново."
+                        .to_string(),
+                ),
+            }
         });
 
         let port = active_port;

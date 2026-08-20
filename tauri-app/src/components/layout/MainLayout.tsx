@@ -218,9 +218,11 @@ export function MainLayout() {
     // Текст, который сервер уже видел: защищает от повторной отправки того же кода.
     const lastSyncedCodeRef = React.useRef<string | null>(null);
 
-    // didOpen and bsl-diagnostics listener
+    // didOpen and bsl-diagnostics listener.
+    // Намеренно НЕ требует bslStatus.connected: bsl_did_open сам поднимает сессию,
+    // иначе после обрыва редактор навсегда оставался бы без диагностики.
     useEffect(() => {
-        if (!bslStatus?.connected || !docUri) {
+        if (!docUri) {
             isDocumentOpenRef.current = false;
             lastSyncedCodeRef.current = null;
             return;
@@ -257,6 +259,22 @@ export function MainLayout() {
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [bslStatus?.connected, docUri]); // Re-run when connection or URI changes
+
+    // Пока сессия лежит — периодически пробуем поднять её через didOpen.
+    // Останавливается сразу, как только статус станет connected.
+    useEffect(() => {
+        if (!docUri || bslStatus?.connected !== false || !bslStatus?.installed) return;
+
+        const timer = setInterval(() => {
+            const text = codeSessionRef.current.workingCode || '';
+            lastSyncedCodeRef.current = text;
+            invoke('bsl_did_open', { uri: docUri, text, version: docVersionRef.current })
+                .then(() => { isDocumentOpenRef.current = true; })
+                .catch(() => { /* сервер ещё не поднялся — повторим на следующем тике */ });
+        }, 20000);
+
+        return () => clearInterval(timer);
+    }, [bslStatus?.connected, bslStatus?.installed, docUri, codeSessionRef]);
 
     // didChange is now handled by handleDocumentChange
     const handleDocumentChange = useCallback((version: number, text: string) => {
