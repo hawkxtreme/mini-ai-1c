@@ -250,13 +250,14 @@ pub struct BSLClient {
     pending_requests: Arc<StdMutex<HashMap<i32, oneshot::Sender<JsonRpcResponse>>>>,
     pending_diagnostics: Arc<StdMutex<HashMap<String, oneshot::Sender<Vec<Diagnostic>>>>>,
 
-    state_tx: tokio::sync::watch::Sender<ClientState>,
+    state_tx: Arc<tokio::sync::watch::Sender<ClientState>>,
     state_rx: tokio::sync::watch::Receiver<ClientState>,
 }
 
 impl BSLClient {
     pub fn new() -> Self {
         let (state_tx, state_rx) = tokio::sync::watch::channel(ClientState::Disconnected);
+        let state_tx = Arc::new(state_tx);
         Self {
             ws_tx: None,
             server_process: None,
@@ -278,14 +279,24 @@ impl BSLClient {
     pub async fn ensure_ready(&self) -> Result<(), String> {
         let mut rx = self.state_rx.clone();
         let timeout = tokio::time::Duration::from_secs(10);
-        
+
         let result = tokio::time::timeout(timeout, async {
-            while *rx.borrow_and_update() != ClientState::Ready {
-                rx.changed().await.unwrap();
+            loop {
+                if *rx.borrow_and_update() == ClientState::Ready {
+                    return Ok(());
+                }
+                if rx.changed().await.is_err() {
+                    // Sender is gone — the client is being torn down.
+                    return Err("BSL LS client is shutting down".to_string());
+                }
             }
-        }).await;
-        
-        result.map_err(|_| "Timeout waiting for BSL LS to become Ready".to_string())
+        })
+        .await;
+
+        match result {
+            Ok(inner) => inner,
+            Err(_) => Err("Timeout waiting for BSL LS to become Ready".to_string()),
+        }
     }
 
     pub fn set_app_handle(&mut self, app_handle: AppHandle) {
@@ -293,8 +304,17 @@ impl BSLClient {
     }
 
     fn set_state(&self, new_state: ClientState) {
-        let _ = self.state_tx.send(new_state);
-        if let Some(app) = &self.app_handle {
+        Self::broadcast_state(&self.state_tx, self.app_handle.as_ref(), new_state);
+    }
+
+    /// Publish a state transition without borrowing `self` — usable from spawned tasks.
+    fn broadcast_state(
+        state_tx: &tokio::sync::watch::Sender<ClientState>,
+        app_handle: Option<&AppHandle>,
+        new_state: ClientState,
+    ) {
+        let _ = state_tx.send(new_state);
+        if let Some(app) = app_handle {
             let payload = match new_state {
                 ClientState::Disconnected => "disconnected",
                 ClientState::Connecting => "connecting",
@@ -327,8 +347,11 @@ impl BSLClient {
         preferred // Fallback to preferred if none found in range
     }
 
+    /// A live LSP session: the socket is open *and* the handshake finished.
+    /// Falls back to `false` once the reader task reports the socket as closed,
+    /// so callers know they have to reconnect.
     pub fn is_connected(&self) -> bool {
-        self.ws_tx.is_some()
+        self.ws_tx.is_some() && *self.state_rx.borrow() == ClientState::Ready
     }
 
     fn official_mcp_port(&self) -> Option<u16> {
@@ -348,6 +371,20 @@ impl BSLClient {
 
     pub fn active_port(&self) -> Option<u16> {
         self.actual_port
+    }
+
+    /// Drop the handle of an owned server process that already exited,
+    /// so a new one can be spawned. Returns `true` when a dead child was reaped.
+    pub fn reap_exited_server(&mut self) -> bool {
+        let exited = match self.server_process.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            None => false,
+        };
+        if exited {
+            crate::app_log!("[BSL LS] Owned server process has exited — will restart on demand");
+            self.server_process = None;
+        }
+        exited
     }
 
     /// Start the BSL Language Server
@@ -481,6 +518,8 @@ impl BSLClient {
                     let pending_reqs = self.pending_requests.clone();
                     let pending_diags = self.pending_diagnostics.clone();
                     let app_handle = self.app_handle.clone();
+                    let reader_state_tx = self.state_tx.clone();
+                    let reader_app_handle = self.app_handle.clone();
 
                     tokio::spawn(async move {
                         while let Some(msg) = rx.recv().await {
@@ -549,6 +588,19 @@ impl BSLClient {
                                 }
                             }
                         }
+
+                        // The socket is gone. Without this the client would keep
+                        // reporting `Ready` forever and nobody would reconnect.
+                        crate::app_log!("[BSL LS] WebSocket read loop finished — marking as disconnected");
+                        for (_, sender) in pending_diags.lock().unwrap().drain() {
+                            let _ = sender.send(Vec::new());
+                        }
+                        pending_reqs.lock().unwrap().clear();
+                        Self::broadcast_state(
+                            &reader_state_tx,
+                            reader_app_handle.as_ref(),
+                            ClientState::Disconnected,
+                        );
                     });
 
                     break;
@@ -961,7 +1013,6 @@ impl BSLClient {
     }
 
     pub async fn bsl_did_open(&self, uri: String, text: String, version: i32) -> Result<(), String> {
-        self.ensure_ready().await?;
         {
             let mut docs = self.documents.lock().unwrap();
             docs.insert(uri.clone(), DocumentState {
@@ -969,6 +1020,11 @@ impl BSLClient {
                 text: text.clone(),
                 version,
             });
+        }
+        // While the session is down the document only lives in the cache;
+        // `connect()` replays every cached document once the handshake succeeds.
+        if !self.is_connected() {
+            return Ok(());
         }
         self.send_notification(
             "textDocument/didOpen",
@@ -993,9 +1049,7 @@ impl BSLClient {
         doc.version
     }
 
-    pub async fn bsl_did_change(&self, uri: String, text: String, _frontend_version: i32) -> Result<(), String> {
-        self.ensure_ready().await?;
-
+    pub async fn bsl_did_change(&self, uri: String, text: String, frontend_version: i32) -> Result<(), String> {
         let new_version = {
             let mut docs = self.documents.lock().unwrap();
             if let Some(doc) = docs.get_mut(&uri) {
@@ -1004,11 +1058,16 @@ impl BSLClient {
                 docs.insert(uri.clone(), DocumentState {
                     uri: uri.clone(),
                     text: text.clone(),
-                    version: _frontend_version,
+                    version: frontend_version,
                 });
-                _frontend_version
+                frontend_version
             }
         };
+
+        // Same as didOpen: keep the cache warm, replay happens on reconnect.
+        if !self.is_connected() {
+            return Ok(());
+        }
 
         // Full-sync: send a single change event with only the full text (no range).
         let change = TextDocumentContentChangeEvent {
@@ -1037,6 +1096,9 @@ impl BSLClient {
         {
             let mut docs = self.documents.lock().unwrap();
             docs.remove(&uri);
+        }
+        if !self.is_connected() {
+            return Ok(());
         }
         self.send_notification(
             "textDocument/didClose",
@@ -1116,6 +1178,9 @@ impl BSLClient {
 
     /// Format code
     pub async fn format_code(&self, code: &str, suffix: &str) -> Result<String, String> {
+        // Capabilities are only known after a successful handshake, so wait first.
+        self.ensure_ready().await?;
+
         // Guard check
         let can_format = self
             .capabilities
@@ -1128,7 +1193,6 @@ impl BSLClient {
             return Err("BSL LS does not support formatting for this document".to_string());
         }
 
-        self.ensure_ready().await?;
         let fallback_workspace = crate::settings::get_settings_dir().join("bsl-workspace");
         let workspace = self
             .workspace_root
@@ -1475,19 +1539,29 @@ fn uri_to_display_path(uri: &str, config_root: Option<&str>) -> String {
 }
 
 /// Ensure BSL client is connected, starting server if needed.
-async fn ensure_bsl_connected(client: &mut BSLClient) -> Result<(), String> {
-    if !client.is_connected() {
-        if let Err(e) = client.connect().await {
-            if client.server_process.is_none() {
-                client.start_server()?;
-            }
-            client.connect().await.map_err(|e2| {
-                format!(
-                    "BSL LS не запущен или недоступен: {}\nДоп. ошибка: {}",
-                    e, e2
-                )
-            })?;
+pub async fn ensure_bsl_connected(client: &mut BSLClient) -> Result<(), String> {
+    if client.is_connected() {
+        return Ok(());
+    }
+
+    // A previously owned server may have died (crash, manual kill). Without dropping the
+    // stale handle `start_server()` below would be skipped and we would keep retrying a
+    // port nobody listens on. Respawn straight away instead of burning the full connect
+    // retry budget against a dead port first.
+    if client.reap_exited_server() {
+        client.start_server()?;
+    }
+
+    if let Err(e) = client.connect().await {
+        if client.server_process.is_none() {
+            client.start_server()?;
         }
+        client.connect().await.map_err(|e2| {
+            format!(
+                "BSL LS не запущен или недоступен: {}\nДоп. ошибка: {}",
+                e, e2
+            )
+        })?;
     }
     Ok(())
 }
@@ -1993,13 +2067,18 @@ mod tests {
         assert_eq!(doc.text, "new text");
     }
 
+    // NB: do not build a real `BSLClient` here. Its `Drop`/`set_state` path pulls the
+    // Wry runtime into the unit-test binary, which then imports comctl32 v6 entry points
+    // that the (manifest-less) test executable cannot resolve — the whole `cargo test`
+    // suite dies with STATUS_ENTRYPOINT_NOT_FOUND before a single test runs.
     #[tokio::test]
     async fn pending_diagnostics_sender_is_fulfilled_when_channel_resolves() {
-        let client = BSLClient::new();
+        let pending_diagnostics: Arc<StdMutex<HashMap<String, oneshot::Sender<Vec<Diagnostic>>>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
         let uri = "file:///workspace/test.bsl";
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = client.pending_diagnostics.lock().unwrap();
+            let mut pending = pending_diagnostics.lock().unwrap();
             pending.insert(uri.to_string(), tx);
         }
 
@@ -2015,7 +2094,7 @@ mod tests {
 
         // Simulate resolution
         let diag_tx = {
-            let mut pending = client.pending_diagnostics.lock().unwrap();
+            let mut pending = pending_diagnostics.lock().unwrap();
             pending.remove(uri)
         };
         assert!(diag_tx.is_some());

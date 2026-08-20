@@ -912,7 +912,9 @@ pub async fn stream_chat(
 
             let validation_result =
                 tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
-                    let client = bsl_state.lock().await;
+                    let mut client = bsl_state.lock().await;
+                    // Иначе после падения соединения проверка молча вернёт пустой результат.
+                    let _ = crate::bsl_client::ensure_bsl_connected(&mut client).await;
 
                     let mut all_errors: Vec<String> = Vec::new();
                     let mut ui_diagnostics: Vec<BSLDiagnostic> = Vec::new();

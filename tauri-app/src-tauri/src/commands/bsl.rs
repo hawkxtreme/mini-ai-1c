@@ -66,7 +66,8 @@ pub async fn analyze_bsl(
     code: String,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
 ) -> Result<Vec<BSLDiagnostic>, String> {
-    let client = state.inner().lock().await;
+    let mut client = state.inner().lock().await;
+    crate::bsl_client::ensure_bsl_connected(&mut client).await?;
     let diagnostics = client.analyze_code(&code, "frontend-analyze").await?;
     let ui_diagnostics = diagnostics
         .into_iter()
@@ -91,7 +92,8 @@ pub async fn format_bsl(
     code: String,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
 ) -> Result<String, String> {
-    let client = state.inner().lock().await;
+    let mut client = state.inner().lock().await;
+    crate::bsl_client::ensure_bsl_connected(&mut client).await?;
     client.format_code(&code, "frontend-format").await
 }
 

@@ -215,18 +215,23 @@ export function MainLayout() {
 
     const docVersionRef = React.useRef(1);
     const isDocumentOpenRef = React.useRef(false);
+    // Текст, который сервер уже видел: защищает от повторной отправки того же кода.
+    const lastSyncedCodeRef = React.useRef<string | null>(null);
 
     // didOpen and bsl-diagnostics listener
     useEffect(() => {
         if (!bslStatus?.connected || !docUri) {
             isDocumentOpenRef.current = false;
+            lastSyncedCodeRef.current = null;
             return;
         }
 
         isDocumentOpenRef.current = false;
+        const openedText = codeSessionRef.current.workingCode || '';
+        lastSyncedCodeRef.current = openedText;
         invoke('bsl_did_open', {
             uri: docUri,
-            text: codeSessionRef.current.workingCode || '',
+            text: openedText,
             version: docVersionRef.current
         }).then(() => {
             isDocumentOpenRef.current = true;
@@ -236,7 +241,9 @@ export function MainLayout() {
             const normalizedEventUri = normalizeUri(event.payload.uri);
             const normalizedDocUri = normalizeUri(docUri);
 
-            if (normalizedEventUri === normalizedDocUri || normalizedEventUri.toLowerCase() === normalizedDocUri.toLowerCase() || normalizedEventUri.endsWith('main.bsl')) {
+            // Только диагностика нашего собственного документа: иначе результаты
+            // временных файлов MCP-проверки перетирают панель редактора.
+            if (normalizedEventUri.toLowerCase() === normalizedDocUri.toLowerCase()) {
                 setDiagnostics(event.payload.diagnostics);
             }
         });
@@ -255,13 +262,33 @@ export function MainLayout() {
     const handleDocumentChange = useCallback((version: number, text: string) => {
         docVersionRef.current = version;
         if (!bslStatus?.connected || !docUri) return;
+        if (lastSyncedCodeRef.current === text) return;
+        lastSyncedCodeRef.current = text;
 
+        // bsl_did_change резолвится только после того, как сервер вернул диагностику,
+        // поэтому индикатор проверки гаснет ровно по факту готовности результата.
+        setIsValidating(true);
         invoke('bsl_did_change', {
             uri: docUri,
             text,
             version,
-        }).catch(console.error);
+        })
+            .catch(console.error)
+            .finally(() => setIsValidating(false));
     }, [bslStatus?.connected, docUri]);
+
+    // Код может смениться и мимо редактора (применение правки ИИ, загрузка из
+    // Конфигуратора, режим diff). CodeSidePanel шлёт didChange только из режима
+    // 'editor', поэтому синхронизируем LSP ещё и по самому modifiedCode.
+    useEffect(() => {
+        if (!bslStatus?.connected || !docUri) return;
+        if (lastSyncedCodeRef.current === modifiedCode) return;
+
+        const timer = setTimeout(() => {
+            handleDocumentChange(docVersionRef.current + 1, modifiedCode);
+        }, 800);
+        return () => clearTimeout(timer);
+    }, [modifiedCode, bslStatus?.connected, docUri, handleDocumentChange]);
 
     const ensureQuickActionDirectApplyAvailable = useCallback(async (
         writeSession: OverlayQuickActionSessionPayload | null,
