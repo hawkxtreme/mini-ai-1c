@@ -10,7 +10,10 @@ use tauri::{AppHandle, Emitter};
 use windows::Win32::Foundation::MAX_PATH;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetMessageW, GetWindowThreadProcessId, SetWindowsHookExW,
@@ -313,25 +316,46 @@ unsafe fn is_configurator_window(hwnd: HWND) -> bool {
         return false;
     }
 
-    let Ok(process_handle) = OpenProcess(
+    let path = if let Ok(process_handle) = OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
         false,
         process_id,
-    ) else {
+    ) {
+        let mut buffer = [0u16; MAX_PATH as usize];
+        let len = K32GetModuleFileNameExW(process_handle, None, &mut buffer);
+        let _ = windows::Win32::Foundation::CloseHandle(process_handle);
+        if len == 0 {
+            return false;
+        }
+        OsString::from_wide(&buffer[..len as usize])
+            .to_string_lossy()
+            .to_lowercase()
+    } else if let Ok(process_handle) =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+    {
+        // Fallback for elevated processes: when mini-ai runs unelevated and 1cv8.exe
+        // runs "as administrator", PROCESS_VM_READ is denied (ERROR_ACCESS_DENIED),
+        // but PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW is allowed
+        // for cross-integrity-level queries on Windows.
+        let mut buffer = [0u16; MAX_PATH as usize];
+        let mut len = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process_handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(process_handle);
+        if !ok || len == 0 {
+            return false;
+        }
+        OsString::from_wide(&buffer[..len as usize])
+            .to_string_lossy()
+            .to_lowercase()
+    } else {
         return false;
     };
-
-    let mut buffer = [0u16; MAX_PATH as usize];
-    let len = K32GetModuleFileNameExW(process_handle, None, &mut buffer);
-    let _ = windows::Win32::Foundation::CloseHandle(process_handle);
-
-    if len == 0 {
-        return false;
-    }
-
-    let path = OsString::from_wide(&buffer[..len as usize])
-        .to_string_lossy()
-        .to_lowercase();
 
     path.ends_with("1cv8.exe")
         || path.ends_with("1cv8c.exe")

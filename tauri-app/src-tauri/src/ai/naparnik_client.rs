@@ -547,6 +547,7 @@ pub async fn stream_naparnik_completion(
     .await?;
 
     Ok(ApiMessage {
+        reasoning_content: None,
         role: "assistant".to_string(),
         content: if full_content.is_empty() {
             None

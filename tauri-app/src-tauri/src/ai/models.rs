@@ -27,6 +27,11 @@ pub struct ApiMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reasoning/thinking text from a prior assistant turn. Some providers
+    /// (DeepSeek "thinking mode", Qwen3 DashScope) require this to be echoed
+    /// back verbatim on the assistant message in subsequent requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +144,8 @@ pub struct NonStreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct NonStreamMessage {
     pub content: Option<String>,
+    #[serde(alias = "reasoning")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<NonStreamToolCall>>,
 }
 

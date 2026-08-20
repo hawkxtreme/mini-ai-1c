@@ -337,6 +337,7 @@ pub async fn stream_chat_completion(
     };
 
     let mut api_messages = vec![ApiMessage {
+        reasoning_content: None,
         role: "system".to_string(),
         content: Some(system_prompt),
         tool_calls: None,
@@ -618,6 +619,10 @@ pub async fn stream_chat_completion(
 
     let mut attempt = 0;
     let max_retries = 3;
+    // Some OpenAI-compatible proxies (e.g. GitHub Copilot proxies exposing gpt-5.x/o-series
+    // models) reject the classic `max_tokens` field and require `max_completion_tokens`
+    // instead. Detected reactively from the 400 error body — see below.
+    let mut use_max_completion_tokens = false;
     let response = loop {
         attempt += 1;
         if matches!(profile.provider, LLMProvider::QwenCli) {
@@ -629,10 +634,21 @@ pub async fn stream_chat_completion(
             };
             let _ = app_handle.emit("chat-status", status.to_string());
         }
+        let body_json = if use_max_completion_tokens {
+            let mut v = serde_json::to_value(&request_body).map_err(|e| e.to_string())?;
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(mt) = obj.remove("max_tokens") {
+                    obj.insert("max_completion_tokens".to_string(), mt);
+                }
+            }
+            v
+        } else {
+            serde_json::to_value(&request_body).map_err(|e| e.to_string())?
+        };
         let res = client
             .post(&url)
             .headers(headers.clone())
-            .json(&request_body)
+            .json(&body_json)
             .send()
             .await;
 
@@ -723,6 +739,18 @@ pub async fn stream_chat_completion(
                         retry_after
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+                    continue;
+                }
+                // Provider requires `max_completion_tokens` instead of `max_tokens`
+                // (seen on GitHub Copilot proxies for gpt-5.x/o-series models, and some
+                // strict OpenAI-compatible gateways). Swap the field and retry once.
+                if status.as_u16() == 400
+                    && !use_max_completion_tokens
+                    && error_body.contains("max_completion_tokens")
+                {
+                    crate::app_log!("[AI][RETRY] Provider requires 'max_completion_tokens' instead of 'max_tokens'. Retrying with adjusted parameter.");
+                    use_max_completion_tokens = true;
+                    attempt = 0;
                     continue;
                 }
                 // OpenRouter 400 "Developer instruction is not enabled" — model doesn't support system role
@@ -885,8 +913,16 @@ pub async fn stream_chat_completion(
             .into_iter()
             .next()
             .ok_or("Empty response from API")?;
-        let content = choice.message.content.unwrap_or_default();
+        let reasoning = choice.message.reasoning_content.unwrap_or_default();
+        let mut content = choice.message.content.unwrap_or_default();
         let raw_tool_calls = choice.message.tool_calls.unwrap_or_default();
+        if content.is_empty() && raw_tool_calls.is_empty() && !reasoning.trim().is_empty() {
+            crate::app_log!(
+                "[AI][RESP] non-stream: content empty but reasoning_content has {} chars — using reasoning as answer",
+                reasoning.len()
+            );
+            content = reasoning.trim().to_string();
+        }
         // Convert NonStreamToolCall → ToolCall, normalising arguments to valid JSON string.
         let tool_calls: Vec<ToolCall> = raw_tool_calls
             .into_iter()
@@ -951,6 +987,11 @@ pub async fn stream_chat_completion(
             } else {
                 Some(tool_calls)
             },
+            reasoning_content: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
             tool_call_id: None,
             name: None,
         });
@@ -959,6 +1000,7 @@ pub async fn stream_chat_completion(
     let mut stream = response.bytes_stream();
     let mut byte_buffer = Vec::new();
     let mut full_content = String::new();
+    let mut full_reasoning = String::new();
     let mut content_search_temp = String::new();
     let mut accumulated_tool_calls: Vec<ToolCall> = Vec::new();
     let mut announced_tool_calls = std::collections::HashSet::new();
@@ -1063,6 +1105,21 @@ pub async fn stream_chat_completion(
                         if matches!(profile.provider, LLMProvider::QwenCli) {
                             crate::llm::cli_providers::qwen::QwenCliProvider::increment_request_count(&profile.id);
                         }
+                        // If the model produced no visible content but did produce reasoning text
+                        // (Qwen3/DeepSeek "thinking-only" responses on some OpenAI-compatible
+                        // endpoints), surface the reasoning as the answer instead of discarding it —
+                        // the answer is usually fully formed there, just in the wrong field.
+                        if full_content.is_empty()
+                            && accumulated_tool_calls.is_empty()
+                            && !full_reasoning.trim().is_empty()
+                        {
+                            crate::app_log!(
+                                "[AI][RESP] content empty but reasoning_content has {} chars — using reasoning as answer",
+                                full_reasoning.len()
+                            );
+                            full_content.push_str(full_reasoning.trim());
+                            let _ = app_handle.emit("chat-chunk", full_content.clone());
+                        }
                         // === DIAGNOSTIC: log response type ===
                         if !accumulated_tool_calls.is_empty() {
                             let names: Vec<&str> = accumulated_tool_calls
@@ -1076,7 +1133,7 @@ pub async fn stream_chat_completion(
                                 full_content.len()
                             );
                         } else if full_content.is_empty() {
-                            crate::app_log!("[AI][RESP] EMPTY response (no tool_calls, no content) — likely thinking-only");
+                            crate::app_log!("[AI][RESP] EMPTY response (no tool_calls, no content, no reasoning)");
                         } else {
                             // Check if content mentions known tool names (hallucination signal)
                             let known_tools = [
@@ -1129,6 +1186,11 @@ pub async fn stream_chat_completion(
                             },
                             tool_call_id: None,
                             name: None,
+                            reasoning_content: if full_reasoning.is_empty() {
+                                None
+                            } else {
+                                Some(full_reasoning)
+                            },
                         });
                     }
 
@@ -1141,6 +1203,7 @@ pub async fn stream_chat_completion(
                                         is_thinking = true;
                                         let _ = app_handle.emit("chat-status", "Размышляю...");
                                     }
+                                    full_reasoning.push_str(reasoning);
                                     let _ =
                                         app_handle.emit("chat-thinking-chunk", reasoning.clone());
                                 }
@@ -1546,6 +1609,14 @@ pub async fn stream_chat_completion(
         let _ = app_handle.emit("chat-chunk", qwen_fn_buf.clone());
         qwen_fn_buf.clear();
     }
+    if full_content.is_empty() && accumulated_tool_calls.is_empty() && !full_reasoning.trim().is_empty() {
+        crate::app_log!(
+            "[AI][RESP] stream ended without [DONE]; content empty but reasoning_content has {} chars — using reasoning as answer",
+            full_reasoning.len()
+        );
+        full_content.push_str(full_reasoning.trim());
+        let _ = app_handle.emit("chat-chunk", full_content.clone());
+    }
 
     Ok(ApiMessage {
         role: "assistant".to_string(),
@@ -1558,6 +1629,11 @@ pub async fn stream_chat_completion(
             None
         } else {
             Some(accumulated_tool_calls)
+        },
+        reasoning_content: if full_reasoning.is_empty() {
+            None
+        } else {
+            Some(full_reasoning)
         },
         tool_call_id: None,
         name: None,
@@ -1684,6 +1760,7 @@ mod tests {
     fn detects_tool_heavy_context_from_recent_tool_messages() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "user".to_string(),
                 content: Some("test".to_string()),
                 tool_calls: None,
@@ -1691,6 +1768,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "tool".to_string(),
                 content: Some("cached".to_string()),
                 tool_calls: None,
@@ -1752,6 +1830,7 @@ mod tests {
     fn ollama_cloud_sanitizer_replaces_missing_content_with_empty_string() {
         let messages = vec![
             ApiMessage {
+                reasoning_content: None,
                 role: "assistant".to_string(),
                 content: None,
                 tool_calls: Some(vec![ToolCall {
@@ -1767,6 +1846,7 @@ mod tests {
                 name: None,
             },
             ApiMessage {
+                reasoning_content: None,
                 role: "tool".to_string(),
                 content: None,
                 tool_calls: None,
@@ -1784,6 +1864,7 @@ mod tests {
     #[test]
     fn ollama_cloud_sanitizer_keeps_existing_content_unchanged() {
         let messages = vec![ApiMessage {
+            reasoning_content: None,
             role: "assistant".to_string(),
             content: Some("ready".to_string()),
             tool_calls: None,

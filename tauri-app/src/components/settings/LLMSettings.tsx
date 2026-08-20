@@ -126,7 +126,16 @@ export function LLMSettings({ profiles, onUpdate }: LLMSettingsProps) {
                 const isNewProfile = shouldResetApiKeyDraft(prevEditingIdRef.current, editingId);
                 prevEditingIdRef.current = editingId;
 
-                setEditForm(prev => (prev?.id === editingId ? prev : { ...p }));
+                setEditForm(prev => {
+                    if (prev?.id !== editingId) return { ...p };
+                    // save_profile doesn't return the updated profile, so this effect is the
+                    // only place that ever sees the freshly-encrypted api_key_encrypted again
+                    // after Save Profile. Without this, the form keeps its stale (often empty)
+                    // draft value and the next "Fetch from API" call goes out unauthenticated.
+                    return prev.api_key_encrypted === p.api_key_encrypted
+                        ? prev
+                        : { ...prev, api_key_encrypted: p.api_key_encrypted };
+                });
                 if (isNewProfile) {
                     setNewApiKey('');
                     setConnectionTest(null);
