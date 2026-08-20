@@ -30,6 +30,7 @@ export function CodeSidePanel({
     onCommitCode,
     isFullWidth,
     onDiagnosticSelectionChange,
+    onDocumentChange,
 }: CodeSidePanelProps) {
     const [viewMode, setViewMode] = useState<'editor' | 'diff' | 'tools'>('diff');
     const [localOriginalCode, setLocalOriginalCode] = useState(originalCode ?? '');
@@ -176,25 +177,14 @@ export function CodeSidePanel({
     localOriginalCodeRef.current = localOriginalCode;
     const latestEditorCodeRef = useRef(modifiedCode);
     const pendingModifiedCodeRef = useRef<string | null>(null);
+    const pendingDocumentVersionRef = useRef<number | null>(null);
     const modifiedCodeFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const applyingExternalCodeRef = useRef(false);
 
-    useEffect(() => {
-        latestEditorCodeRef.current = modifiedCode;
-    }, [modifiedCode]);
-
-    useEffect(() => {
-        if (viewMode !== 'editor' || !editorRef.current || pendingModifiedCodeRef.current !== null) return;
-        if (editorRef.current.getValue?.() === modifiedCode) return;
-
-        applyingExternalCodeRef.current = true;
-        try {
-            editorRef.current.setValue(modifiedCode);
-            latestEditorCodeRef.current = modifiedCode;
-        } finally {
-            applyingExternalCodeRef.current = false;
-        }
-    }, [modifiedCode, viewMode]);
+    const onModifiedCodeChangeRef = useRef(onModifiedCodeChange);
+    onModifiedCodeChangeRef.current = onModifiedCodeChange;
+    const onDocumentChangeRef = useRef(onDocumentChange);
+    onDocumentChangeRef.current = onDocumentChange;
 
     const flushModifiedCodeChange = useCallback(() => {
         if (modifiedCodeFlushTimerRef.current !== null) {
@@ -203,29 +193,54 @@ export function CodeSidePanel({
         }
 
         const pendingCode = pendingModifiedCodeRef.current;
-        if (pendingCode === null) return;
+        const pendingVersion = pendingDocumentVersionRef.current;
 
-        pendingModifiedCodeRef.current = null;
-        latestEditorCodeRef.current = pendingCode;
-        onModifiedCodeChange(pendingCode);
-    }, [onModifiedCodeChange]);
+        if (pendingCode !== null) {
+            pendingModifiedCodeRef.current = null;
+            pendingDocumentVersionRef.current = null;
+            latestEditorCodeRef.current = pendingCode;
+            onModifiedCodeChangeRef.current(pendingCode);
+            const versionToUse = pendingVersion ?? editorRef.current?.getModel()?.getVersionId() ?? 1;
+            onDocumentChangeRef.current?.(versionToUse, pendingCode);
+        }
+    }, []);
 
-    const scheduleModifiedCodeChange = useCallback((code: string) => {
+    const scheduleModifiedCodeChange = useCallback((code: string, version?: number) => {
         latestEditorCodeRef.current = code;
         pendingModifiedCodeRef.current = code;
+        if (version !== undefined) {
+            pendingDocumentVersionRef.current = version;
+        }
 
         if (modifiedCodeFlushTimerRef.current !== null) {
             clearTimeout(modifiedCodeFlushTimerRef.current);
         }
 
         modifiedCodeFlushTimerRef.current = setTimeout(() => {
-            modifiedCodeFlushTimerRef.current = null;
-            const pendingCode = pendingModifiedCodeRef.current;
-            if (pendingCode === null) return;
-            pendingModifiedCodeRef.current = null;
-            onModifiedCodeChange(pendingCode);
-        }, 250);
-    }, [onModifiedCodeChange]);
+            flushModifiedCodeChange();
+        }, 1000);
+    }, [flushModifiedCodeChange]);
+
+    const flushModifiedCodeChangeRef = useRef(flushModifiedCodeChange);
+    flushModifiedCodeChangeRef.current = flushModifiedCodeChange;
+    const scheduleModifiedCodeChangeRef = useRef(scheduleModifiedCodeChange);
+    scheduleModifiedCodeChangeRef.current = scheduleModifiedCodeChange;
+
+    useEffect(() => {
+        if (modifiedCode === latestEditorCodeRef.current || viewMode !== 'editor' || !editorRef.current) {
+            return;
+        }
+
+        applyingExternalCodeRef.current = true;
+        try {
+            editorRef.current.setValue(modifiedCode);
+            latestEditorCodeRef.current = modifiedCode;
+            const version = editorRef.current.getModel()?.getVersionId() ?? 1;
+            onDocumentChangeRef.current?.(version, modifiedCode);
+        } finally {
+            applyingExternalCodeRef.current = false;
+        }
+    }, [modifiedCode, viewMode]);
 
     useEffect(() => {
         return () => {
@@ -471,13 +486,13 @@ export function CodeSidePanel({
                             registerBSL(monaco);
                             editorRef.current = editor;
                             editor.onDidBlurEditorText(() => {
-                                flushModifiedCodeChange();
+                                flushModifiedCodeChangeRef.current();
                             });
                         }}
-                        onChange={(value) => {
+                        onChange={(value, ev) => {
                             if (applyingExternalCodeRef.current) return;
                             markInputLatency('code-side-panel');
-                            scheduleModifiedCodeChange(value || '');
+                            scheduleModifiedCodeChange(value || '', ev?.versionId);
                         }}
                         options={{
                             minimap: { enabled: false },
@@ -505,15 +520,16 @@ export function CodeSidePanel({
                             const modifiedEditor = editor.getModifiedEditor();
                             editorRef.current = modifiedEditor;
 
-                            modifiedEditor.onDidChangeModelContent(() => {
+                            modifiedEditor.onDidChangeModelContent((ev) => {
                                 // В режиме превью не перезаписываем modifiedCode — это предпросмотр
                                 if (!previewModeRef.current && !applyingExternalCodeRef.current) {
                                     markInputLatency('code-side-panel');
-                                    scheduleModifiedCodeChange(modifiedEditor.getValue());
+                                    const model = modifiedEditor.getModel();
+                                    scheduleModifiedCodeChangeRef.current(modifiedEditor.getValue(), ev?.versionId ?? model?.getVersionId());
                                 }
                             });
                             modifiedEditor.onDidBlurEditorText(() => {
-                                flushModifiedCodeChange();
+                                flushModifiedCodeChangeRef.current();
                             });
 
                             const updateInlineWidgets = () => {

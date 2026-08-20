@@ -66,6 +66,9 @@ pub fn run() {
             approve_tool,
             reject_tool,
             undo_last_change,
+            bsl_did_open,
+            bsl_did_change,
+            bsl_did_close,
             analyze_bsl,
             format_bsl,
             find_configurator_windows_cmd,
@@ -263,6 +266,12 @@ pub fn run() {
                 let client_arc =
                     app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
                 let client_inner = client_arc.inner().clone();
+                
+                {
+                    let mut client = client_inner.lock().await;
+                    client.set_app_handle(app_handle.clone());
+                }
+
                 crate::mcp_client::McpManager::register_internal_handler(
                     "bsl-ls",
                     Arc::new(crate::bsl_client::BSLMcpHandler::new(client_inner.clone())),
@@ -272,14 +281,14 @@ pub fn run() {
                 let mut client = client_inner.lock().await;
 
                 if let Err(e) = client.start_server() {
-                    crate::app_log!(force: true, "Failed to start BSL LS: {}", e);
+                    crate::app_log!(force: true, "[BSL LS] Failed to start: {}", e);
                 } else {
-                    crate::app_log!("BSL LS started");
+                    crate::app_log!("[BSL LS] Started");
                     // Try to connect immediately
                     if let Err(e) = client.connect().await {
-                        crate::app_log!(force: true, "Failed to connect to BSL LS: {}", e);
+                        crate::app_log!(force: true, "[BSL LS] Failed to connect: {}", e);
                     } else {
-                        crate::app_log!("BSL LS connected");
+                        crate::app_log!("[BSL LS] Connected");
                     }
                 }
             });

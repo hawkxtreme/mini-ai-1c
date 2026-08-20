@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useDeferredValue, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
@@ -11,6 +11,7 @@ import { useChat } from '../../contexts/ChatContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { getConfiguratorApplySupport } from '../../api/configurator';
 import { findFirstIntroducedParseError, formatIntroducedParseErrorMessage } from '../../utils/bslSyntaxGuard';
+import { normalizeUri } from '../../utils/uriUtils';
 import { CodeSidePanel } from '../CodeSidePanel';
 import { SettingsPanel } from '../SettingsPanel';
 import { ConflictDialog } from '../ui/ConflictDialog';
@@ -201,24 +202,66 @@ export function MainLayout() {
         };
     }, [ensureExpandedWindow, loadFromConfigurator]);
 
-    // Analysis effect — runs only when modifiedCode changes AND we are not streaming
-    useEffect(() => {
-        if (!modifiedCode || isLoading) return;
-        const runAnalysis = async () => {
-            setIsValidating(true);
-            try {
-                const results = await analyzeCode(modifiedCode);
-                setDiagnostics(results || []);
-            } catch (e) {
-                console.error('Analysis failed:', e);
-            } finally {
-                setIsValidating(false);
-            }
-        };
+    // --- LSP Document Lifecycle ---
+    // Build the document URI inside the actual BSL LS workspace so the server
+    // knows the file is within its project root and tracks diagnostics for it.
+    const docUri = React.useMemo(() => {
+        if (!bslStatus?.workspace_path) return null;
+        // Convert Windows path (C:\foo\bar) or POSIX path to a file:// URI.
+        const raw = bslStatus.workspace_path.replace(/\\/g, '/');
+        const base = raw.startsWith('/') ? `file://${raw}` : `file:///${raw}`;
+        return `${base.replace(/\/$/, '')}/.mini-ai-1c-editor.bsl`;
+    }, [bslStatus?.workspace_path]);
 
-        const timer = setTimeout(runAnalysis, 2000);
-        return () => clearTimeout(timer);
-    }, [modifiedCode, analyzeCode, isLoading]);
+    const docVersionRef = React.useRef(1);
+    const isDocumentOpenRef = React.useRef(false);
+
+    // didOpen and bsl-diagnostics listener
+    useEffect(() => {
+        if (!bslStatus?.connected || !docUri) {
+            isDocumentOpenRef.current = false;
+            return;
+        }
+
+        isDocumentOpenRef.current = false;
+        invoke('bsl_did_open', {
+            uri: docUri,
+            text: codeSessionRef.current.workingCode || '',
+            version: docVersionRef.current
+        }).then(() => {
+            isDocumentOpenRef.current = true;
+        }).catch(console.error);
+
+        const unlistenPromise = listen<{ uri: string, diagnostics: BslDiagnostic[] }>('bsl-diagnostics', (event) => {
+            const normalizedEventUri = normalizeUri(event.payload.uri);
+            const normalizedDocUri = normalizeUri(docUri);
+
+            if (normalizedEventUri === normalizedDocUri || normalizedEventUri.toLowerCase() === normalizedDocUri.toLowerCase() || normalizedEventUri.endsWith('main.bsl')) {
+                setDiagnostics(event.payload.diagnostics);
+            }
+        });
+
+        return () => {
+            isDocumentOpenRef.current = false;
+            if (docUri) {
+                invoke('bsl_did_close', { uri: docUri }).catch(console.error);
+            }
+            unlistenPromise.then(fn => fn());
+        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [bslStatus?.connected, docUri]); // Re-run when connection or URI changes
+
+    // didChange is now handled by handleDocumentChange
+    const handleDocumentChange = useCallback((version: number, text: string) => {
+        docVersionRef.current = version;
+        if (!bslStatus?.connected || !docUri) return;
+
+        invoke('bsl_did_change', {
+            uri: docUri,
+            text,
+            version,
+        }).catch(console.error);
+    }, [bslStatus?.connected, docUri]);
 
     const ensureQuickActionDirectApplyAvailable = useCallback(async (
         writeSession: OverlayQuickActionSessionPayload | null,
@@ -537,6 +580,7 @@ export function MainLayout() {
                             onActiveDiffChange={setActiveDiffContent}
                             onCommitCode={handleCommitCode}
                             onDiagnosticSelectionChange={setSelectedDiagnostics}
+                            onDocumentChange={handleDocumentChange}
                         />
                     </div>
                 </div>

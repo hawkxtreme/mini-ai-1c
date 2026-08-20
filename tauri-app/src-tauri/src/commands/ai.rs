@@ -911,29 +911,15 @@ pub async fn stream_chat(
             let _ = task_app_handle.emit("chat-status", "Проверка BSL кода...");
 
             let validation_result =
-                tokio::time::timeout(tokio::time::Duration::from_secs(90), async {
-                    // Проверяем подключение один раз до цикла
-                    {
-                        let mut client = bsl_state.lock().await;
-                        if !client.is_connected() {
-                            let _ = client.connect().await;
-                        }
-                    } // lock освобождён
+                tokio::time::timeout(tokio::time::Duration::from_secs(30), async {
+                    let client = bsl_state.lock().await;
 
                     let mut all_errors: Vec<String> = Vec::new();
                     let mut ui_diagnostics: Vec<BSLDiagnostic> = Vec::new();
 
                     for (idx, code) in bsl_blocks.iter().enumerate() {
-                        // Захватываем и освобождаем lock на каждой итерации
-                        let result = {
-                            let mut client = bsl_state.lock().await;
-                            let uri = client.temporary_document_uri(&format!(
-                                "iteration-{}-{}",
-                                current_iteration, idx
-                            ));
-                            client.analyze_code(code, &uri).await
-                        };
-                        match result {
+                        let suffix = format!("preval_{}_{}", current_iteration, idx);
+                        match client.analyze_code(code, &suffix).await {
                             Ok(diagnostics) => {
                                 for d in &diagnostics {
                                     let msg_lower = d.message.to_lowercase();

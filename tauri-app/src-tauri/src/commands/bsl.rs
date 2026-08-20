@@ -26,29 +26,54 @@ pub struct BslStatus {
     pub mcp_available: bool,
 }
 
+/// Notify BSL Language Server that a document was opened
+#[tauri::command]
+pub async fn bsl_did_open(
+    uri: String,
+    text: String,
+    version: i32,
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
+) -> Result<(), String> {
+    let client = state.inner().lock().await;
+    client.bsl_did_open(uri, text, version).await
+}
+
+/// Notify BSL Language Server that a document changed
+#[tauri::command]
+pub async fn bsl_did_change(
+    uri: String,
+    text: String,
+    version: i32,
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
+) -> Result<(), String> {
+    let client = state.inner().lock().await;
+    client.bsl_did_change(uri, text, version).await
+}
+
+/// Notify BSL Language Server that a document was closed
+#[tauri::command]
+pub async fn bsl_did_close(
+    uri: String,
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
+) -> Result<(), String> {
+    let client = state.inner().lock().await;
+    client.bsl_did_close(uri).await
+}
+
 /// Analyze BSL code
 #[tauri::command]
 pub async fn analyze_bsl(
     code: String,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
 ) -> Result<Vec<BSLDiagnostic>, String> {
-    crate::app_log!("[BSL] Requesting analysis of {} chars", code.len());
-    let mut client = state.inner().lock().await;
-
-    if !client.is_connected() {
-        let _ = client.connect().await;
-    }
-
-    let uri = client.temporary_document_uri("analyze");
-
-    let diagnostics = client.analyze_code(&code, &uri).await?;
-
-    let result: Vec<BSLDiagnostic> = diagnostics
-        .iter()
+    let client = state.inner().lock().await;
+    let diagnostics = client.analyze_code(&code, "frontend-analyze").await?;
+    let ui_diagnostics = diagnostics
+        .into_iter()
         .map(|d| BSLDiagnostic {
             line: d.range.start.line,
             character: d.range.start.character,
-            message: d.message.clone(),
+            message: d.message,
             severity: match d.severity {
                 Some(1) => "error".to_string(),
                 Some(2) => "warning".to_string(),
@@ -57,8 +82,7 @@ pub async fn analyze_bsl(
             },
         })
         .collect();
-
-    Ok(result)
+    Ok(ui_diagnostics)
 }
 
 /// Format BSL code
@@ -67,15 +91,8 @@ pub async fn format_bsl(
     code: String,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>,
 ) -> Result<String, String> {
-    crate::app_log!("[BSL] Requesting format of {} chars", code.len());
-    let mut client = state.inner().lock().await;
-
-    if !client.is_connected() {
-        let _ = client.connect().await;
-    }
-
-    let uri = client.temporary_document_uri("format");
-    client.format_code(&code, &uri).await
+    let client = state.inner().lock().await;
+    client.format_code(&code, "frontend-format").await
 }
 
 /// Check BSL LS status
@@ -114,7 +131,8 @@ pub async fn check_bsl_status_cmd(
         settings.bsl_server.workspace_path.clone()
     };
 
-    let (connected, mcp_available, active_port) = if let Ok(client) = state.inner().try_lock() {
+    let (connected, mcp_available, active_port) = {
+        let client = state.inner().lock().await;
         (
             client.is_connected(),
             client.is_official_mcp_available(),
@@ -122,8 +140,6 @@ pub async fn check_bsl_status_cmd(
                 .active_port()
                 .unwrap_or(settings.bsl_server.websocket_port),
         )
-    } else {
-        (false, false, settings.bsl_server.websocket_port)
     };
 
     Ok(BslStatus {
@@ -199,12 +215,12 @@ pub async fn diagnose_bsl_ls_cmd(
 ) -> Result<Vec<BslDiagnosticItem>, String> {
     let settings = settings::load_settings();
     let mut report = Vec::new();
-    let active_port = state
-        .inner()
-        .try_lock()
-        .ok()
-        .and_then(|client| client.active_port())
-        .unwrap_or(settings.bsl_server.websocket_port);
+    let active_port = {
+        let client = state.inner().lock().await;
+        client
+            .active_port()
+            .unwrap_or(settings.bsl_server.websocket_port)
+    };
 
     let native_path = std::path::Path::new(&settings.bsl_server.executable_path);
     if !settings.bsl_server.executable_path.trim().is_empty() && native_path.is_file() {
