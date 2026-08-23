@@ -258,7 +258,7 @@ export function MainLayout() {
             unlistenPromise.then(fn => fn());
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [bslStatus?.connected, docUri]); // Re-run when connection or URI changes
+    }, [docUri]); // Re-run when URI changes
 
     // Пока сессия лежит — периодически пробуем поднять её через didOpen.
     // Останавливается сразу, как только статус станет connected.

@@ -278,19 +278,11 @@ pub fn run() {
                 )
                 .await;
 
-                let mut client = client_inner.lock().await;
-
-                if let Err(e) = client.start_server() {
-                    crate::app_log!(force: true, "[BSL LS] Failed to start: {}", e);
-                } else {
-                    crate::app_log!("[BSL LS] Started");
-                    // Try to connect immediately
-                    if let Err(e) = client.connect().await {
-                        crate::app_log!(force: true, "[BSL LS] Failed to connect: {}", e);
-                    } else {
-                        crate::app_log!("[BSL LS] Connected");
-                    }
-                }
+                // BSL LS startup (start_server + connect) is NOT done here.
+                // The first `bsl_did_open` from the frontend triggers
+                // `ensure_bsl_connected`, which is the single owner of the
+                // startup lifecycle. This prevents a double-handshake race
+                // between this spawn and the frontend's initial didOpen.
             });
 
             Ok(())
