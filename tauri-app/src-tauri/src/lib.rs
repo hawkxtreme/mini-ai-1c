@@ -278,25 +278,29 @@ pub fn run() {
                 )
                 .await;
 
-                let mut client = client_inner.lock().await;
-
-                if let Err(e) = client.start_server() {
-                    crate::app_log!(force: true, "[BSL LS] Failed to start: {}", e);
-                } else {
-                    crate::app_log!("[BSL LS] Started");
-                    // Try to connect immediately
-                    if let Err(e) = client.connect().await {
-                        crate::app_log!(force: true, "[BSL LS] Failed to connect: {}", e);
-                    } else {
-                        crate::app_log!("[BSL LS] Connected");
-                    }
-                }
+                // BSL LS startup (start_server + connect) is NOT done here.
+                // The first `bsl_did_open` from the frontend triggers
+                // `ensure_bsl_connected`, which is the single owner of the
+                // startup lifecycle. This prevents a double-handshake race
+                // between this spawn and the frontend's initial didOpen.
             });
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Graceful BSL LS shutdown while the async runtime is still alive.
+                let client_arc =
+                    app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+                let client_inner = client_arc.inner().clone();
+                tauri::async_runtime::block_on(async {
+                    let mut guard = client_inner.lock().await;
+                    guard.shutdown().await;
+                });
+            }
+        });
 }
 
 /// Recursively copy all files from `src` to `dst`, skipping files that already exist in `dst`.

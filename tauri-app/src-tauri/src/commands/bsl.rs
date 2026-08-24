@@ -175,11 +175,11 @@ pub async fn reconnect_bsl_ls_cmd(
 ) -> Result<(), String> {
     {
         let mut client = state.inner().lock().await;
-        client.stop();
+        client.shutdown().await;
     }
 
-    // Wait for the old Java process to fully release the port before checking is_port_listening
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Brief pause for the OS to release the port after the process exits.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     {
         let mut client = state.inner().lock().await;
