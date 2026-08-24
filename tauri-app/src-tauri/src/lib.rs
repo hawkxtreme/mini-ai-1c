@@ -287,8 +287,20 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Graceful BSL LS shutdown while the async runtime is still alive.
+                let client_arc =
+                    app_handle.state::<Arc<tokio::sync::Mutex<crate::bsl_client::BSLClient>>>();
+                let client_inner = client_arc.inner().clone();
+                tauri::async_runtime::block_on(async {
+                    let mut guard = client_inner.lock().await;
+                    guard.shutdown().await;
+                });
+            }
+        });
 }
 
 /// Recursively copy all files from `src` to `dst`, skipping files that already exist in `dst`.

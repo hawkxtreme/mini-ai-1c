@@ -387,7 +387,7 @@ impl McpManager {
             if let Ok(mut bsl) =
                 tokio::time::timeout(Duration::from_millis(500), bsl_client.lock()).await
             {
-                bsl.stop();
+                bsl.shutdown().await;
             };
         }
     }

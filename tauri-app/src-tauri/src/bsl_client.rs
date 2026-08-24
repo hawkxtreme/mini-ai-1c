@@ -236,6 +236,7 @@ pub enum ClientState {
     Disconnected,
     Connecting,
     Ready,
+    Disconnecting,
 }
 
 /// BSL Language Server client
@@ -285,8 +286,12 @@ impl BSLClient {
 
         let result = tokio::time::timeout(timeout, async {
             loop {
-                if *rx.borrow_and_update() == ClientState::Ready {
+                let state = *rx.borrow_and_update();
+                if state == ClientState::Ready {
                     return Ok(());
+                }
+                if state == ClientState::Disconnecting {
+                    return Err("BSL LS client is disconnecting".to_string());
                 }
                 if rx.changed().await.is_err() {
                     // Sender is gone — the client is being torn down.
@@ -316,12 +321,18 @@ impl BSLClient {
         app_handle: Option<&AppHandle>,
         new_state: ClientState,
     ) {
+        let prev = *state_tx.borrow();
+        if prev == new_state {
+            return;
+        }
+
         let _ = state_tx.send(new_state);
 
         let payload = match new_state {
             ClientState::Disconnected => "disconnected",
             ClientState::Connecting => "connecting",
             ClientState::Ready => "ready",
+            ClientState::Disconnecting => "disconnecting",
         };
 
         crate::app_log!("[BSL LS] State changed: {}", payload);
@@ -457,6 +468,12 @@ impl BSLClient {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start BSL LS: {}", e))?;
+
+        // Assign to the global kill-on-close Job Object so the entire process
+        // tree (launcher + JVM) is terminated when the app exits — even on crash.
+        if let Some(pid) = child.id() {
+            crate::job_guard::assign_to_job(pid);
+        }
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -870,6 +887,14 @@ impl BSLClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        let current_state = *self.state_rx.borrow();
+        if current_state == ClientState::Disconnecting && method != "shutdown" {
+            return Err("BSL LS client is disconnecting".to_string());
+        }
+        if current_state == ClientState::Connecting && method != "initialize" {
+            return Err("BSL LS client is still connecting".to_string());
+        }
+
         let tx = self.ws_tx.as_ref().ok_or("Not connected")?;
 
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
@@ -901,7 +926,13 @@ impl BSLClient {
                     crate::app_log!("[BSL LS] LSP error response: {:?}", error);
                     return Err(format!("LSP error {}: {}", error.code, error.message));
                 }
-                Ok(response.result.unwrap_or(serde_json::Value::Null))
+                let res_val = response.result.unwrap_or(serde_json::Value::Null);
+                crate::app_log!(
+                    "[BSL LS] <<< Response {}: {}",
+                    method,
+                    serde_json::to_string(&res_val).unwrap_or_default()
+                );
+                Ok(res_val)
             }
             Ok(Err(_)) => Err("Response channel closed".to_string()),
             Err(_) => {
@@ -914,7 +945,7 @@ impl BSLClient {
                 );
                 Err(format!(
                     "Timeout waiting for BSL LS response to '{}'",
-                     method
+                    method
                 ))
             }
         }
@@ -926,6 +957,14 @@ impl BSLClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<(), String> {
+        let current_state = *self.state_rx.borrow();
+        if current_state == ClientState::Disconnecting && method != "exit" {
+            return Err("BSL LS client is disconnecting".to_string());
+        }
+        if current_state == ClientState::Connecting && method != "initialized" {
+            return Err("BSL LS client is still connecting".to_string());
+        }
+
         let tx = self.ws_tx.as_ref().ok_or("Not connected")?;
 
         let request = JsonRpcRequest {
@@ -1480,31 +1519,62 @@ impl BSLClient {
         self.set_state(ClientState::Disconnected);
     }
 
-    /// Stop the server and clear LSP session state.
-    pub fn stop(&mut self) {
+    /// Graceful async shutdown: LSP `shutdown` → `exit` → wait → escalate to kill.
+    ///
+    /// Must be called while the async runtime is still alive (i.e. from a
+    /// `RunEvent::Exit` handler, **not** from `Drop`).
+    pub async fn shutdown(&mut self) {
         let owns_process = self.server_process.is_some();
-        let ws_tx = self.ws_tx.take();
+        self.set_state(ClientState::Disconnecting);
+
+        if owns_process && self.ws_tx.is_some() {
+            // Phase 1: send LSP `shutdown` request and await response.
+            match self.send_request("shutdown", serde_json::Value::Null).await {
+                Ok(_) => {
+                    // Phase 2: only send `exit` notification after shutdown response is received.
+                    if let Err(err) = self.send_notification("exit", serde_json::json!({})).await {
+                        crate::app_log!("[BSL LS] Failed to send exit notification: {}", err);
+                    }
+                }
+                Err(err) => {
+                    crate::app_log!(
+                        "[BSL LS] Shutdown request failed: {} — skipping exit notification",
+                        err
+                    );
+                }
+            }
+        }
+
+        // Phase 3: wait for the process to exit on its own (up to 3 s),
+        // then escalate to a hard kill.
+        if let Some(mut child) = self.server_process.take() {
+            let exited = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            if exited.is_err() || exited.as_ref().is_ok_and(|r| r.is_err()) {
+                crate::app_log!(
+                    "[BSL LS] Server did not exit within 3 s after shutdown — killing"
+                );
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            }
+        }
+
+        self.invalidate_connection();
+        self.actual_port = None;
+        self.mcp_enabled = false;
+        crate::app_log!("[BSL LS] Shutdown complete");
+    }
+
+    /// Synchronous last-resort cleanup called from `Drop`.
+    ///
+    /// Does **not** perform the LSP handshake (no async runtime available).
+    /// Relies on `start_kill()` and the Windows Job Object for process cleanup.
+    pub fn stop(&mut self) {
+        self.ws_tx = None;
         self.capabilities = None;
         self.workspace_root = None;
         self.actual_port = None;
         self.mcp_enabled = false;
         self.set_state(ClientState::Disconnected);
-
-        if owns_process {
-            if let Some(tx) = ws_tx {
-                tokio::spawn(async move {
-                    let exit_notif = JsonRpcRequest {
-                        jsonrpc: "2.0".to_string(),
-                        id: None,
-                        method: "exit".to_string(),
-                        params: serde_json::json!({}),
-                    };
-                    if let Ok(msg) = serde_json::to_string(&exit_notif) {
-                        let _ = tx.send(msg).await;
-                    }
-                });
-            }
-        }
 
         if let Some(mut child) = self.server_process.take() {
             if let Err(error) = child.start_kill() {
@@ -2247,5 +2317,32 @@ mod tests {
             let result = handle.await.expect("task should not panic");
             assert!(result.is_ok(), "waiter should have received Ready");
         }
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_fails_when_state_transitions_to_disconnecting() {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(ClientState::Connecting);
+        let mut rx = state_rx.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let state = *rx.borrow_and_update();
+                if state == ClientState::Ready {
+                    return Ok(());
+                }
+                if state == ClientState::Disconnecting {
+                    return Err("BSL LS client is disconnecting".to_string());
+                }
+                if rx.changed().await.is_err() {
+                    return Err("BSL LS client is shutting down".to_string());
+                }
+            }
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        state_tx.send(ClientState::Disconnecting).unwrap();
+
+        let result = handle.await.expect("task did not panic");
+        assert_eq!(result, Err("BSL LS client is disconnecting".to_string()));
     }
 }
