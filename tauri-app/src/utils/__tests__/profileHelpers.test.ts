@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     getProfileReasoningLevel,
+    formatModelLabel,
+    buildModelDetailsLines,
     formatProfileModelLabel,
     formatProfileTooltip,
     formatProfileSummary,
@@ -124,5 +126,58 @@ test('formatProfileSummary builds combined provider and model with reasoning', (
             model: 'gpt-4o',
         }),
         'OpenAI • gpt-4o'
+    );
+});
+
+test('formatModelLabel formats with reasoning, fallbacks, and edge cases', () => {
+    assert.equal(formatModelLabel('o3-mini', 'high'), 'o3-mini (high)');
+    assert.equal(formatModelLabel('o3-mini', 'none'), 'o3-mini');
+    assert.equal(formatModelLabel('', 'low', 'Fallback'), 'Fallback (low)');
+    assert.equal(formatModelLabel(null, null, null), null);
+    // Cases previously covered by formatMessageModelLabel wrapper:
+    assert.equal(formatModelLabel('o3-mini', 'medium'), 'o3-mini (medium)');
+    assert.equal(formatModelLabel('qwen-max', 'thinking'), 'qwen-max (thinking)');
+    assert.equal(formatModelLabel('gpt-4o', 'none'), 'gpt-4o');
+    assert.equal(formatModelLabel('gpt-4o', undefined), 'gpt-4o');
+    assert.equal(formatModelLabel('gpt-4o', null), 'gpt-4o');
+    assert.equal(formatModelLabel('', 'high', 'Fallback Profile'), 'Fallback Profile (high)');
+    assert.equal(formatModelLabel(undefined, undefined, 'Fallback Profile'), 'Fallback Profile');
+    assert.equal(formatModelLabel('', '', ''), null);
+    assert.equal(formatModelLabel(null, null, null), null);
+    assert.equal(formatModelLabel(undefined, undefined, undefined), null);
+});
+
+test('buildModelDetailsLines formats metadata lines and joins for tooltips', () => {
+    const lines = buildModelDetailsLines({
+        profileName: 'My Profile',
+        provider: 'OpenAI',
+        model: 'o3-mini',
+        reasoningLevel: 'high',
+    });
+    assert.deepEqual(lines, [
+        'Профиль: My Profile',
+        'Провайдер: OpenAI',
+        'Модель: o3-mini',
+        'Рассуждения: high',
+    ]);
+    assert.deepEqual(buildModelDetailsLines(null), []);
+    assert.deepEqual(buildModelDetailsLines({}), []);
+    // Cases previously covered by formatMessageModelTooltip wrapper (join('\n')):
+    assert.equal(
+        buildModelDetailsLines({
+            profileName: 'OpenAI Fast',
+            provider: 'OpenAI',
+            model: 'o3-mini',
+            reasoningLevel: 'medium',
+        }).join('\n'),
+        'Профиль: OpenAI Fast\nПровайдер: OpenAI\nМодель: o3-mini\nРассуждения: medium'
+    );
+    assert.equal(
+        buildModelDetailsLines({ model: 'gpt-4o' }).join('\n'),
+        'Модель: gpt-4o'
+    );
+    assert.equal(
+        buildModelDetailsLines({ model: 'gpt-4o', reasoningLevel: 'none' }).join('\n'),
+        'Модель: gpt-4o'
     );
 });

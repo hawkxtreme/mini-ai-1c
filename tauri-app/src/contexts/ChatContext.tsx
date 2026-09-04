@@ -8,6 +8,8 @@ import { useSettings } from './SettingsContext';
 import { useProfiles } from './ProfileContext';
 import { useChatSessions, ChatSession } from '../hooks/useChatSessions';
 import { clampPayloadToBudget } from '../utils/contextPayload';
+import { getProfileReasoningLevel } from '../utils/profileHelpers';
+import type { LLMProfile } from '../api/profiles';
 
 export type { ChatSession };
 
@@ -47,6 +49,10 @@ export interface ChatMessage {
     diagnostics?: BSLDiagnostic[];
     timestamp: number;
     responseTime?: number;
+    model?: string;
+    reasoningLevel?: string;
+    provider?: string;
+    profileName?: string;
     variant?: 'warning' | 'info' | 'compression';
     includeInPayload?: boolean;
 }
@@ -265,6 +271,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(false);
     const [streamStartTime, setStreamStartTime] = useState<number | null>(null);
     const streamStartTimeRef = useRef<number | null>(null);
+    const requestProfileRef = useRef<LLMProfile | null>(null);
+    const activeProfileRef = useRef(activeProfile);
+    useEffect(() => {
+        activeProfileRef.current = activeProfile;
+    }, [activeProfile]);
     const [chatStatus, setChatStatus] = useState('');
     const [currentIteration, setCurrentIteration] = useState(0);
     const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -611,6 +622,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         flushNow();
                         const elapsed = streamStartTimeRef.current ? Date.now() - streamStartTimeRef.current : null;
                         streamStartTimeRef.current = null;
+                        const profile = requestProfileRef.current || activeProfileRef.current;
+                        requestProfileRef.current = null;
+                        const modelName = profile?.model?.trim() || profile?.name?.trim();
+                        const reasoningLevel = getProfileReasoningLevel(profile);
+                        const provider = profile?.provider?.trim();
+                        const profileName = profile?.name?.trim();
                         setStreamStartTime(null);
                         setIsLoading(false);
                         setChatStatus('');
@@ -633,11 +650,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             ) {
                                 filtered.pop();
                             }
-                            // Attach responseTime to last assistant message
+                            // Attach responseTime and model metadata to last assistant message
                             if (elapsed && filtered.length > 0) {
                                 const lastIdx = filtered.length - 1;
                                 if (filtered[lastIdx].role === 'assistant') {
-                                    filtered[lastIdx] = { ...filtered[lastIdx], responseTime: elapsed };
+                                    filtered[lastIdx] = {
+                                        ...filtered[lastIdx],
+                                        responseTime: elapsed,
+                                        ...(modelName ? { model: modelName } : {}),
+                                        ...(reasoningLevel ? { reasoningLevel } : {}),
+                                        ...(provider ? { provider } : {}),
+                                        ...(profileName ? { profileName } : {}),
+                                    };
                                 }
                             }
                             return filtered;
@@ -803,6 +827,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        requestProfileRef.current = activeProfile || null;
         streamStartTimeRef.current = Date.now();
         setStreamStartTime(streamStartTimeRef.current);
 
@@ -978,6 +1003,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        requestProfileRef.current = activeProfile || null;
         streamStartTimeRef.current = Date.now();
         setStreamStartTime(streamStartTimeRef.current);
 

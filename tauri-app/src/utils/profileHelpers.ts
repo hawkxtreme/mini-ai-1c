@@ -40,19 +40,66 @@ export function getProfileReasoningLevel(
 }
 
 /**
+ * Base helper: formats a model name with an optional reasoning level.
+ * Returns null if both model and fallback name are empty.
+ */
+export function formatModelLabel(
+    model?: string | null,
+    reasoningLevel?: string | null,
+    fallbackName?: string | null
+): string | null {
+    const rawModel = (model || '').trim();
+    const displayName = rawModel || (fallbackName || '').trim();
+    if (!displayName) return null;
+    const reasoning = (reasoningLevel || '').trim();
+    if (reasoning && reasoning !== 'none') {
+        return `${displayName} (${reasoning})`;
+    }
+    return displayName;
+}
+
+export interface ModelMetadataDetails {
+    model?: string | null;
+    reasoningLevel?: string | null;
+    provider?: string | null;
+    profileName?: string | null;
+}
+
+/**
+ * Base helper: builds formatted metadata lines (Profile, Provider, Model, Reasoning).
+ */
+export function buildModelDetailsLines(info?: ModelMetadataDetails | null): string[] {
+    if (!info) return [];
+    const lines: string[] = [];
+    if (info.profileName?.trim()) {
+        lines.push(`Профиль: ${info.profileName.trim()}`);
+    }
+    if (info.provider?.trim()) {
+        lines.push(`Провайдер: ${info.provider.trim()}`);
+    }
+    if (info.model?.trim()) {
+        lines.push(`Модель: ${info.model.trim()}`);
+    }
+    const reasoning = info.reasoningLevel?.trim();
+    if (reasoning && reasoning !== 'none') {
+        lines.push(`Рассуждения: ${reasoning}`);
+    }
+    return lines;
+}
+
+/**
  * Generates the compact model label for the chat input button (e.g. "o3-mini (medium)" or "gpt-4o").
  */
 export function formatProfileModelLabel(
     profile?: Pick<LLMProfile, 'name' | 'model' | 'reasoning_effort' | 'enable_thinking'> | null
 ): string {
-    if (!profile) return 'Модель';
-    const rawModel = (profile.model || '').trim();
-    const displayName = rawModel || (profile.name || '').trim() || 'Модель';
-    const reasoning = getProfileReasoningLevel(profile);
-    if (reasoning) {
-        return `${displayName} (${reasoning})`;
-    }
-    return displayName;
+    return (
+        formatModelLabel(
+            profile?.model,
+            getProfileReasoningLevel(profile),
+            profile?.name
+        ) || 'Модель'
+    );
 }
 
 /**
@@ -62,24 +109,14 @@ export function formatProfileTooltip(
     profile?: Pick<LLMProfile, 'name' | 'provider' | 'model' | 'reasoning_effort' | 'enable_thinking'> | null,
     behaviorPreset?: string | null
 ): string {
-    const lines: string[] = [];
-    if (profile) {
-        if (profile.name) {
-            lines.push(`Профиль: ${profile.name}`);
-        }
-        if (profile.provider) {
-            lines.push(`Провайдер: ${profile.provider}`);
-        }
-        if (profile.model) {
-            lines.push(`Модель: ${profile.model}`);
-        }
-        const reasoning = getProfileReasoningLevel(profile);
-        if (reasoning) {
-            lines.push(`Рассуждения: ${reasoning}`);
-        }
-    } else {
-        lines.push('Профиль не выбран');
-    }
+    const lines: string[] = profile
+        ? buildModelDetailsLines({
+            profileName: profile.name,
+            provider: profile.provider,
+            model: profile.model,
+            reasoningLevel: getProfileReasoningLevel(profile),
+        })
+        : ['Профиль не выбран'];
 
     if (behaviorPreset) {
         const modeLabel = behaviorPreset === 'maintenance'
@@ -92,7 +129,6 @@ export function formatProfileTooltip(
 
     return lines.join('\n');
 }
-
 /**
  * Generates formatted summary for dropdown profile items (e.g. "CodexCli • gpt-4o (high)").
  */
@@ -103,9 +139,9 @@ export function formatProfileSummary(
     if (profile.provider) {
         parts.push(profile.provider);
     }
-    if (profile.model) {
-        const reasoning = getProfileReasoningLevel(profile);
-        parts.push(reasoning ? `${profile.model} (${reasoning})` : profile.model);
+    const modelLabel = formatModelLabel(profile.model, getProfileReasoningLevel(profile));
+    if (modelLabel) {
+        parts.push(modelLabel);
     }
     return parts.join(' • ');
 }
