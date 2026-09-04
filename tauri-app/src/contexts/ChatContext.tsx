@@ -20,6 +20,29 @@ export interface ToolCall {
     startedAt?: number;
     duration?: number;
     thought_signature?: string;
+    internal?: boolean;
+}
+
+/**
+ * Resolve the index of a tool call in the array by its batch ID.
+ * Falls back to positional index or first pending/executing tool call
+ * when the ID-based lookup fails (e.g. provider streamed name before ID).
+ */
+function resolveToolCallIndex(
+    toolCalls: ToolCall[],
+    batchToolIds: string[],
+    eventIndex: number,
+): number {
+    const toolId = batchToolIds[eventIndex];
+    let idx = toolId ? toolCalls.findIndex(tc => tc.id === toolId) : -1;
+    if (idx === -1) {
+        if (eventIndex < toolCalls.length) {
+            idx = eventIndex;
+        } else {
+            idx = toolCalls.findIndex(tc => tc.status === 'pending' || tc.status === 'executing');
+        }
+    }
+    return idx;
 }
 
 export interface BSLDiagnostic {
@@ -156,7 +179,7 @@ function slidingWindowCompress(
     return { compressed: [...systemMsgs, first, ...tail], removedCount };
 }
 
-function buildPayloadMessages(
+export function buildPayloadMessages(
     msgs: ChatMessage[],
     currentUserMessageId: string,
     contextPayload: string
@@ -170,7 +193,7 @@ function buildPayloadMessages(
 
             if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
                 const completedToolCalls = m.toolCalls.filter(tc =>
-                    tc.id && tc.result !== undefined && (tc.status === 'done' || tc.status === 'error')
+                    !tc.internal && tc.id && tc.result !== undefined && (tc.status === 'done' || tc.status === 'error')
                 );
 
                 if (completedToolCalls.length === 0) {
@@ -425,17 +448,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         thinkingBuffer.current += event.payload;
                         scheduleFlush();
                     }),
-                    listen<{ index: number, id: string, name: string }>('tool-call-started', (event) => {
+                    listen<{ index: number, id: string, name: string, internal?: boolean }>('tool-call-started', (event) => {
                         flushNow();
                         // Progress/signature events may follow immediately in the same stream delta.
                         currentBatchToolIds.current[event.payload.index] = event.payload.id;
                         setMessages(prev => {
-                            const newToolCall = {
+                            const newToolCall: ToolCall = {
                                 id: event.payload.id,
                                 name: event.payload.name,
                                 arguments: '',
                                 status: 'pending' as const,
-                                startedAt: Date.now()
+                                startedAt: Date.now(),
+                                internal: event.payload.internal ?? false,
                             };
 
                             // Ищем последнее assistant-сообщение, не пересекая границу хода (user-сообщение)
@@ -481,8 +505,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             const last = prev[lastAssistantIdx];
                             const toolCalls = [...last.toolCalls!];
                             // Ищем по ID из ref (индекс — позиция в текущей итерации, не в массиве)
-                            const toolId = currentBatchToolIds.current[event.payload.index];
-                            const tcIdx = toolId ? toolCalls.findIndex(tc => tc.id === toolId) : -1;
+                            const tcIdx = resolveToolCallIndex(toolCalls, currentBatchToolIds.current, event.payload.index);
                             if (tcIdx !== -1) {
                                 toolCalls[tcIdx] = {
                                     ...toolCalls[tcIdx],
@@ -508,8 +531,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
                             const last = prev[lastAssistantIdx];
                             const toolCalls = [...last.toolCalls!];
-                            const toolId = currentBatchToolIds.current[event.payload.index];
-                            const tcIdx = toolId ? toolCalls.findIndex(tc => tc.id === toolId) : -1;
+                            const tcIdx = resolveToolCallIndex(toolCalls, currentBatchToolIds.current, event.payload.index);
                             if (tcIdx !== -1) {
                                 toolCalls[tcIdx] = {
                                     ...toolCalls[tcIdx],
