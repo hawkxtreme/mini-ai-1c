@@ -45,8 +45,12 @@ export function ProfileProvider({ children }: { children: React.ReactNode }) {
     }, [loadProfiles]);
 
     const handleSetActiveProfile = React.useCallback(async (id: string) => {
-        await api.setActiveProfile(id);
-        await loadProfiles();
+        setStore(prev => prev ? { ...prev, active_profile_id: id } : prev);
+        try {
+            await api.setActiveProfile(id);
+        } finally {
+            await loadProfiles();
+        }
     }, [loadProfiles]);
 
     const handleSaveProfile = React.useCallback(async (profile: LLMProfile, apiKey?: string) => {

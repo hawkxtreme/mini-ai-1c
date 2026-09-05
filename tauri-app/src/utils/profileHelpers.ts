@@ -65,6 +65,33 @@ export interface ModelMetadataDetails {
     profileName?: string | null;
 }
 
+export interface AssistantMessageMetadata {
+    model?: string;
+    reasoningLevel?: string;
+    provider?: string;
+    profileName?: string;
+}
+
+/**
+ * Resolves metadata fields to attach to an assistant response message from the active/requested LLM profile.
+ */
+export function resolveAssistantMessageMetadata(
+    profile?: LLMProfile | null
+): AssistantMessageMetadata {
+    if (!profile) return {};
+    const modelName = profile.model?.trim() || profile.name?.trim();
+    const reasoningLevel = getProfileReasoningLevel(profile);
+    const provider = profile.provider?.trim();
+    const profileName = profile.name?.trim();
+
+    return {
+        ...(modelName ? { model: modelName } : {}),
+        ...(reasoningLevel ? { reasoningLevel } : {}),
+        ...(provider ? { provider } : {}),
+        ...(profileName ? { profileName } : {}),
+    };
+}
+
 /**
  * Base helper: builds formatted metadata lines (Profile, Provider, Model, Reasoning).
  */

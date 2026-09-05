@@ -7,6 +7,7 @@ import {
     formatProfileModelLabel,
     formatProfileTooltip,
     formatProfileSummary,
+    resolveAssistantMessageMetadata,
 } from '../profileHelpers';
 
 test('getProfileReasoningLevel returns reasoning_effort when set and not none', () => {
@@ -180,4 +181,116 @@ test('buildModelDetailsLines formats metadata lines and joins for tooltips', () 
         buildModelDetailsLines({ model: 'gpt-4o', reasoningLevel: 'none' }).join('\n'),
         'Модель: gpt-4o'
     );
+});
+
+test('resolveAssistantMessageMetadata resolves metadata from LLM profile correctly', () => {
+    assert.deepEqual(resolveAssistantMessageMetadata(null), {});
+    assert.deepEqual(resolveAssistantMessageMetadata(undefined), {});
+
+    const standardProfile = {
+        id: 'p1',
+        name: 'GPT-4o Main',
+        provider: 'OpenAI',
+        model: 'gpt-4o',
+        api_key_encrypted: '',
+        base_url: null,
+        max_tokens: 4096,
+        temperature: 0.7,
+    };
+    assert.deepEqual(resolveAssistantMessageMetadata(standardProfile), {
+        model: 'gpt-4o',
+        provider: 'OpenAI',
+        profileName: 'GPT-4o Main',
+    });
+
+    const reasoningProfile = {
+        id: 'p2',
+        name: 'Codex Fast',
+        provider: 'CodexCli',
+        model: 'o3-mini',
+        reasoning_effort: 'high' as const,
+        api_key_encrypted: '',
+        base_url: null,
+        max_tokens: 4096,
+        temperature: 0.2,
+    };
+    assert.deepEqual(resolveAssistantMessageMetadata(reasoningProfile), {
+        model: 'o3-mini',
+        reasoningLevel: 'high',
+        provider: 'CodexCli',
+        profileName: 'Codex Fast',
+    });
+
+    const thinkingProfile = {
+        id: 'p3',
+        name: 'Qwen Reason',
+        provider: 'QwenCli',
+        model: 'qwen-max',
+        enable_thinking: true,
+        api_key_encrypted: '',
+        base_url: null,
+        max_tokens: 4096,
+        temperature: 0.1,
+    };
+    assert.deepEqual(resolveAssistantMessageMetadata(thinkingProfile), {
+        model: 'qwen-max',
+        reasoningLevel: 'thinking',
+        provider: 'QwenCli',
+        profileName: 'Qwen Reason',
+    });
+
+    const fallbackProfile = {
+        id: 'p4',
+        name: 'Custom Assistant',
+        provider: 'Ollama',
+        model: '',
+        api_key_encrypted: '',
+        base_url: 'http://localhost:11434',
+        max_tokens: 2048,
+        temperature: 0.5,
+    };
+    assert.deepEqual(resolveAssistantMessageMetadata(fallbackProfile), {
+        model: 'Custom Assistant',
+        provider: 'Ollama',
+        profileName: 'Custom Assistant',
+    });
+});
+
+test('profile switching produces distinct and updated assistant metadata', () => {
+    const profileA = {
+        id: 'p_a',
+        name: 'Model A',
+        provider: 'OpenAI',
+        model: 'gpt-4o',
+        api_key_encrypted: '',
+        base_url: null,
+        max_tokens: 4096,
+        temperature: 0.7,
+    };
+    const profileB = {
+        id: 'p_b',
+        name: 'Model B',
+        provider: 'Anthropic',
+        model: 'claude-3-7-sonnet',
+        enable_thinking: true,
+        api_key_encrypted: '',
+        base_url: null,
+        max_tokens: 4096,
+        temperature: 0.5,
+    };
+
+    const metadataA = resolveAssistantMessageMetadata(profileA);
+    const metadataB = resolveAssistantMessageMetadata(profileB);
+
+    assert.equal(metadataA.model, 'gpt-4o');
+    assert.equal(metadataA.provider, 'OpenAI');
+    assert.equal(metadataA.reasoningLevel, undefined);
+
+    assert.equal(metadataB.model, 'claude-3-7-sonnet');
+    assert.equal(metadataB.provider, 'Anthropic');
+    assert.equal(metadataB.reasoningLevel, 'thinking');
+
+    // Verify formatModelLabel and tooltips for both
+    assert.equal(formatModelLabel(metadataA.model, metadataA.reasoningLevel, metadataA.profileName), 'gpt-4o');
+    assert.equal(formatModelLabel(metadataB.model, metadataB.reasoningLevel, metadataB.profileName), 'claude-3-7-sonnet (thinking)');
 });
