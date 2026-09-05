@@ -315,26 +315,76 @@ fn extract_latest_user_bsl_blocks(messages: &[ApiMessage]) -> Vec<String> {
 fn build_forced_bsl_syntax_tool_call(
     idx: usize,
     code: &str,
-) -> (
-    String,
-    serde_json::Value,
-    String,
-    crate::ai::models::ToolCall,
-) {
+) -> (String, serde_json::Value) {
     let tool_call_id = format!("auto_check_bsl_syntax_{}", idx + 1);
     let arguments_value = serde_json::json!({ "code": code });
-    let arguments = arguments_value.to_string();
-    let tool_call = crate::ai::models::ToolCall {
-        id: tool_call_id.clone(),
-        r#type: "function".to_string(),
-        function: crate::ai::models::ToolCallFunction {
-            name: "check_bsl_syntax".to_string(),
-            arguments: arguments.clone(),
-        },
-        extra_content: None,
-    };
+    (tool_call_id, arguments_value)
+}
 
-    (tool_call_id, arguments_value, arguments, tool_call)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BslPrecheckReport {
+    Success {
+        diagnostics: Vec<BSLDiagnostic>,
+    },
+    Error(String),
+    Timeout(u64),
+}
+
+pub(crate) fn format_bsl_syntax_precheck_block(reports: &[BslPrecheckReport]) -> String {
+    let mut block = String::from("<bsl_syntax_precheck>\n");
+    block.push_str("Среда разработки Mini AI 1C выполнила автоматическую предварительную проверку синтаксиса BSL (1C:Предприятие) для фрагментов кода из последнего сообщения пользователя через BSL Language Server:\n\n");
+
+    for (idx, report) in reports.iter().enumerate() {
+        let block_num = idx + 1;
+        match report {
+            BslPrecheckReport::Success { diagnostics } => {
+                if diagnostics.is_empty() {
+                    block.push_str(&format!("- Фрагмент {}: синтаксических ошибок не обнаружено.\n", block_num));
+                } else {
+                    block.push_str(&format!(
+                        "- Фрагмент {}: обнаружено ошибок/предупреждений ({}):\n",
+                        block_num,
+                        diagnostics.len()
+                    ));
+                    for d in diagnostics {
+                        block.push_str(&format!(
+                            "  * [Строка {}, колонка {}] {}: {}\n",
+                            d.line + 1,
+                            d.character + 1,
+                            match d.severity.as_str() {
+                                "error" => "Ошибка",
+                                "warning" => "Предупреждение",
+                                "info" => "Информация",
+                                _ => "Подсказка",
+                            },
+                            d.message
+                        ));
+                    }
+                }
+            }
+            BslPrecheckReport::Error(err) => {
+                block.push_str(&format!(
+                    "- Фрагмент {}: предварительная проверка завершилась ошибкой: {}\n",
+                    block_num, err
+                ));
+            }
+            BslPrecheckReport::Timeout(secs) => {
+                block.push_str(&format!(
+                    "- Фрагмент {}: предварительная проверка превысила таймаут ({}с).\n",
+                    block_num, secs
+                ));
+            }
+        }
+    }
+
+    block.push_str("\nИнструкция для ассистента:\n");
+    block.push_str("1. Исходный код пользователя уже проверен средой. Повторно вызывать инструмент check_bsl_syntax для неизмененного исходного кода пользователя НЕ требуется.\n");
+    block.push_str("2. Учитывайте результаты синтаксической проверки выше при ответе и исправлении кода.\n");
+    block.push_str("3. Если вы генерируете новый, исправленный или модифицированный код BSL, вы можете при необходимости проверить его инструментом check_bsl_syntax.\n");
+    block.push_str("4. Если проверка какого-либо фрагмента завершилась ошибкой или таймаутом, вы можете при необходимости проверить этот фрагмент самостоятельно.\n");
+    block.push_str("</bsl_syntax_precheck>");
+
+    block
 }
 
 fn bsl_diagnostic_to_ui(diagnostic: &crate::bsl_client::Diagnostic) -> BSLDiagnostic {
@@ -508,39 +558,33 @@ pub async fn stream_chat(
             let bsl_blocks = extract_latest_user_bsl_blocks(&api_messages);
             if !bsl_blocks.is_empty() {
                 crate::app_log!(
-                    "[AI][TOOL][AUTO] Active custom prompt requires check_bsl_syntax; forcing {} tool call(s)",
+                    "[AI][TOOL][AUTO] Active custom prompt requires check_bsl_syntax; checking {} code block(s)",
                     bsl_blocks.len()
                 );
                 let _ = task_app_handle.emit("chat-status", "Checking BSL syntax...");
 
                 let mut forced_ui_diagnostics: Vec<BSLDiagnostic> = Vec::new();
+                let mut precheck_reports: Vec<BslPrecheckReport> = Vec::new();
 
                 for (idx, code) in bsl_blocks.iter().enumerate() {
-                    let (tool_call_id, arguments_value, arguments, tool_call) =
+                    let (tool_call_id, arguments_value) =
                         build_forced_bsl_syntax_tool_call(idx, code);
                     let tool_name = "check_bsl_syntax";
-
-                    api_messages.push(ApiMessage {
-                        role: "assistant".to_string(),
-                        content: None,
-                        tool_calls: Some(vec![tool_call]),
-                        tool_call_id: None,
-                        name: None,
-                    });
 
                     let _ = task_app_handle.emit(
                         "tool-call-started",
                         serde_json::json!({
                             "index": idx,
                             "id": tool_call_id,
-                            "name": tool_name
+                            "name": tool_name,
+                            "internal": true
                         }),
                     );
                     let _ = task_app_handle.emit(
                         "tool-call-progress",
                         serde_json::json!({
                             "index": idx,
-                            "arguments": arguments
+                            "arguments": arguments_value.to_string()
                         }),
                     );
 
@@ -566,23 +610,34 @@ pub async fn stream_chat(
                     )
                     .await;
 
-                    let (status, tool_result) = match call_result {
+                    let (status, ui_result_text, report) = match call_result {
                         Ok(Ok(result)) => {
+                            let mut block_diagnostics: Vec<BSLDiagnostic> = Vec::new();
                             if let Some(diagnostics_value) = result.get("diagnostics") {
                                 if let Ok(diagnostics) =
                                     serde_json::from_value::<Vec<crate::bsl_client::Diagnostic>>(
                                         diagnostics_value.clone(),
                                     )
                                 {
-                                    forced_ui_diagnostics
-                                        .extend(diagnostics.iter().map(bsl_diagnostic_to_ui));
+                                    block_diagnostics = diagnostics.iter().map(bsl_diagnostic_to_ui).collect();
+                                    forced_ui_diagnostics.extend(block_diagnostics.clone());
                                 }
                             }
-                            ("done", result.to_string())
+                            (
+                                "done",
+                                result.to_string(),
+                                BslPrecheckReport::Success {
+                                    diagnostics: block_diagnostics,
+                                },
+                            )
                         }
                         Ok(Err(error)) => {
                             crate::app_log!("[AI][TOOL][AUTO] check_bsl_syntax failed: {}", error);
-                            ("error", format!("Error calling tool: {}", error))
+                            (
+                                "error",
+                                format!("Error calling tool: {}", error),
+                                BslPrecheckReport::Error(error),
+                            )
                         }
                         Err(_) => {
                             crate::app_log!(
@@ -595,6 +650,9 @@ pub async fn stream_chat(
                                     "Error calling tool: Timeout {}s",
                                     crate::mcp_client::BSL_TOOL_CALL_TIMEOUT_SECS
                                 ),
+                                BslPrecheckReport::Timeout(
+                                    crate::mcp_client::BSL_TOOL_CALL_TIMEOUT_SECS,
+                                ),
                             )
                         }
                     };
@@ -604,20 +662,29 @@ pub async fn stream_chat(
                         serde_json::json!({
                             "id": tool_call_id,
                             "status": status,
-                            "result": tool_result
+                            "result": ui_result_text
                         }),
                     );
 
-                    api_messages.push(ApiMessage {
-                        role: "tool".to_string(),
-                        content: Some(tool_result),
-                        tool_call_id: Some(tool_call_id),
-                        tool_calls: None,
-                        name: Some(tool_name.to_string()),
-                    });
+                    precheck_reports.push(report);
                 }
 
                 let _ = task_app_handle.emit("bsl-validation-result", &forced_ui_diagnostics);
+
+                // NB: This system message is appended after user/assistant messages, but
+                // `compose_api_messages` (called inside `stream_chat_completion`) partitions
+                // all system-role messages and merges them into a single system prompt at
+                // position 0.  The precheck block will appear at the end of the combined
+                // system prompt, which is the intended placement.
+                let precheck_block = format_bsl_syntax_precheck_block(&precheck_reports);
+                api_messages.push(ApiMessage {
+                    role: "system".to_string(),
+                    content: Some(precheck_block),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+
                 emit_context_usage(&task_app_handle, &api_messages, effective_context_window);
             }
         }
@@ -1407,14 +1474,39 @@ mod tests {
 
     #[test]
     fn issue_186_builds_forced_check_bsl_syntax_tool_call() {
-        let code = "????????? Hello()\n??????????????";
-        let (tool_call_id, arguments_value, arguments, tool_call) =
+        let code = "Процедура Hello()\nКонецПроцедуры";
+        let (tool_call_id, arguments_value) =
             build_forced_bsl_syntax_tool_call(0, code);
 
         assert_eq!(tool_call_id, "auto_check_bsl_syntax_1");
-        assert_eq!(tool_call.function.name, "check_bsl_syntax");
-        assert_eq!(tool_call.function.arguments, arguments);
         assert_eq!(arguments_value["code"], code);
-        assert!(arguments.contains("????????? Hello"));
+        assert!(arguments_value.to_string().contains("Hello"));
+    }
+
+    #[test]
+    fn formats_bsl_syntax_precheck_block_with_diagnostics() {
+        let reports = vec![
+            BslPrecheckReport::Success {
+                diagnostics: vec![BSLDiagnostic {
+                    line: 3,
+                    character: 0,
+                    message: "Ожидается 'КонецЕсли'".to_string(),
+                    severity: "error".to_string(),
+                }],
+            },
+            BslPrecheckReport::Success {
+                diagnostics: vec![],
+            },
+            BslPrecheckReport::Timeout(15),
+        ];
+
+        let block = format_bsl_syntax_precheck_block(&reports);
+        assert!(block.starts_with("<bsl_syntax_precheck>"));
+        assert!(block.ends_with("</bsl_syntax_precheck>"));
+        assert!(block.contains("Фрагмент 1: обнаружено ошибок/предупреждений (1):"));
+        assert!(block.contains("[Строка 4, колонка 1] Ошибка: Ожидается 'КонецЕсли'"));
+        assert!(block.contains("Фрагмент 2: синтаксических ошибок не обнаружено."));
+        assert!(block.contains("Фрагмент 3: предварительная проверка превысила таймаут (15с)."));
+        assert!(block.contains("Повторно вызывать инструмент check_bsl_syntax для неизмененного исходного кода пользователя НЕ требуется."));
     }
 }

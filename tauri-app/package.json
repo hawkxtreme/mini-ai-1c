@@ -15,6 +15,7 @@
     "build:mcp-search:release": "powershell -Command \"cargo build --release --manifest-path mcp-1c-search/Cargo.toml; $src='mcp-1c-search/target/release/mcp-1c-search.exe'; Copy-Item $src src-tauri/bin/mcp-1c-search-x86_64-pc-windows-msvc.exe -Force; if (Test-Path src-tauri/target/debug/mcp-servers) { Copy-Item $src src-tauri/target/debug/mcp-servers/mcp-1c-search.exe -Force }; if (Test-Path src-tauri/target/release/mcp-servers) { Copy-Item $src src-tauri/target/release/mcp-servers/mcp-1c-search.exe -Force }; Write-Host 'Done: mcp-1c-search updated everywhere'\"",
     "full:build": "npm run build:mcp-search:release && npm run app:build",
     "repack:installers": "npm run build:mcp-search:release && npm run build:mcp && tauri build --bundles msi,nsis",
+    "test": "tsx --test src/**/__tests__/**/*.test.ts && tsx src/utils/diffSession.test.ts && tsx ../tests/run-diff-tests.mts",
     "test:diff": "tsx src/utils/diffSession.test.ts && tsx ../tests/run-diff-tests.mts"
   },
   "dependencies": {

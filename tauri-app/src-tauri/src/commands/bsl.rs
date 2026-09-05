@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio_tungstenite::connect_async;
 
 /// BSL analysis result for UI
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BSLDiagnostic {
     pub line: u32,
     pub character: u32,

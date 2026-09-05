@@ -310,6 +310,35 @@ fn stream_tool_call_event_order(
     .flatten()
 }
 
+pub(crate) fn compose_api_messages(
+    messages: Vec<ApiMessage>,
+    base_system_prompt: String,
+) -> Vec<ApiMessage> {
+    let (system_messages, non_system_messages): (Vec<_>, Vec<_>) =
+        messages.into_iter().partition(|m| m.role == "system");
+
+    let mut combined_system_prompt = base_system_prompt;
+    for sys_msg in system_messages {
+        if let Some(content) = sys_msg.content {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                combined_system_prompt.push_str("\n\n");
+                combined_system_prompt.push_str(trimmed);
+            }
+        }
+    }
+
+    let mut api_messages = vec![ApiMessage {
+        role: "system".to_string(),
+        content: Some(combined_system_prompt),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    }];
+    api_messages.extend(non_system_messages);
+    api_messages
+}
+
 pub async fn stream_chat_completion(
     messages: Vec<ApiMessage>,
     app_handle: tauri::AppHandle,
@@ -330,20 +359,19 @@ pub async fn stream_chat_completion(
     let tools: Vec<Tool> = tools_info.iter().map(|i| i.tool.clone()).collect();
     let tools_opt = if tools.is_empty() { None } else { Some(tools) };
 
+    let non_system_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .cloned()
+        .collect();
+
     let system_prompt = if is_local_provider(Some(&profile.provider)) {
-        get_lightweight_system_prompt(&tools_info, &messages)
+        get_lightweight_system_prompt(&tools_info, &non_system_messages)
     } else {
-        get_system_prompt(&tools_info, &messages)
+        get_system_prompt(&tools_info, &non_system_messages)
     };
 
-    let mut api_messages = vec![ApiMessage {
-        role: "system".to_string(),
-        content: Some(system_prompt),
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    }];
-    api_messages.extend(messages);
+    let mut api_messages = compose_api_messages(messages, system_prompt);
     if matches!(profile.provider, LLMProvider::OllamaCloud) {
         api_messages = sanitize_messages_for_ollama_cloud(api_messages);
     }
@@ -1443,9 +1471,9 @@ pub async fn stream_chat_completion(
                                     }
 
                                     let tc = &mut accumulated_tool_calls[idx];
-                                    // ID приходит только в первом delta — записываем только если ещё не установлен
                                     if let Some(id) = &tc_delta.id {
-                                        if tc.id.is_empty() {
+                                        if tc.id.is_empty() || tc.id.starts_with("synth_") {
+                                            tc.id.clear();
                                             tc.id.push_str(id);
                                         }
                                     }
@@ -1455,6 +1483,13 @@ pub async fn stream_chat_completion(
                                         .and_then(|function| function.name.as_ref())
                                     {
                                         tc.function.name.push_str(name);
+                                    }
+
+                                    // Fallback: some providers stream the function name before
+                                    // the tool-call ID in the first delta chunk.  Generate a
+                                    // synthetic ID so downstream code always has one.
+                                    if tc.id.is_empty() && !tc.function.name.is_empty() {
+                                        tc.id = format!("synth_{}_{}", idx, rand::random::<u32>());
                                     }
 
                                     let arguments_delta = tc_delta
@@ -1855,5 +1890,42 @@ mod tests {
                 StreamToolCallEventKind::Signature,
             ]
         );
+    }
+
+    #[test]
+    fn compose_api_messages_merges_multiple_system_messages_and_preserves_order() {
+        let messages = vec![
+            ApiMessage {
+                role: "system".to_string(),
+                content: Some("<bsl_syntax_precheck>check 1</bsl_syntax_precheck>".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: Some("User prompt".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ApiMessage {
+                role: "system".to_string(),
+                content: Some("Extra system notes".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let composed = compose_api_messages(messages, "Base system prompt".to_string());
+        assert_eq!(composed.len(), 2);
+        assert_eq!(composed[0].role, "system");
+        let sys_content = composed[0].content.as_deref().unwrap();
+        assert!(sys_content.starts_with("Base system prompt"));
+        assert!(sys_content.contains("<bsl_syntax_precheck>check 1</bsl_syntax_precheck>"));
+        assert!(sys_content.contains("Extra system notes"));
+        assert_eq!(composed[1].role, "user");
+        assert_eq!(composed[1].content.as_deref(), Some("User prompt"));
     }
 }
