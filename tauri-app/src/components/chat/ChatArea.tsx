@@ -7,7 +7,7 @@ import { useSettings } from '../../contexts/SettingsContext';
 import { useConfigurator } from '../../contexts/ConfiguratorContext';
 import { parseConfiguratorTitle, ConfiguratorTitleContext } from '../../utils/configurator';
 import { MarkdownRenderer, cleanDiffArtifacts } from '../MarkdownRenderer';
-import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, MoreHorizontal, Info, Wrench } from 'lucide-react';
+import { Loader2, Square, ArrowUp, Settings, ChevronDown, ChevronRight, Monitor, RefreshCw, FileText, MousePointerClick, Brain, BrainCircuit, Check, X, Terminal, Pencil, Play, Send, User, HardHat, Mic, Info, Wrench } from 'lucide-react';
 import logo from '../../assets/logo.png';
 import ToolCallBlock from './ToolCallBlock';
 import { MessageActions } from './MessageActions';
@@ -17,7 +17,14 @@ import {
     resolveDiffPreviewTransition,
     shouldOpenUnseenDiffPreview,
 } from '../../utils/diffSession';
-import { isOllamaCloudProfile } from '../../utils/profileHelpers';
+import {
+    isOllamaCloudProfile,
+    formatModelLabel,
+    buildModelDetailsLines,
+    formatProfileModelLabel,
+    formatProfileTooltip,
+    formatProfileSummary,
+} from '../../utils/profileHelpers';
 import { FileDiff, Plus, Minus, Edit2, PanelRight } from 'lucide-react';
 import { CommandMenu } from './CommandMenu';
 import { ContextChips } from './ContextChips';
@@ -140,13 +147,6 @@ const INCOMPLETE_DIFF_MESSAGE = 'Ответ модели содержит нез
 
 const BSL_VALIDATION_FAILURE_MESSAGE = 'Применение отменено: не удалось проверить синтаксис BSL перед применением.';
 
-function formatProfileSummary(profile: { provider: string; model: string; reasoning_effort?: string | null }) {
-    const parts = [profile.provider, profile.model];
-    if (profile.provider === 'CodexCli') {
-        parts.push(profile.reasoning_effort || 'xhigh');
-    }
-    return parts.filter(Boolean).join(' • ');
-}
 
 function formatCliUsageSummary(status?: CliStatus, isCodex?: boolean) {
     if (isCodex && status?.usage_windows?.length) {
@@ -241,6 +241,34 @@ function ElapsedTimer({ startTime }: { startTime: number }) {
         return () => clearInterval(id);
     }, [startTime]);
     return <span className="font-mono text-zinc-500 text-[10px] tabular-nums">{formatElapsed(elapsed)}</span>;
+}
+
+function AssistantResponseFooter({ msg, isLoading }: { msg: ChatMessage; isLoading: boolean }) {
+    if (isLoading || !msg.responseTime) return null;
+    const modelLabel = formatModelLabel(msg.model, msg.reasoningLevel, msg.profileName);
+    const modelTooltip = modelLabel ? buildModelDetailsLines({
+        model: msg.model,
+        reasoningLevel: msg.reasoningLevel,
+        provider: msg.provider,
+        profileName: msg.profileName,
+    }).join('\n') : undefined;
+
+    return (
+        <div className="flex items-center flex-wrap gap-1.5 mt-2 pt-2 border-t border-zinc-800/30">
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded-md border border-zinc-700/50 bg-zinc-800/40 text-[10px] font-mono tabular-nums text-zinc-500">
+                <svg className="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Ответ за {formatElapsed(msg.responseTime)}
+            </span>
+            {modelLabel && (
+                <span
+                    className="px-2 py-0.5 rounded-md border border-zinc-700/50 bg-zinc-800/40 text-[10px] font-mono text-zinc-500 truncate max-w-[280px]"
+                    title={modelTooltip}
+                >
+                    {modelLabel}
+                </span>
+            )}
+        </div>
+    );
 }
 
 type ChatCliProvider = 'qwen' | 'codex';
@@ -1420,15 +1448,8 @@ export const ChatArea = memo(function ChatArea({
                                                             </div>
                                                         </div>
                                                     )}
-                                                    {/* Время ответа — заметный бейдж после завершения */}
-                                                    {!isLoading && msg.responseTime && (
-                                                        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-zinc-800/30">
-                                                            <span className="flex items-center gap-1 px-2 py-0.5 rounded-md border border-zinc-700/50 bg-zinc-800/40 text-[10px] font-mono tabular-nums text-zinc-500">
-                                                                <svg className="w-3 h-3 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                                                                Ответ за {formatElapsed(msg.responseTime)}
-                                                            </span>
-                                                        </div>
-                                                    )}
+                                                    {/* Время ответа и модель — заметные бейджи после завершения */}
+                                                    <AssistantResponseFooter msg={msg} isLoading={isLoading} />
                                                 </>
                                             ) : (
                                                 // Fallback for older messages or user messages
@@ -1497,6 +1518,10 @@ export const ChatArea = memo(function ChatArea({
                                                             </div>
                                                         );
                                                     })()}
+                                                    {/* Время ответа и модель (fallback) */}
+                                                    {msg.role === 'assistant' && (
+                                                        <AssistantResponseFooter msg={msg} isLoading={isLoading} />
+                                                    )}
                                                 </>
                                             )}
 
@@ -1758,25 +1783,28 @@ export const ChatArea = memo(function ChatArea({
 
                     <div ref={dropdownRef} className="px-3 pb-2 pt-0 flex items-end gap-2 pointer-events-auto flex-nowrap w-full">
                         <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                            {/* Кнопка [+] (Опции) */}
-                            <div className="relative">
+                            {/* Выбор профиля ИИ */}
+                            <div className="relative flex-shrink-0">
                                 <button
                                     data-testid="profile-selector-trigger"
                                     onClick={() => setShowModelDropdown(!showModelDropdown)}
-                                    className="h-8 w-12 flex items-center justify-center gap-1 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:bg-zinc-800 transition-all active:scale-95 flex-shrink-0"
-                                    title="Настройки профиля и генерации"
+                                    className={`flex-shrink-0 flex items-center gap-1.5 text-[12px] font-medium px-2.5 h-8 rounded-xl transition-all border active:scale-95 ${showModelDropdown ? 'bg-zinc-800 text-zinc-200 border-zinc-700' : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-200'}`}
+                                    title={formatProfileTooltip(activeProfile, settings?.code_generation?.behavior_preset)}
                                 >
                                     {(() => {
                                         const behavior = settings?.code_generation?.behavior_preset;
-                                        if (behavior === 'maintenance') return <HardHat className="w-4 h-4 text-orange-400" />;
-                                        if (behavior === 'project') return <User className="w-4 h-4 text-blue-400" />;
-                                        return <Brain className="w-4 h-4 text-blue-400" />;
+                                        if (behavior === 'maintenance') return <HardHat className="w-4 h-4 text-orange-400 flex-shrink-0" />;
+                                        if (behavior === 'project') return <User className="w-4 h-4 text-blue-400 flex-shrink-0" />;
+                                        return <Brain className="w-4 h-4 text-blue-400 flex-shrink-0" />;
                                     })()}
-                                    <MoreHorizontal className="w-3.5 h-3.5 text-zinc-500" />
+                                    <span className="max-w-[180px] sm:max-w-[300px] md:max-w-[400px] truncate block">
+                                        {formatProfileModelLabel(activeProfile)}
+                                    </span>
+                                    <ChevronDown className={`w-3 h-3 transition-transform duration-200 ml-0.5 text-zinc-500 flex-shrink-0 ${showModelDropdown ? 'rotate-180 text-zinc-300' : ''}`} />
                                 </button>
 
                                 {showModelDropdown && (
-                                    <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#09090b] border border-[#27272a] rounded-xl shadow-2xl z-50 overflow-hidden py-1 animate-in slide-in-from-bottom-2 duration-200">
+                                    <div className="absolute bottom-full left-0 mb-2 w-80 sm:w-[420px] max-w-[calc(100vw-2rem)] bg-[#09090b] border border-[#27272a] rounded-xl shadow-2xl z-50 overflow-hidden py-1 animate-in slide-in-from-bottom-2 duration-200">
                                         {/* Behavior Preset Toggle (Перенесено в меню) */}
                                         {settings?.code_generation && (
                                             <>
@@ -1795,8 +1823,8 @@ export const ChatArea = memo(function ChatArea({
                                                             });
                                                         }}
                                                         className={`flex-1 flex items-center justify-center gap-1.5 p-2 rounded-md text-[11px] font-bold transition-all ${settings.code_generation.behavior_preset === 'project'
-                                                            ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30 shadow-sm'
-                                                            : 'bg-zinc-800/50 text-zinc-500 hover:bg-zinc-800'
+                                                            ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30 shadow-sm hover:bg-blue-500/25'
+                                                            : 'bg-zinc-800/50 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
                                                             }`}
                                                     >
                                                         <User className="w-3.5 h-3.5" /> СВОЙ
@@ -1812,8 +1840,8 @@ export const ChatArea = memo(function ChatArea({
                                                             });
                                                         }}
                                                         className={`flex-1 flex items-center justify-center gap-1.5 p-2 rounded-md text-[11px] font-bold transition-all ${settings.code_generation.behavior_preset === 'maintenance'
-                                                            ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30 shadow-sm'
-                                                            : 'bg-zinc-800/50 text-zinc-500 hover:bg-zinc-800'
+                                                            ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30 shadow-sm hover:bg-orange-500/25'
+                                                            : 'bg-zinc-800/50 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
                                                             }`}
                                                     >
                                                         <HardHat className="w-3.5 h-3.5" /> ЧУЖОЙ
@@ -1836,7 +1864,8 @@ export const ChatArea = memo(function ChatArea({
                                                             key={p.id}
                                                             data-testid={`profile-item-${p.id}`}
                                                             data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
-                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-blue-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            title={formatProfileTooltip(p)}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-blue-500/15 hover:bg-blue-500/25' : 'hover:bg-zinc-800/60'}`}
                                                             onClick={() => {
                                                                 setActiveProfile(p.id);
                                                                 setShowModelDropdown(false);
@@ -1862,7 +1891,7 @@ export const ChatArea = memo(function ChatArea({
                                                         const status = cliStatuses[p.id];
                                                         const isAuthenticated = status?.is_authenticated ?? false;
                                                         const isCodex = cliProvider === 'codex';
-                                                        const activeRowClass = isCodex ? 'bg-blue-500/10' : 'bg-amber-500/10';
+                                                        const activeRowClass = isCodex ? 'bg-blue-500/15 hover:bg-blue-500/25' : 'bg-amber-500/15 hover:bg-amber-500/25';
                                                         const activeTextClass = isCodex ? 'text-blue-400' : 'text-amber-400';
                                                         const activeCheckClass = isCodex ? 'text-blue-500' : 'text-amber-500';
                                                         return (
@@ -1870,7 +1899,8 @@ export const ChatArea = memo(function ChatArea({
                                                                 key={p.id}
                                                                 data-testid={`profile-item-${p.id}`}
                                                                 data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
-                                                                className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? activeRowClass : 'hover:bg-zinc-800/50'}`}
+                                                                title={formatProfileTooltip(p)}
+                                                                className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? activeRowClass : 'hover:bg-zinc-800/60'}`}
                                                                 onClick={() => {
                                                                     if (!isAuthenticated) {
                                                                         setActiveProfile(p.id);
@@ -1887,9 +1917,9 @@ export const ChatArea = memo(function ChatArea({
                                                                         {!isAuthenticated && <span className="text-[9px] bg-red-500/20 text-red-500 px-1 rounded border border-red-500/20">Login required</span>}
                                                                     </div>
                                                                     <div className="flex items-center gap-2">
-                                                                        <span className="text-[10px] text-zinc-500 truncate">{isCodex ? formatProfileSummary(p) : p.model}</span>
+                                                                        <span className="text-[10px] text-zinc-500 truncate">{formatProfileSummary(p)}</span>
                                                                         {isAuthenticated && formatCliUsageSummary(status, isCodex) && (
-                                                                            <span className="text-[9px] text-zinc-600 font-mono">
+                                                                            <span className="text-[9px] text-zinc-600 font-mono flex-shrink-0">
                                                                                 {formatCliUsageSummary(status, isCodex)}
                                                                             </span>
                                                                         )}
@@ -1914,7 +1944,8 @@ export const ChatArea = memo(function ChatArea({
                                                             key={p.id}
                                                             data-testid={`profile-item-${p.id}`}
                                                             data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
-                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-orange-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            title={formatProfileTooltip(p)}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-orange-500/15 hover:bg-orange-500/25' : 'hover:bg-zinc-800/60'}`}
                                                             onClick={() => {
                                                                 setActiveProfile(p.id);
                                                                 setShowModelDropdown(false);
@@ -1939,7 +1970,8 @@ export const ChatArea = memo(function ChatArea({
                                                             key={p.id}
                                                             data-testid={`profile-item-${p.id}`}
                                                             data-profile-active={activeProfileId === p.id ? 'true' : 'false'}
-                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-cyan-500/10' : 'hover:bg-zinc-800/50'}`}
+                                                            title={formatProfileTooltip(p)}
+                                                            className={`group px-3 py-2 flex items-center justify-between cursor-pointer transition-colors ${activeProfileId === p.id ? 'bg-cyan-500/15 hover:bg-cyan-500/25' : 'hover:bg-zinc-800/60'}`}
                                                             onClick={() => {
                                                                 setActiveProfile(p.id);
                                                                 setShowModelDropdown(false);

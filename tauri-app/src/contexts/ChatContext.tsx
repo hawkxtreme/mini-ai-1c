@@ -8,6 +8,8 @@ import { useSettings } from './SettingsContext';
 import { useProfiles } from './ProfileContext';
 import { useChatSessions, ChatSession } from '../hooks/useChatSessions';
 import { clampPayloadToBudget } from '../utils/contextPayload';
+import { resolveAssistantMessageMetadata } from '../utils/profileHelpers';
+import type { LLMProfile } from '../api/profiles';
 
 export type { ChatSession };
 
@@ -47,6 +49,10 @@ export interface ChatMessage {
     diagnostics?: BSLDiagnostic[];
     timestamp: number;
     responseTime?: number;
+    model?: string;
+    reasoningLevel?: string;
+    provider?: string;
+    profileName?: string;
     variant?: 'warning' | 'info' | 'compression';
     includeInPayload?: boolean;
 }
@@ -265,6 +271,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(false);
     const [streamStartTime, setStreamStartTime] = useState<number | null>(null);
     const streamStartTimeRef = useRef<number | null>(null);
+    const requestProfileRef = useRef<LLMProfile | null>(null);
+    const activeProfileRef = useRef(activeProfile);
+    activeProfileRef.current = activeProfile;
     const [chatStatus, setChatStatus] = useState('');
     const [currentIteration, setCurrentIteration] = useState(0);
     const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -390,6 +399,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         startDraft();
         setChatStatus('');
         setIsLoading(false);
+        requestProfileRef.current = null;
+        streamStartTimeRef.current = null;
+        setStreamStartTime(null);
         api.clearNaparnikSession().catch(() => {/* non-critical */});
     }, [startDraft]);
 
@@ -611,6 +623,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         flushNow();
                         const elapsed = streamStartTimeRef.current ? Date.now() - streamStartTimeRef.current : null;
                         streamStartTimeRef.current = null;
+                        const profile = requestProfileRef.current || activeProfileRef.current;
+                        requestProfileRef.current = null;
+                        const modelMetadata = resolveAssistantMessageMetadata(profile);
                         setStreamStartTime(null);
                         setIsLoading(false);
                         setChatStatus('');
@@ -633,11 +648,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             ) {
                                 filtered.pop();
                             }
-                            // Attach responseTime to last assistant message
-                            if (elapsed && filtered.length > 0) {
+                            // Attach responseTime and model metadata to last assistant message
+                            if (elapsed !== null && filtered.length > 0) {
                                 const lastIdx = filtered.length - 1;
                                 if (filtered[lastIdx].role === 'assistant') {
-                                    filtered[lastIdx] = { ...filtered[lastIdx], responseTime: elapsed };
+                                    filtered[lastIdx] = {
+                                        ...filtered[lastIdx],
+                                        responseTime: elapsed,
+                                        ...modelMetadata,
+                                    };
                                 }
                             }
                             return filtered;
@@ -684,7 +703,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const strategy = settings?.context_compress_strategy || 'summarize';
         // Threshold = 75% of the active model's context window.
         // Falls back to 32k if context_window_override is not set.
-        const contextWindow: number = activeProfile?.context_window_override ?? 32000;
+        const currentProfile = activeProfileRef.current ?? activeProfile;
+        const contextWindow: number = currentProfile?.context_window_override ?? 32000;
         const maxTokens: number = Math.round(contextWindow * 0.75);
 
         if (strategy === 'sliding_window') {
@@ -756,7 +776,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             payloadMessages,
             indicator,
         };
-    }, [settings]);
+    }, [settings, activeProfile]);
 
     const sendMessage = useCallback(async (content: string, codeContext?: string, diagnostics?: string[], displayContent?: string, configuratorCtx?: ConfiguratorTitleContext | null) => {
         if (!content.trim()) return;
@@ -803,6 +823,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        requestProfileRef.current = activeProfileRef.current || activeProfile || null;
         streamStartTimeRef.current = Date.now();
         setStreamStartTime(streamStartTimeRef.current);
 
@@ -860,9 +881,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const errorStr = `❌ Ошибка: ${err}`;
                 return [...withFixedTools, { id: generateId(), role: 'assistant', content: errorStr, parts: [{ type: 'text', content: errorStr }], timestamp: Date.now() }];
             });
+            requestProfileRef.current = null;
+            streamStartTimeRef.current = null;
+            setStreamStartTime(null);
             setIsLoading(false);
         }
-    }, [activeSessionId, buildCompressedPayload, createSession, isLoading, messages]);
+    }, [activeProfile, activeSessionId, buildCompressedPayload, createSession, isLoading, messages]);
 
     // Дренирование очереди: срабатывает когда isLoading переходит false
     // useEffect гарантирует что sendMessage уже видит isLoading=false
@@ -884,6 +908,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             setChatStatus('Stopped');
         } catch (e) {
             console.error("Failed to stop chat:", e);
+            requestProfileRef.current = null;
+            streamStartTimeRef.current = null;
+            setStreamStartTime(null);
         }
     }, []);
 
@@ -901,6 +928,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setChatStatus('');
         setIsLoading(false);
         setCurrentIteration(0);
+        requestProfileRef.current = null;
+        streamStartTimeRef.current = null;
+        setStreamStartTime(null);
         api.stopChat().catch(() => {/* non-critical */});
         startDraft();
         // Reset Naparnik conversation session if provider is OneCNaparnik
@@ -978,6 +1008,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setCompressionIndicator(null);
         currentBatchToolIds.current = [];
         setIsLoading(true);
+        requestProfileRef.current = activeProfileRef.current || activeProfile || null;
         streamStartTimeRef.current = Date.now();
         setStreamStartTime(streamStartTimeRef.current);
 
@@ -1029,9 +1060,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const errorMsg = `❌ Ошибка: ${err} `;
                 return [...withFixedTools, { id: generateId(), role: 'assistant', content: errorMsg, parts: [{ type: 'text', content: errorMsg }], timestamp: Date.now() }];
             });
+            requestProfileRef.current = null;
+            streamStartTimeRef.current = null;
+            setStreamStartTime(null);
             setIsLoading(false);
         }
-    }, [buildCompressedPayload, isLoading, messages]);
+    }, [activeProfile, buildCompressedPayload, isLoading, messages]);
 
     const removeQueuedMessage = useCallback((id: string) => {
         messageQueueService.remove(id);
